@@ -49,8 +49,6 @@ jobs:
             pyinstaller_sep: ":"
 
     env:
-      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
-      PLAYWRIGHT_DOWNLOAD_HOST: https://npmmirror.com/mirrors/playwright
       PYTHONIOENCODING: utf-8
 
     steps:
@@ -80,9 +78,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install -i "$env:PIP_INDEX_URL" --upgrade pip
-          python -m pip install -i "$env:PIP_INDEX_URL" -r requirements.txt
-          python -m pip install -i "$env:PIP_INDEX_URL" pyinstaller
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
         shell: pwsh
 
       - name: Install Playwright Chromium
@@ -157,7 +155,6 @@ jobs:
     if: ${{ github.event_name == 'push' || github.event.inputs.upload_to_oss == 'true' }}
 
     env:
-      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
       ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
       ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
       ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
@@ -192,7 +189,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install OSS uploader dependency
-        run: python -m pip install -i "$PIP_INDEX_URL" oss2
+        run: python -m pip install oss2
 
       - name: Upload packages to OSS
         env:
