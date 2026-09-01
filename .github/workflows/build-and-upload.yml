@@ -32,7 +32,7 @@ jobs:
             archive_ext: zip
             executable_name: stzy-paper-crawler.exe
             pyinstaller_sep: ";"
-          - os: macos-13
+          - os: macos-15-intel
             package_name: macos-x64
             archive_ext: zip
             executable_name: stzy-paper-crawler
