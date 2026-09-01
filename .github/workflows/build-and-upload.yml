@@ -130,24 +130,28 @@ jobs:
           cp 操作手册.md "packages/${PACKAGE}/"
           if [ "${{ runner.os }}" = "macOS" ]; then
             cat > "packages/${PACKAGE}/启动.command" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          cd "$(dirname "$0")"
-          chmod +x ./stzy-paper-crawler
-          exec ./stzy-paper-crawler
-          EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+chmod +x ./stzy-paper-crawler
+echo "正在启动 STZY Paper Crawler..."
+echo "请保持这个终端窗口打开；关闭窗口会停止本地服务。"
+exec ./stzy-paper-crawler
+EOF
             chmod +x "packages/${PACKAGE}/启动.command"
           fi
           cat > "packages/${PACKAGE}/启动说明.txt" <<'EOF'
-          macOS 请双击 启动.command。Windows 请双击 stzy-paper-crawler.exe。Linux 请运行 ./stzy-paper-crawler。
+macOS 请双击 启动.command。Windows 请双击 stzy-paper-crawler.exe。Linux 请运行 ./stzy-paper-crawler。
 
-          如果浏览器没有自动打开，请查看终端窗口中的 http://127.0.0.1 地址并手动复制到浏览器。
+启动后请保持终端窗口打开；关闭终端窗口会停止本地 Web 控制台。
 
-          完整 PDF 转图片需要系统存在 pdftoppm：
-          - macOS: brew install poppler
-          - Windows: winget install oschwartz10612.Poppler
-          - Debian/Ubuntu: sudo apt-get install -y poppler-utils
-          EOF
+如果浏览器没有自动打开，请查看终端窗口中的 http://127.0.0.1 地址并手动复制到浏览器。
+
+完整 PDF 转图片需要系统存在 pdftoppm：
+- macOS: brew install poppler
+- Windows: winget install oschwartz10612.Poppler
+- Debian/Ubuntu: sudo apt-get install -y poppler-utils
+EOF
 
       - name: Archive package on Windows
         if: runner.os == 'Windows'
