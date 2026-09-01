@@ -1,0 +1,201 @@
+name: Build and Upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version name, for example v0.1.0
+        required: true
+        default: v0.1.0
+      upload_to_oss:
+        description: Upload packages to Aliyun OSS
+        required: true
+        type: boolean
+        default: true
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.package_name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            package_name: windows-x64
+            archive_ext: zip
+            executable_name: stzy-paper-crawler.exe
+            pyinstaller_sep: ";"
+          - os: macos-13
+            package_name: macos-x64
+            archive_ext: zip
+            executable_name: stzy-paper-crawler
+            pyinstaller_sep: ":"
+          - os: macos-14
+            package_name: macos-arm64
+            archive_ext: zip
+            executable_name: stzy-paper-crawler
+            pyinstaller_sep: ":"
+          - os: ubuntu-latest
+            package_name: linux-x64
+            archive_ext: tar.gz
+            executable_name: stzy-paper-crawler
+            pyinstaller_sep: ":"
+
+    env:
+      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+      PLAYWRIGHT_DOWNLOAD_HOST: https://npmmirror.com/mirrors/playwright
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -i "$env:PIP_INDEX_URL" --upgrade pip
+          python -m pip install -i "$env:PIP_INDEX_URL" -r requirements.txt
+          python -m pip install -i "$env:PIP_INDEX_URL" pyinstaller
+        shell: pwsh
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install chromium
+
+      - name: Build executable
+        run: >-
+          python -m PyInstaller
+          --clean
+          --noconfirm
+          --onefile
+          --name stzy-paper-crawler
+          --collect-all nicegui
+          --collect-all fastapi
+          --collect-all starlette
+          --collect-all uvicorn
+          --collect-all playwright
+          --hidden-import stzy_app.ui.page
+          stzy_app/main.py
+
+      - name: Prepare package directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.value }}"
+          PACKAGE="stzy-paper-crawler-${VERSION}-${{ matrix.package_name }}"
+          mkdir -p "packages/${PACKAGE}"
+          cp "dist/${{ matrix.executable_name }}" "packages/${PACKAGE}/"
+          cp README.md "packages/${PACKAGE}/"
+          cp 操作手册.md "packages/${PACKAGE}/"
+          cat > "packages/${PACKAGE}/启动说明.txt" <<'EOF'
+          双击或运行 stzy-paper-crawler 即可启动本地 Web 控制台。
+
+          如果浏览器没有自动打开，请查看终端窗口中的 http://127.0.0.1 地址并手动复制到浏览器。
+
+          完整 PDF 转图片需要系统存在 pdftoppm：
+          - macOS: brew install poppler
+          - Windows: winget install oschwartz10612.Poppler
+          - Debian/Ubuntu: sudo apt-get install -y poppler-utils
+          EOF
+
+      - name: Archive package on Windows and macOS
+        if: runner.os != 'Linux'
+        shell: pwsh
+        run: |
+          $Version = "${{ steps.version.outputs.value }}"
+          $Package = "stzy-paper-crawler-$Version-${{ matrix.package_name }}"
+          New-Item -ItemType Directory -Force -Path release-packages | Out-Null
+          Compress-Archive -Path "packages/$Package" -DestinationPath "release-packages/$Package.zip" -Force
+
+      - name: Archive package on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.value }}"
+          PACKAGE="stzy-paper-crawler-${VERSION}-${{ matrix.package_name }}"
+          mkdir -p release-packages
+          tar -czf "release-packages/${PACKAGE}.tar.gz" -C packages "${PACKAGE}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stzy-paper-crawler-${{ steps.version.outputs.value }}-${{ matrix.package_name }}
+          path: release-packages/*
+          if-no-files-found: error
+
+  upload-oss:
+    name: Upload to Aliyun OSS
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' || github.event.inputs.upload_to_oss == 'true' }}
+
+    env:
+      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+      ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+      ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+      ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+      ALIYUN_OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
+      ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
+      ALIYUN_OSS_PUBLIC_BASE_URL: ${{ secrets.ALIYUN_OSS_PUBLIC_BASE_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded-artifacts
+          pattern: stzy-paper-crawler-${{ steps.version.outputs.value }}-*
+          merge-multiple: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install OSS uploader dependency
+        run: python -m pip install -i "$PIP_INDEX_URL" oss2
+
+      - name: Upload packages to OSS
+        env:
+          UPLOAD_DIR: downloaded-artifacts
+          OSS_PREFIX: stzy-paper-crawler/${{ steps.version.outputs.value }}
+        run: python scripts/upload_to_oss.py
