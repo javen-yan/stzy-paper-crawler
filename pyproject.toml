@@ -1,0 +1,22 @@
+[project]
+name = "stzy-paper-crawler"
+version = "0.1.0"
+description = "Local web tool for crawling STZY paper preview images."
+requires-python = ">=3.10"
+dependencies = [
+  "cairosvg>=2.7.0",
+  "nicegui>=2.0.0",
+  "pillow>=10.0.0",
+  "playwright>=1.45.0",
+  "pycryptodome>=3.20.0",
+  "pydantic>=2.7.0",
+  "pydantic-settings>=2.3.0",
+  "python-dotenv>=1.0.1",
+  "requests>=2.32.0",
+]
+
+[project.scripts]
+stzy-crawler = "stzy_app.main:main"
+
+[tool.ruff]
+line-length = 100

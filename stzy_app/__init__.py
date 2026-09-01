@@ -1,0 +1,2 @@
+"""STZY paper crawler application."""
+
