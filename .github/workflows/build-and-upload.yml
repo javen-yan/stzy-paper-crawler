@@ -137,11 +137,11 @@ jobs:
               printf '%s\n' 'echo "正在启动 STZY Paper Crawler..."'
               printf '%s\n' 'echo "请保持这个终端窗口打开；关闭窗口会停止本地服务。"'
               printf '%s\n' 'exec ./stzy-paper-crawler'
-            } > "packages/${PACKAGE}/启动.command"
-            chmod +x "packages/${PACKAGE}/启动.command"
+            } > "packages/${PACKAGE}/start-macos.command"
+            chmod +x "packages/${PACKAGE}/start-macos.command"
           fi
           {
-            printf '%s\n' 'macOS 请双击 启动.command。Windows 请双击 stzy-paper-crawler.exe。Linux 请运行 ./stzy-paper-crawler。'
+            printf '%s\n' 'macOS 请双击 start-macos.command。Windows 请双击 stzy-paper-crawler.exe。Linux 请运行 ./stzy-paper-crawler。'
             printf '%s\n' ''
             printf '%s\n' '启动后请保持终端窗口打开；关闭终端窗口会停止本地 Web 控制台。'
             printf '%s\n' ''
