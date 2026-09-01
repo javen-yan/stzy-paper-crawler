@@ -96,6 +96,23 @@ class RunnerFilterTest(unittest.TestCase):
         self.assertEqual(record.status, ResourceStatus.paid_unavailable)
         self.assertEqual(runner.stats.paid_skipped, 1)
 
+    def test_paid_resource_auth_error_is_compact(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.stats = type("Stats", (), {"paid_skipped": 0})()
+        runner.client = FakeClient([FakeAccount("过期账号")])
+        runner.api = FakeDownloadApi(
+            {"过期账号": RuntimeError("STZY API error -1: 暂未登录或token已经过期")},
+            {"过期账号": {"check_error": "STZY API error -1: 暂未登录或token已经过期"}},
+        )
+        runner._log = lambda message: None
+        record = ResourceRecord(resource_id="paid-1", resource_name="付费试卷", price=5)
+
+        url = CrawlRunner._download_pdf_url_with_accounts(runner, record)
+
+        self.assertEqual(url, "")
+        self.assertEqual(record.error, "登录态已失效，请重新登录或换一个可用账号")
+        self.assertNotIn("STZY API error", record.error)
+
     def test_paid_resource_with_vip_zero_price_is_not_marked_paid_unavailable(self) -> None:
         runner = CrawlRunner.__new__(CrawlRunner)
         runner.stats = type("Stats", (), {"paid_skipped": 0})()

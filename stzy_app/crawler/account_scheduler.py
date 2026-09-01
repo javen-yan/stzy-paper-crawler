@@ -53,14 +53,16 @@ class AccountScheduler:
                     headers=attempt.headers,
                 )
             except Exception as exc:  # noqa: BLE001
-                last_error = str(exc)
+                last_error = self.user_facing_error(str(exc))
                 diagnosis = attempt.diagnosis or self.download_diagnosis(
                     record.resource_id,
                     attempt.headers,
                 )
                 if diagnosis:
                     diagnostics.append({"account": attempt.name, **diagnosis})
-                    last_error = f"{last_error}；{self.format_download_diagnosis(diagnosis)}"
+                    diagnosis_text = self.format_download_diagnosis(diagnosis)
+                    if diagnosis_text and diagnosis_text not in last_error:
+                        last_error = f"{last_error}；{diagnosis_text}"
                 self._mark_failure(attempt.account, last_error)
                 self.on_log(f"账号 {attempt.name} 下载失败，尝试下一个账号：{last_error}")
                 continue
@@ -75,7 +77,9 @@ class AccountScheduler:
             )
             if diagnosis:
                 diagnostics.append({"account": attempt.name, **diagnosis})
-                last_error = f"{last_error}；{self.format_download_diagnosis(diagnosis)}"
+                diagnosis_text = self.format_download_diagnosis(diagnosis)
+                if diagnosis_text and diagnosis_text not in last_error:
+                    last_error = f"{last_error}；{diagnosis_text}"
             self._mark_failure(attempt.account, last_error)
             self.on_log(f"账号 {attempt.name} 下载失败，尝试下一个账号：{last_error}")
 
@@ -83,10 +87,10 @@ class AccountScheduler:
         if record.price > 0 and not has_zero_price_account:
             return DownloadUrlResult(
                 status=ResourceStatus.paid_unavailable,
-                error=f"所有账号均不可用或额度不足：{last_error}",
+                error=self.final_error(last_error),
                 paid_unavailable=1,
             )
-        return DownloadUrlResult(error=f"所有账号均不可用或额度不足：{last_error}")
+        return DownloadUrlResult(error=self.final_error(last_error))
 
     def scheduled_attempts(self, record: ResourceRecord) -> list[DownloadAttempt]:
         accounts = self.client.enabled_valid_accounts()
@@ -148,7 +152,7 @@ class AccountScheduler:
     @staticmethod
     def format_download_diagnosis(info: dict[str, object]) -> str:
         if info.get("check_error"):
-            return f"下载资格查询失败：{info['check_error']}"
+            return AccountScheduler.user_facing_error(str(info["check_error"]))
         parts = []
         if "price" in info:
             parts.append(f"实付 {info['price']}")
@@ -159,6 +163,25 @@ class AccountScheduler:
         if "rank" in info:
             parts.append(f"资源等级 {info['rank']}")
         return "，".join(parts) or "无下载资格明细"
+
+    @staticmethod
+    def user_facing_error(message: str) -> str:
+        if "暂未登录" in message or "token已经过期" in message or "请登录" in message:
+            return "登录态已失效"
+        if "额度不足" in message or "豆" in message:
+            return "账号额度不足"
+        if "无权限" in message:
+            return "账号无下载权限"
+        return message
+
+    @staticmethod
+    def final_error(last_error: str) -> str:
+        compact = AccountScheduler.user_facing_error(last_error)
+        if compact == "登录态已失效":
+            return "登录态已失效，请重新登录或换一个可用账号"
+        if compact in {"账号额度不足", "账号无下载权限"}:
+            return f"付费资源暂不可下载：{compact}"
+        return f"所有账号均不可用或额度不足：{compact}"
 
     def _mark_success(self, account: object | None) -> None:
         if account:
