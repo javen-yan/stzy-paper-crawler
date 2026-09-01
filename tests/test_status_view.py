@@ -1,7 +1,13 @@
 import unittest
 
 from stzy_app.crawler import CrawlStats
-from stzy_app.ui.page import status_view
+from stzy_app.ui.view_model import (
+    action_hint,
+    combo_metric,
+    current_result_empty_copy,
+    progress_value,
+    status_view,
+)
 
 
 class StatusViewTest(unittest.TestCase):
@@ -105,6 +111,30 @@ class StatusViewTest(unittest.TestCase):
             "已处理 1/13 份试卷：山东省青岛市高一英语期末试卷",
         )
         self.assertEqual(status_view(crawl, running=True)["count"], "1/13")
+
+    def test_crawl_progress_uses_resource_dimension(self) -> None:
+        stats = CrawlStats(
+            task_mode="crawl",
+            resources_total=4,
+            resources_completed=2,
+            running=True,
+        )
+
+        self.assertEqual(progress_value(stats, running=True), 0.5)
+        self.assertEqual(combo_metric(stats), ("2/4", "试卷进度"))
+
+    def test_estimate_ui_copy_does_not_show_download_records(self) -> None:
+        stats = CrawlStats(
+            task_mode="estimate",
+            outcome="estimated",
+            resources_seen=9,
+        )
+
+        self.assertEqual(action_hint(stats, running=False), "预估找到 9 份试卷，可以开始下载。")
+        self.assertEqual(
+            current_result_empty_copy("estimate"),
+            ("预估不会生成下载记录", "预估只更新匹配数量，不生成下载记录"),
+        )
 
 
 if __name__ == "__main__":

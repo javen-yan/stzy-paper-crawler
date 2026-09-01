@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from stzy_app.models import CrawlCombo
-from stzy_app.storage.db import connect
+from stzy_app.storage.db import connect, record_schema_version
 
 
 class CrawlState:
@@ -24,6 +24,7 @@ class CrawlState:
                 )
                 """
             )
+            record_schema_version(connection, "crawl_state", 1)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS resource_state (

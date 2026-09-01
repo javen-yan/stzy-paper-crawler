@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from stzy_app.storage.db import connect
+from stzy_app.storage.db import connect, record_schema_version
 
 
 class Preferences:
@@ -25,6 +25,7 @@ class Preferences:
                 )
                 """
             )
+            record_schema_version(connection, "preferences", 1)
 
     def get(self, key: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
         with connect(self.path) as connection:

@@ -129,7 +129,7 @@ body {
 .quick-filter-fields {
   display: grid;
   width: 100%;
-  grid-template-columns: minmax(96px, 0.75fr) minmax(120px, 1fr) minmax(120px, 1fr) minmax(150px, 1.1fr) minmax(120px, 1fr) 112px;
+  grid-template-columns: minmax(0, 0.8fr) repeat(4, minmax(0, 1fr)) minmax(96px, 112px);
   gap: 12px;
   align-items: end;
 }
@@ -140,6 +140,7 @@ body {
 }
 .quick-filter-button {
   height: 44px;
+  min-width: 0;
 }
 .advanced-filter {
   border: 1px solid var(--stzy-border);

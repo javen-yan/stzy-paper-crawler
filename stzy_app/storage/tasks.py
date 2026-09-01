@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from stzy_app.models import ResourceRecord
-from stzy_app.storage.db import connect
+from stzy_app.storage.db import connect, record_schema_version
 
 
 class TaskHistory:
@@ -69,6 +69,7 @@ class TaskHistory:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_task_resources_task_id ON task_resources(task_id)"
             )
+            record_schema_version(connection, "tasks", 1)
 
     def start(self, record: dict[str, Any]) -> None:
         now = datetime.now().isoformat(timespec="seconds")

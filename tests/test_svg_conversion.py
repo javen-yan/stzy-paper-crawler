@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stzy_app.crawler.runner import CrawlRunner
+from stzy_app.crawler.converters import DocumentConverter
 
 
 class SvgConversionTest(unittest.TestCase):
@@ -26,7 +26,7 @@ class SvgConversionTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertTrue(CrawlRunner._svg_needs_browser_renderer(svg_path))
+            self.assertTrue(DocumentConverter.svg_needs_browser_renderer(svg_path))
 
     def test_simple_svg_can_still_use_cairosvg(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -36,7 +36,7 @@ class SvgConversionTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertFalse(CrawlRunner._svg_needs_browser_renderer(svg_path))
+            self.assertFalse(DocumentConverter.svg_needs_browser_renderer(svg_path))
 
 
 if __name__ == "__main__":

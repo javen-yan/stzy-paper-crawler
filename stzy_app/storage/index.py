@@ -4,7 +4,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from stzy_app.models import ResourceRecord
-from stzy_app.storage.db import connect
+from stzy_app.storage.db import connect, record_schema_version
 
 
 class CsvIndex:
@@ -39,6 +39,7 @@ class CsvIndex:
                 )
                 """
             )
+            record_schema_version(connection, "resource_index", 1)
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_resources_updated_at ON resources(updated_at DESC)"
             )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import base64
+import time
 from pathlib import Path
 from typing import Any
 
@@ -113,14 +114,14 @@ class StzyHttpClient:
     def enabled_account_names(self) -> list[str]:
         return [
             account.name
-            for account in self.account_pool.enabled_accounts()
+            for account in self.account_pool.schedulable_accounts()
             if self.account_is_valid(account)
         ]
 
     def enabled_valid_accounts(self) -> list[AccountCredential]:
         return [
             account
-            for account in self.account_pool.enabled_accounts()
+            for account in self.account_pool.schedulable_accounts()
             if self.account_is_valid(account)
         ]
 
@@ -130,7 +131,12 @@ class StzyHttpClient:
     @classmethod
     def auth_is_valid(cls, *, cookie_header: str = "", access_token: str = "") -> bool:
         token = access_token or cls._token_from_cookie_header(cookie_header)
-        return bool(token)
+        if not token:
+            return False
+        expires_at = cls.token_expires_at(token)
+        if expires_at is None:
+            return True
+        return expires_at > time.time() + 60
 
     @staticmethod
     def _load_cookie_header(path: Path) -> str:
@@ -193,7 +199,8 @@ class StzyHttpClient:
 
     @classmethod
     def auth_expires_at(cls, *, cookie_header: str = "", access_token: str = "") -> float | None:
-        return None
+        token = access_token or cls._token_from_cookie_header(cookie_header)
+        return cls.token_expires_at(token)
 
     @staticmethod
     def _decode_jwt_payload(token: str) -> dict[str, Any]:

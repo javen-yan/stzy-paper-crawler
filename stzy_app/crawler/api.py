@@ -66,6 +66,19 @@ class StzyCrawlerApi:
         )
         return list(response.get("data") or [])
 
+    def check_download_info(
+        self,
+        resource_id: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        response = self.client.get_json(
+            f"/zw-resource/api/v1/tkResource/checkDownloadNum/{resource_id}",
+            headers=headers,
+        )
+        data = response.get("data") or {}
+        return data if isinstance(data, dict) else {}
+
     def download_resource_url(
         self,
         resource_id: str,

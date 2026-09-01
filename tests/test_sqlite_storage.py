@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+import sqlite3
 
 from stzy_app.models import CrawlCombo, ResourceRecord, ResourceStatus, TagOption
 from stzy_app.storage import (
@@ -32,6 +33,62 @@ class SqliteStorageTest(unittest.TestCase):
         self.assertEqual(len(reloaded.accounts), 1)
         self.assertEqual(reloaded.accounts[0].name, "账号A")
         self.assertEqual(reloaded.enabled_accounts()[0].cookie, "a=1")
+
+    def test_account_pool_persists_download_profile_and_health(self) -> None:
+        pool = AccountPool(self.db_path)
+        pool.upsert(AccountCredential(name="VIP账号", cookie="a=1", enabled=True))
+        pool.update_download_profile(
+            "VIP账号",
+            {"price": 0, "surplusNum": 92, "userType": 3, "rank": 3},
+        )
+        pool.mark_failure("VIP账号", "临时失败")
+
+        reloaded = AccountPool(self.db_path)
+        account = reloaded.accounts[0]
+
+        self.assertEqual(account.account_type_label, "VIP/高端")
+        self.assertEqual(account.last_price, 0)
+        self.assertEqual(account.surplus_num, 92)
+        self.assertEqual(account.fail_count, 1)
+        self.assertTrue(account.in_cooldown)
+
+        reloaded.mark_success("VIP账号")
+        recovered = AccountPool(self.db_path).accounts[0]
+
+        self.assertEqual(recovered.fail_count, 0)
+        self.assertFalse(recovered.in_cooldown)
+
+    def test_account_upsert_preserves_download_profile(self) -> None:
+        pool = AccountPool(self.db_path)
+        pool.upsert(AccountCredential(name="VIP账号", cookie="old=1", enabled=True))
+        pool.update_download_profile(
+            "VIP账号",
+            {"price": 0, "surplusNum": 92, "userType": 3, "rank": 3},
+        )
+        pool.mark_failure("VIP账号", "旧凭证失败")
+
+        pool.upsert(AccountCredential(name="VIP账号", cookie="new=1", enabled=True))
+        account = AccountPool(self.db_path).accounts[0]
+
+        self.assertEqual(account.cookie, "new=1")
+        self.assertEqual(account.account_type_label, "VIP/高端")
+        self.assertEqual(account.surplus_num, 92)
+        self.assertEqual(account.fail_count, 0)
+        self.assertFalse(account.in_cooldown)
+
+    def test_schema_versions_are_recorded(self) -> None:
+        AccountPool(self.db_path)
+        Preferences(self.db_path)
+        TaskHistory(self.db_path)
+
+        with sqlite3.connect(self.db_path) as connection:
+            rows = connection.execute(
+                "SELECT component, version FROM schema_versions ORDER BY component"
+            ).fetchall()
+
+        self.assertIn(("accounts", 2), rows)
+        self.assertIn(("preferences", 1), rows)
+        self.assertIn(("tasks", 1), rows)
 
     def test_crawl_state_persists_combo_and_resource_state(self) -> None:
         combo = CrawlCombo(

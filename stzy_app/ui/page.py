@@ -12,113 +12,30 @@ from stzy_app.crawler import CrawlRunner, CrawlStats, TagCatalog
 from stzy_app.http import StzyApiError, StzyHttpClient
 from stzy_app.models import CrawlFilters
 from stzy_app.storage import AccountCredential, AccountPool, Preferences, TaskHistory
+from stzy_app.ui.catalogs import (
+    ALL_VALUE,
+    DEFAULT_STUDY_PHASE_CODE,
+    STUDY_PHASES,
+    fetch_subject_options,
+    fetch_tag_catalogs,
+)
 from stzy_app.ui.file_actions import open_path, preview_first_file
 from stzy_app.ui.folder_picker import choose_directory
 from stzy_app.ui.state import UiState
 from stzy_app.ui.style import LIGHT_THEME_CSS
-
-ALL_VALUE = "__ALL__"
-STUDY_PHASES = {"200": "初中", "300": "高中"}
-DEFAULT_STUDY_PHASE_CODE = "200"
-
-
-def status_view(stats: CrawlStats, running: bool) -> dict[str, str | int]:
-    """Translate internal task state into user-facing product copy."""
-    completed = stats.total_combos and stats.completed_combos >= stats.total_combos
-    mode = stats.task_mode or "idle"
-    outcome = stats.outcome or ""
-    resource_total = stats.resources_total or stats.resources_seen
-    resource_progress = f"{stats.resources_completed}/{resource_total}" if resource_total else "0/0"
-
-    if running or stats.running:
-        if mode == "estimate":
-            return {
-                "stage": "运行中",
-                "detail": f"正在预估匹配试卷 {stats.completed_combos}/{stats.total_combos}",
-                "class": "running",
-                "count": stats.resources_seen,
-            }
-        current_name = f"：{stats.current_resource_name}" if stats.current_resource_name else ""
-        return {
-            "stage": "运行中",
-            "detail": f"已处理 {resource_progress} 份试卷{current_name}",
-            "class": "running",
-            "count": resource_progress,
-        }
-
-    if outcome == "estimated" or (mode == "estimate" and completed):
-        return {
-            "stage": "预览",
-            "detail": f"预估完成，找到 {stats.resources_seen} 份匹配试卷",
-            "class": "estimated",
-            "count": stats.resources_seen,
-        }
-    if outcome == "auth_expired":
-        return {
-            "stage": "结束",
-            "detail": "登录失效，请重新登录后再开始任务",
-            "class": "failed",
-            "count": stats.resources_seen,
-        }
-    if stats.paused or outcome == "paused":
-        return {
-            "stage": "结束",
-            "detail": f"已暂停，已处理 {stats.completed_combos}/{stats.total_combos} 个条件组合",
-            "class": "paused",
-            "count": stats.resources_seen,
-        }
-    if outcome == "partial" or (
-        stats.total_combos and (stats.failed or stats.preview_limited or stats.paid_skipped)
-    ):
-        issue_count = stats.failed + stats.preview_limited + stats.paid_skipped
-        return {
-            "stage": "结束",
-            "detail": f"部分完成，异常或未完整保存 {issue_count} 个",
-            "class": "partial",
-            "count": stats.resources_seen,
-        }
-    if outcome == "completed" or (mode == "crawl" and completed):
-        return {
-            "stage": "结束",
-            "detail": "下载完成",
-            "class": "done",
-            "count": stats.resources_seen,
-        }
-    return {
-        "stage": "预览",
-        "detail": "等待预估或开始下载",
-        "class": "idle",
-        "count": stats.resources_seen,
-    }
-
-
-def progress_percent_text(value: float) -> str:
-    percent = max(0, min(100, round(value * 100)))
-    return f"{percent}%"
-
-
-def fetch_subject_options() -> dict[str, dict[str, str]]:
-    local_settings = AppSettings()
-    client = StzyHttpClient(local_settings)
-    response = client.get_json("/zw-zzw/api/v1/zzw/tag/getStudyPhaseSubjectTagData")
-    subjects: dict[str, dict[str, str]] = {}
-    for phase in response.get("data") or []:
-        phase_code = str(phase.get("dictCode") or "")
-        subjects[phase_code] = {
-            str(item.get("dictCode")): str(item.get("dictName"))
-            for item in phase.get("childList") or []
-            if item.get("dictCode") and item.get("dictName")
-        }
-    return subjects
-
-
-def fetch_tag_catalogs() -> dict[str, TagCatalog]:
-    catalogs: dict[str, TagCatalog] = {}
-    for study_phase_code in STUDY_PHASES:
-        phase_settings = AppSettings(study_phase_code=study_phase_code)
-        catalogs[study_phase_code] = TagCatalog.fetch(StzyHttpClient(phase_settings), phase_settings)
-    return catalogs
-
+from stzy_app.ui.view_model import (
+    action_hint,
+    combo_metric as build_combo_metric,
+    current_result_empty_copy,
+    display_record_rows,
+    display_task_rows,
+    image_metric as build_image_metric,
+    issue_metric as build_issue_metric,
+    progress_percent_text,
+    progress_value as build_progress_value,
+    resource_metric as build_resource_metric,
+    status_view,
+)
 
 def build_ui() -> None:
     app_state = UiState()
@@ -177,7 +94,7 @@ def build_ui() -> None:
             subject_name=current_subject_options().get(subject_select.value, "不限"),
             list_delay_seconds=float(list_delay.value or 0.8),
             image_delay_seconds=float(image_delay.value or 0.3),
-            concurrency=int(concurrency.value or 1),
+            concurrency=settings.concurrency,
             access_token=None,
             cookie_header=None,
         )
@@ -236,38 +153,6 @@ def build_ui() -> None:
             "等级": rank_label,
             "保存位置": str(local_settings.output_dir),
         }
-
-    def history_status_label(status: str) -> str:
-        labels = {
-            "running": "运行中",
-            "estimated": "预估完成",
-            "completed": "下载完成",
-            "partial": "部分完成",
-            "failed": "失败",
-            "paused": "已暂停",
-            "auth_expired": "登录失效",
-        }
-        return labels.get(status, status or "-")
-
-    def display_task_rows(tasks: list[dict[str, object]]) -> list[dict[str, object]]:
-        rows = []
-        for task in tasks:
-            stats = task.get("stats") if isinstance(task.get("stats"), dict) else {}
-            filters = task.get("filters") if isinstance(task.get("filters"), dict) else {}
-            started_at = str(task.get("started_at") or task.get("created_at") or "")
-            local_dir = str(task.get("first_local_dir") or filters.get("保存位置") or "")
-            rows.append(
-                {
-                    "id": str(task.get("id") or ""),
-                    "started_at": started_at.replace("T", " ")[5:16] if started_at else "-",
-                    "brief": str(filters.get("brief") or "不限"),
-                    "status_label": history_status_label(str(task.get("status") or "")),
-                    "resources_seen": stats.get("resources_seen", 0),
-                    "images_downloaded": stats.get("images_downloaded", 0),
-                    "local_dir": local_dir,
-                }
-            )
-        return rows
 
     def run_crawler(
         mode: str,
@@ -519,14 +404,24 @@ def build_ui() -> None:
                 status_text = "停用"
             elif not is_valid:
                 status_text = "登录态过期"
+            elif account.in_cooldown:
+                status_text = "冷却中"
             else:
                 status_text = "可用"
+            quota_parts = []
+            if account.last_price is not None:
+                quota_parts.append(f"实付 {account.last_price:g}")
+            if account.surplus_num is not None:
+                quota_parts.append(f"余 {account.surplus_num}")
             rows.append(
                 {
                     "order": order,
                     "name": display_name,
                     "account_key": account.name,
                     "enabled": status_text,
+                    "type": account.account_type_label,
+                    "quota": " / ".join(quota_parts) or "-",
+                    "health": account.health_label,
                     "expires": expires_text,
                     "auth": "Cookie + Token"
                     if account.cookie and account.access_token
@@ -538,24 +433,6 @@ def build_ui() -> None:
     def refresh_accounts() -> None:
         account_table.rows = account_rows()
         account_table.update()
-
-    def display_record_rows(records: list[dict[str, object]]) -> list[dict[str, object]]:
-        labels = {
-            "completed": "完成",
-            "partial": "部分完成",
-            "skipped_paid": "跳过付费",
-            "paid_unavailable": "付费不可用",
-            "failed": "失败",
-            "pending": "等待中",
-        }
-        rows = []
-        for record in records:
-            row = dict(record)
-            status = str(row.get("status") or "")
-            row["status_label"] = labels.get(status, status or "-")
-            row["error_text"] = str(row.get("error") or "")
-            rows.append(row)
-        return rows
 
     def save_account() -> None:
         name = str(account_name.value or "").strip()
@@ -915,7 +792,7 @@ def build_ui() -> None:
                                     "secondary-action"
                                 ).props("outline no-caps")
                                 pause_button.disable()
-                            action_hint = ui.label("先预估确认数量，再开始下载；下载结果会进入历史任务。").classes(
+                            action_hint_label = ui.label("先预估确认数量，再开始下载；下载结果会进入历史任务。").classes(
                                 "task-action-hint"
                             )
 
@@ -1100,13 +977,6 @@ def build_ui() -> None:
                 step=0.1,
                 suffix="秒/次",
             ).classes("w-full")
-            concurrency = ui.number(
-                "并发",
-                value=int(numeric_value(strategy_settings.get("concurrency"), settings.concurrency)),
-                min=1,
-                max=3,
-                step=1,
-            ).classes("w-full")
         ui.label("完整优先：10 页内保存预览图，超过 10 页直接下载 PDF 转图。").classes(
             "muted text-sm"
         )
@@ -1117,7 +987,6 @@ def build_ui() -> None:
                 "max_pages_per_combo": int(max_pages.value) if max_pages.value else None,
                 "image_delay_seconds": float(image_delay.value or settings.image_delay_seconds),
                 "list_delay_seconds": float(list_delay.value or settings.list_delay_seconds),
-                "concurrency": int(concurrency.value or settings.concurrency),
             }
             preferences.set("strategy", saved)
             app_state.log("采集策略已保存")
@@ -1137,6 +1006,9 @@ def build_ui() -> None:
             {"name": "order", "label": "轮询", "field": "order", "align": "center"},
             {"name": "name", "label": "账号", "field": "name", "align": "left"},
             {"name": "enabled", "label": "状态", "field": "enabled"},
+            {"name": "type", "label": "属性", "field": "type"},
+            {"name": "quota", "label": "实付/额度", "field": "quota"},
+            {"name": "health", "label": "健康", "field": "health"},
             {"name": "expires", "label": "过期时间", "field": "expires"},
             {"name": "auth", "label": "凭证", "field": "auth"},
             {"name": "actions", "label": "操作", "field": "actions", "align": "right"},
@@ -1210,38 +1082,17 @@ def build_ui() -> None:
             estimate_button.disable()
             download_button.disable()
             pause_button.enable()
-            action_hint.set_text("任务正在运行，当前请求完成后可以暂停。")
+            action_hint_label.set_text(action_hint(stats, running))
         else:
             estimate_button.enable()
             download_button.enable()
             pause_button.disable()
-            if stats.task_mode == "estimate" and stats.outcome == "estimated":
-                action_hint.set_text(f"预估找到 {stats.resources_seen} 份试卷，可以开始下载。")
-            elif stats.task_mode == "crawl" and stats.phase == "finished":
-                action_hint.set_text("下载任务已结束，可在历史任务打开对应目录。")
-            else:
-                action_hint.set_text("先预估确认数量，再开始下载；下载结果会进入历史任务。")
-        if running and stats.task_mode == "crawl":
-            resource_total = stats.resources_total or stats.resources_seen
-            progress_value = (
-                min(1, stats.resources_completed / resource_total)
-                if resource_total
-                else 0
-            )
-        elif stats.task_mode == "crawl" and stats.phase == "finished":
-            progress_value = 1 if stats.resources_seen or stats.resources_total else 0
-        else:
-            progress_value = stats.completed_combos / stats.total_combos if stats.total_combos else 0
+            action_hint_label.set_text(action_hint(stats, running))
+        progress_value = build_progress_value(stats, running)
         progress.value = progress_value
         progress_text.set_text(progress_percent_text(progress_value))
         summary.set_text(detail_text)
-        resource_total = stats.resources_total or stats.resources_seen
-        if stats.task_mode == "crawl":
-            combo_value = f"{stats.resources_completed}/{resource_total}" if resource_total else "0/0"
-            combo_label = "试卷进度"
-        else:
-            combo_value = f"{stats.completed_combos}/{stats.total_combos}"
-            combo_label = "条件组合"
+        combo_value, combo_label = build_combo_metric(stats)
         combo_metric.set_content(
             f'<div class="metric"><div class="metric-value">{combo_value}</div>'
             f'<div class="metric-label">{combo_label}</div></div>'
@@ -1252,35 +1103,23 @@ def build_ui() -> None:
             f'<div class="status-detail">{detail_text}</div></div>'
             f'<strong>{headline_count}</strong></div>'
         )
-        resource_label = "预估试卷" if stats.task_mode == "estimate" else "匹配试卷"
-        resource_value = stats.resources_seen
-        if stats.task_mode == "crawl" and stats.resources_total:
-            resource_value = stats.resources_total
-        image_label = "未下载图片" if stats.task_mode == "estimate" else "已下载图片"
-        if stats.task_mode == "estimate":
-            skipped_value = str(stats.paid_skipped)
-            skipped_label = "预估不下载付费"
-        else:
-            skipped_value = f"{stats.paid_skipped}/{stats.preview_limited}"
-            skipped_label = "付费不可用/部分完成"
+        resource_value, resource_label = build_resource_metric(stats)
+        image_value, image_label = build_image_metric(stats)
+        skipped_value, skipped_label = build_issue_metric(stats)
         resource_metric.set_content(
             f'<div class="metric"><div class="metric-value">{resource_value}</div>'
             f'<div class="metric-label">{resource_label}</div></div>'
         )
         image_metric.set_content(
-            f'<div class="metric"><div class="metric-value">{stats.images_downloaded}</div>'
+            f'<div class="metric"><div class="metric-value">{image_value}</div>'
             f'<div class="metric-label">{image_label}</div></div>'
         )
         skipped_metric.set_content(
             f'<div class="metric"><div class="metric-value">{skipped_value}</div>'
             f'<div class="metric-label">{skipped_label}</div></div>'
         )
-        no_data_label = "预估不会生成下载记录" if stats.task_mode == "estimate" else "还没有下载记录"
-        current_result_tip.set_text(
-            "预估只更新匹配数量，不生成下载记录"
-            if stats.task_mode == "estimate"
-            else "显示本次下载生成的资源"
-        )
+        no_data_label, result_tip = current_result_empty_copy(stats.task_mode)
+        current_result_tip.set_text(result_tip)
         table.props(f'no-data-label="{no_data_label}"')
         table_records = [] if stats.task_mode == "estimate" else records
         table.rows = display_record_rows(table_records)

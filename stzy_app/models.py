@@ -83,3 +83,15 @@ class ResourceRecord:
     error: str = ""
     local_dir: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DownloadResult:
+    status: ResourceStatus
+    saved_pages: int = 0
+    expected_pages: int = 0
+    source: str = ""
+    local_dir: str = ""
+    error: str = ""
+    images_added: int = 0
+    paid_unavailable: int = 0
