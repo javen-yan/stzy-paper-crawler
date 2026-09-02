@@ -75,22 +75,11 @@ jobs:
             requirements.txt
             pyproject.toml
 
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/ms-playwright
-            ~/Library/Caches/ms-playwright
-            ~\AppData\Local\ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-playwright-
-
       - name: Install Linux system packages
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y poppler-utils
+          sudo apt-get install -y libglib2.0-0 libgl1
 
       - name: Install dependencies
         run: |
@@ -98,9 +87,6 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pyinstaller
         shell: pwsh
-
-      - name: Install Playwright Chromium
-        run: python -m playwright install chromium
 
       - name: Build executable
         run: >-
@@ -113,7 +99,7 @@ jobs:
           --collect-all fastapi
           --collect-all starlette
           --collect-all uvicorn
-          --collect-all playwright
+          --collect-all pymupdf
           --hidden-import stzy_app.ui.page
           stzy_app/main.py
 
@@ -239,10 +225,7 @@ jobs:
             printf '%s\n' ''
             printf '%s\n' '请不要删除 app 目录；启动脚本会从 app 目录加载程序和依赖。'
             printf '%s\n' ''
-            printf '%s\n' '完整 PDF 转图片需要系统存在 pdftoppm：'
-            printf '%s\n' '- macOS: brew install poppler'
-            printf '%s\n' '- Windows: winget install oschwartz10612.Poppler'
-            printf '%s\n' '- Debian/Ubuntu: sudo apt-get install -y poppler-utils'
+            printf '%s\n' 'PDF 转图片能力已内置在程序依赖中，无需额外安装 Poppler。'
           } > "packages/${PACKAGE}/启动说明.txt"
 
       - name: Archive package on Windows

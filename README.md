@@ -11,7 +11,6 @@
 安装脚本默认使用国内源：
 
 - Python 依赖：清华 PyPI 镜像 `https://pypi.tuna.tsinghua.edu.cn/simple`
-- Playwright Chromium：npmmirror 镜像 `https://npmmirror.com/mirrors/playwright`
 
 ### macOS
 
@@ -30,12 +29,6 @@ chmod +x install-macos.command
 
 安装完成后，双击 `start-windows.bat` 启动。
 
-如果需要下载完整 PDF 并转成图片，Windows 还需要 Poppler：
-
-```powershell
-winget install oschwartz10612.Poppler
-```
-
 ### Linux
 
 在终端运行：
@@ -51,12 +44,7 @@ chmod +x install-linux.sh
 ./start-linux.sh
 ```
 
-如果需要下载完整 PDF 并转成图片，Linux 需要 `pdftoppm`。Debian/Ubuntu 可安装：
-
-```bash
-sudo apt-get update
-sudo apt-get install -y poppler-utils
-```
+PDF 转图片能力由 Python 依赖内置提供，三端无需额外安装 Poppler。
 
 ## 手动安装
 
@@ -64,10 +52,19 @@ sudo apt-get install -y poppler-utils
 python -m venv .venv
 source .venv/bin/activate
 export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-export PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
 pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
-python -m playwright install chromium
 ```
+
+PDF 转图片和 SVG 转图片都由 Python 依赖处理，不需要额外安装浏览器内核或 Poppler。
+
+## 账号登录
+
+推荐在右上角“账号配置”里使用手机号登录。密码不填时默认使用手机号后六位。
+
+如果已经在官网浏览器里登录，也可以使用“高级导入”：打开官网 Network，复制 `user/detail`
+请求的 `fetch` 或 `cURL`，粘贴到工具里验证并保存。工具会保存真实请求里的
+Token、Cookie、User-Agent、Referer、Origin 和必要浏览器请求头；Token 过期时会先尝试
+用 Cookie 刷新。
 
 ## 启动
 

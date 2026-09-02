@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import sqlite3
+import json
 
 from stzy_app.models import CrawlCombo, ResourceRecord, ResourceStatus, TagOption
 from stzy_app.storage import (
@@ -26,13 +27,28 @@ class SqliteStorageTest(unittest.TestCase):
 
     def test_account_pool_persists_accounts_in_sqlite(self) -> None:
         pool = AccountPool(self.db_path)
-        pool.upsert(AccountCredential(name="账号A", cookie="a=1", enabled=True))
+        pool.upsert(
+            AccountCredential(
+                name="账号A",
+                cookie="a=1",
+                user_agent="Mozilla/5.0 Real Browser",
+                request_headers_json=json.dumps({"sec-ch-ua": '"Chromium";v="152"'}),
+                import_method="network_curl",
+                enabled=True,
+            )
+        )
 
         reloaded = AccountPool(self.db_path)
 
         self.assertEqual(len(reloaded.accounts), 1)
         self.assertEqual(reloaded.accounts[0].name, "账号A")
         self.assertEqual(reloaded.enabled_accounts()[0].cookie, "a=1")
+        self.assertEqual(reloaded.enabled_accounts()[0].user_agent, "Mozilla/5.0 Real Browser")
+        self.assertEqual(
+            reloaded.enabled_accounts()[0].request_headers["sec-ch-ua"],
+            '"Chromium";v="152"',
+        )
+        self.assertEqual(reloaded.enabled_accounts()[0].import_method, "network_curl")
 
     def test_account_pool_persists_download_profile_and_health(self) -> None:
         pool = AccountPool(self.db_path)
@@ -86,7 +102,7 @@ class SqliteStorageTest(unittest.TestCase):
                 "SELECT component, version FROM schema_versions ORDER BY component"
             ).fetchall()
 
-        self.assertIn(("accounts", 2), rows)
+        self.assertIn(("accounts", 4), rows)
         self.assertIn(("preferences", 1), rows)
         self.assertIn(("tasks", 1), rows)
 

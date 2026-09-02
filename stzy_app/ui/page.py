@@ -6,7 +6,11 @@ from pathlib import Path
 
 from nicegui import background_tasks, run, ui
 
-from stzy_app.browser import capture_login_state
+from stzy_app.auth import (
+    COOKIE_TOKEN_CONSOLE_SCRIPT,
+    credential_from_auth_import,
+    login_with_phone_password,
+)
 from stzy_app.config import AppSettings, settings
 from stzy_app.crawler import CrawlRunner, CrawlStats, TagCatalog
 from stzy_app.http import StzyApiError, StzyHttpClient
@@ -62,6 +66,8 @@ def build_ui() -> None:
 
     preferences = Preferences(settings.task_history_file)
     strategy_settings = preferences.get("strategy")
+    history_page = 1
+    history_page_size = 10
 
     def catalog() -> TagCatalog:
         return catalogs.get(study_phase.value, TagCatalog({}))
@@ -335,62 +341,49 @@ def build_ui() -> None:
             app_state.runner.stop()
             app_state.log("收到暂停请求，当前请求完成后暂停")
 
-    async def login() -> None:
-        ui.notify("浏览器将打开；登录完成后关闭该窗口保存 Cookie")
+    async def phone_login() -> None:
+        phone = str(account_phone.value or "").strip()
+        password = str(account_password.value or "").strip()
+        if not phone:
+            ui.notify("请填写手机号", type="warning")
+            return
         local_settings = current_settings()
         try:
-            await run.io_bound(capture_login_state, local_settings)
+            credential = await run.io_bound(login_with_phone_password, local_settings, phone, password)
         except Exception as exc:  # noqa: BLE001
-            app_state.log(f"登录态保存失败：{exc}")
-            ui.notify("登录态保存失败，请重新登录", type="negative")
+            app_state.log(f"手机号登录失败：{exc}")
+            ui.notify(f"手机号登录失败：{exc}", type="negative")
             return
-        cookie_header = StzyHttpClient._load_cookie_header(local_settings.cookie_file)
-        access_token = StzyHttpClient._load_access_token(local_settings.cookie_file)
-        if not cookie_header and not access_token:
-            app_state.log("没有捕获到 Cookie，请确认登录后再关闭浏览器窗口")
-            ui.notify("没有捕获到登录态，请登录完成后再关闭窗口", type="warning")
-            return
-        account_label = StzyHttpClient.account_label_from_auth(
-            cookie_header=cookie_header,
-            access_token=access_token,
-        )
-        account_name_value = f"浏览器登录-{account_label}" if account_label else "浏览器登录"
-        AccountPool(local_settings.account_pool_file).upsert(
-            AccountCredential(
-                name=account_name_value,
-                cookie=cookie_header,
-                access_token=access_token,
-                enabled=True,
-            )
-        )
+        AccountPool(local_settings.account_pool_file).upsert(credential)
+        account_phone.value = ""
+        account_password.value = ""
         refresh_accounts()
-        app_state.log(f"登录态已保存：{account_name_value}")
-        ui.notify(f"登录态已保存：{account_name_value}", type="positive")
+        app_state.log(f"手机号登录成功：{credential.name}")
+        ui.notify(f"手机号登录成功：{credential.name}", type="positive")
 
     def account_pool_path() -> Path:
         return settings.account_pool_file
 
     def account_rows() -> list[dict[str, str]]:
         pool = AccountPool(account_pool_path())
+        client = StzyHttpClient(current_settings())
         enabled_index = 0
         rows = []
         for account in pool.accounts:
-            is_valid = StzyHttpClient.auth_is_valid(
+            display_name = account.name
+            can_auto_login = bool(account.login_phone)
+            token_locally_valid = StzyHttpClient.auth_is_valid(
                 cookie_header=account.cookie,
                 access_token=account.access_token,
             )
+            is_valid = False
+            if account.enabled:
+                is_valid = client.account_is_valid(account)
+
             order = "-"
             if account.usable and is_valid:
                 enabled_index += 1
                 order = str(enabled_index)
-            display_name = account.name
-            if account.name == "浏览器登录":
-                label = StzyHttpClient.account_label_from_auth(
-                    cookie_header=account.cookie,
-                    access_token=account.access_token,
-                )
-                if label:
-                    display_name = f"浏览器登录-{label}"
             expires_at = StzyHttpClient.auth_expires_at(
                 cookie_header=account.cookie,
                 access_token=account.access_token,
@@ -402,12 +395,16 @@ def build_ui() -> None:
             )
             if not account.enabled:
                 status_text = "停用"
-            elif not is_valid:
-                status_text = "登录态过期"
             elif account.in_cooldown:
                 status_text = "冷却中"
-            else:
+            elif is_valid:
                 status_text = "可用"
+            elif account.cookie and not token_locally_valid and not can_auto_login:
+                status_text = "失效"
+            elif account.cookie and not token_locally_valid:
+                status_text = "需刷新"
+            else:
+                status_text = "失效"
             quota_parts = []
             if account.last_price is not None:
                 quota_parts.append(f"实付 {account.last_price:g}")
@@ -423,39 +420,102 @@ def build_ui() -> None:
                     "quota": " / ".join(quota_parts) or "-",
                     "health": account.health_label,
                     "expires": expires_text,
-                    "auth": "Cookie + Token"
-                    if account.cookie and account.access_token
-                    else ("Cookie" if account.cookie else "Token"),
+                    "auth": account_auth_label(account),
                 }
             )
         return rows
 
-    def refresh_accounts() -> None:
-        account_table.rows = account_rows()
-        account_table.update()
+    def account_auth_label(account: AccountCredential) -> str:
+        if account.login_phone:
+            return "手机号"
+        if account.import_method == "network_fetch":
+            return "Network fetch"
+        if account.import_method == "network_curl":
+            return "Network cURL"
+        if account.import_method == "token":
+            return "Token"
+        if account.cookie and account.access_token:
+            return "Cookie + Token"
+        return "Cookie" if account.cookie else "Token"
 
-    def save_account() -> None:
+    @ui.refreshable
+    def account_list() -> None:
+        rows = account_rows()
+        with ui.element("div").classes("account-list"):
+            if not rows:
+                with ui.element("div").classes("account-empty"):
+                    ui.icon("person_add").classes("account-empty-icon")
+                    ui.label("暂无账号").classes("account-empty-title")
+                    ui.label("可使用手机号登录，或在高级导入里粘贴 Token。").classes(
+                        "muted text-sm"
+                    )
+                return
+            for row in rows:
+                status_class = {
+                    "可用": "is-ok",
+                    "停用": "is-muted",
+                    "需刷新": "is-warn",
+                    "失效": "is-danger",
+                    "冷却中": "is-warn",
+                }.get(row["enabled"], "is-muted")
+                with ui.element("div").classes("account-item"):
+                    with ui.element("div").classes("account-order-pill"):
+                        ui.label(row["order"])
+                    with ui.element("div").classes("account-identity"):
+                        ui.label(row["name"]).classes("account-name-main")
+                        with ui.element("div").classes("account-meta-line"):
+                            for text in (
+                                row["type"],
+                                row["quota"],
+                                row["health"],
+                                f"过期 {row['expires']}",
+                            ):
+                                ui.label(text).classes("account-meta-chip")
+                    ui.label(row["enabled"]).classes(f"account-status {status_class}")
+                    ui.label(row["auth"]).classes("account-auth")
+                    with ui.row().classes("account-row-actions items-center"):
+                        ui.button(
+                            icon="play_arrow" if row["enabled"] == "停用" else "pause",
+                            on_click=lambda _row=row: toggle_account(_row["account_key"]),
+                        ).props(
+                            f"flat round dense title={'启用' if row['enabled'] == '停用' else '停用'}"
+                        )
+                        ui.button(
+                            icon="delete",
+                            on_click=lambda _row=row: remove_named_account(_row["account_key"]),
+                        ).props("flat round dense color=negative title=删除")
+
+    def refresh_accounts() -> None:
+        account_list.refresh()
+
+    async def save_account() -> None:
         name = str(account_name.value or "").strip()
-        if not name:
-            ui.notify("请填写账号名称", type="warning")
+        auth_value = str(account_auth_value.value or "").strip()
+        if not auth_value:
+            ui.notify("请粘贴 Token、Cookie 或脚本复制的 JSON", type="warning")
             return
-        if not account_cookie.value and not account_token.value:
-            ui.notify("请填写 Cookie 或 Token", type="warning")
-            return
-        pool = AccountPool(account_pool_path())
-        pool.upsert(
-            AccountCredential(
+        local_settings = current_settings()
+        try:
+            credential = await run.io_bound(
+                credential_from_auth_import,
+                auth_value,
                 name=name,
-                cookie=str(account_cookie.value or "").strip(),
-                access_token=str(account_token.value or "").strip(),
                 enabled=bool(account_enabled.value),
+                settings=local_settings,
             )
-        )
+        except ValueError as exc:
+            ui.notify(str(exc), type="warning")
+            return
+        except Exception as exc:  # noqa: BLE001
+            ui.notify(f"官网接口验证失败：{exc}", type="negative")
+            return
+        pool = AccountPool(local_settings.account_pool_file)
+        pool.upsert(credential)
         account_name.value = ""
-        account_cookie.value = ""
-        account_token.value = ""
+        account_auth_value.value = ""
         refresh_accounts()
-        ui.notify("账号已保存", type="positive")
+        app_state.log(f"高级导入账号已验证并保存：{credential.name}")
+        ui.notify("账号已验证并保存", type="positive")
 
     def remove_named_account(name: str) -> None:
         if not name:
@@ -473,15 +533,6 @@ def build_ui() -> None:
                 refresh_accounts()
                 ui.notify("账号状态已更新")
                 return
-
-    def handle_account_action(event) -> None:
-        payload = event.args or {}
-        action = payload.get("action")
-        name = str(payload.get("account_key") or payload.get("name") or "")
-        if action == "toggle":
-            toggle_account(name)
-        elif action == "delete":
-            remove_named_account(name)
 
     def set_output_dir(path: Path) -> None:
         output_dir.value = str(path)
@@ -502,6 +553,11 @@ def build_ui() -> None:
         if open_path(path):
             return
         ui.notify("目录不存在", type="warning")
+
+    def set_history_page(page: int) -> None:
+        nonlocal history_page
+        history_page = max(1, page)
+        refresh()
 
     def preview_directory(path_value: str | Path) -> None:
         path = Path(path_value)
@@ -833,6 +889,19 @@ def build_ui() -> None:
                             </q-td>
                             """,
                         )
+                        with ui.row().classes("history-pagination w-full items-center justify-between"):
+                            history_page_label = ui.label("第 1 / 1 页").classes("muted text-xs")
+                            with ui.row().classes("items-center gap-2"):
+                                history_prev_button = ui.button(
+                                    "上一页",
+                                    icon="chevron_left",
+                                    on_click=lambda: set_history_page(history_page - 1),
+                                ).props("flat dense no-caps")
+                                history_next_button = ui.button(
+                                    "下一页",
+                                    icon="chevron_right",
+                                    on_click=lambda: set_history_page(history_page + 1),
+                                ).props("flat dense no-caps")
 
                 with ui.column().classes("panel progress-panel p-5 gap-4"):
                     with ui.row().classes("w-full items-center justify-between"):
@@ -1006,78 +1075,77 @@ def build_ui() -> None:
             "unelevated no-caps color=primary"
         )
 
-    with ui.dialog() as account_dialog, ui.card().classes("modal-card gap-4"):
+    with ui.dialog() as account_dialog, ui.card().classes("modal-card account-modal-card gap-4"):
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("账号配置").classes("section-title")
             ui.button(icon="close", on_click=account_dialog.close).props("flat round dense")
-        ui.label("启用账号会按顺序轮询使用。").classes("muted text-sm")
-        account_columns = [
-            {"name": "order", "label": "轮询", "field": "order", "align": "center"},
-            {"name": "name", "label": "账号", "field": "name", "align": "left"},
-            {"name": "enabled", "label": "状态", "field": "enabled"},
-            {"name": "type", "label": "属性", "field": "type"},
-            {"name": "quota", "label": "实付/额度", "field": "quota"},
-            {"name": "health", "label": "健康", "field": "health"},
-            {"name": "expires", "label": "过期时间", "field": "expires"},
-            {"name": "auth", "label": "凭证", "field": "auth"},
-            {"name": "actions", "label": "操作", "field": "actions", "align": "right"},
-        ]
-        account_table = ui.table(columns=account_columns, rows=[], row_key="name").classes(
-            "compact-table account-table w-full"
-        )
-        account_table.props('flat bordered dense no-data-label="暂无账号"')
-        account_table.on("account-action", handle_account_action)
-        account_table.add_slot(
-            "body-cell-actions",
-            """
-            <q-td :props="props">
-              <q-btn
-                dense flat no-caps size="sm"
-                :label="props.row.enabled === '停用' ? '启用' : '停用'"
-                @click="$parent.$emit('account-action', {
-                  action: 'toggle',
-                  account_key: props.row.account_key
-                })"
-              />
-              <q-btn
-                dense flat no-caps size="sm" color="negative" label="删除"
-                @click="$parent.$emit('account-action', {
-                  action: 'delete',
-                  account_key: props.row.account_key
-                })"
-              />
-            </q-td>
-            """,
-        )
-        with ui.element("div").classes("account-form"):
-            with ui.row().classes("w-full items-center justify-between"):
-                ui.label("新增账号").classes("section-title")
-                account_enabled = ui.checkbox("启用", value=True).classes("account-enabled")
-            account_name = ui.input("账号名称", placeholder="例如：主账号").classes("w-full")
-            with ui.element("div").classes("credential-grid"):
-                account_cookie = ui.textarea(
-                    "Cookie",
-                    placeholder="粘贴浏览器 Cookie；也可以直接点击下方登录获取",
-                ).props("autogrow outlined").classes("w-full credential-input")
-                account_token = ui.input(
-                    "Access Token",
-                    placeholder="可选；有 Token 时优先使用",
-                ).props("type=password outlined").classes("w-full")
-            with ui.row().classes("account-actions w-full items-center justify-between"):
-                ui.button("登录获取 Cookie", icon="login", on_click=login).classes(
-                    "secondary-action"
-                ).props("outline no-caps")
-                with ui.row().classes("items-center gap-2"):
-                    ui.button("清空输入", icon="backspace", on_click=lambda: (
-                        account_name.set_value(""),
-                        account_cookie.set_value(""),
-                        account_token.set_value(""),
-                    )).props("flat no-caps")
-                    ui.button("保存账号", icon="save", on_click=save_account).classes(
-                        "primary-action"
-                    ).props("unelevated no-caps color=primary")
+        with ui.element("div").classes("account-modal-body"):
+            ui.label("启用账号会按顺序轮询使用。").classes("muted text-sm")
+            account_list()
+
+            with ui.tabs().classes("account-tabs") as account_tabs:
+                phone_tab = ui.tab("手机号登录", icon="phone_iphone")
+                manual_tab = ui.tab("高级导入", icon="vpn_key")
+            with ui.tab_panels(account_tabs, value=phone_tab).classes("account-panels"):
+                with ui.tab_panel(phone_tab).classes("account-panel"):
+                    with ui.element("div").classes("account-form"):
+                        with ui.row().classes("w-full items-center justify-between"):
+                            ui.label("手机号登录").classes("section-title")
+                            ui.label("保存后任务会使用该手机号凭证；密码不填时默认使用手机号后六位").classes(
+                                "muted text-sm"
+                            )
+                        with ui.element("div").classes("credential-grid two-cols"):
+                            account_phone = ui.input("手机号", placeholder="请输入 11 位手机号").props(
+                                "outlined"
+                            ).classes("w-full")
+                            account_password = ui.input("密码", placeholder="可不填，默认手机号后六位").props(
+                                "type=password outlined"
+                            ).classes("w-full")
+                        with ui.row().classes("account-actions w-full items-center justify-end"):
+                            ui.button("登录并保存", icon="login", on_click=phone_login).classes(
+                                "primary-action"
+                            ).props("unelevated no-caps color=primary")
+
+                with ui.tab_panel(manual_tab).classes("account-panel"):
+                    with ui.element("div").classes("account-form"):
+                        with ui.row().classes("w-full items-center justify-between"):
+                            ui.label("Network 请求导入").classes("section-title")
+                            account_enabled = ui.checkbox("启用", value=True).classes(
+                                "account-enabled"
+                            )
+                        ui.label(
+                            "推荐从官网 Network 里复制 user/detail 或资源接口的 fetch/cURL；工具会解析真实 token、Cookie、User-Agent 和必要请求头。"
+                        ).classes("muted text-sm")
+                        with ui.expansion(
+                            "简易 Console Token 脚本（不推荐，拿不到完整登录态时请改用 Network）",
+                            icon="code",
+                        ).classes("console-script-box"):
+                            ui.textarea(value=COOKIE_TOKEN_CONSOLE_SCRIPT).props(
+                                "readonly outlined"
+                            ).classes("w-full credential-input console-script")
+                        ui.label(
+                            "操作：打开 stzy.com 并确认已登录，按 F12 进入 Network，刷新页面，找到 user/detail 请求，右键 Copy as fetch 或 Copy as cURL 后粘贴到下面。"
+                        ).classes("muted text-sm")
+                        account_name = ui.input(
+                            "账号名称", placeholder="可选；不填会从 Token 识别"
+                        ).props("outlined").classes("w-full")
+                        account_auth_value = ui.textarea(
+                            "fetch / cURL / Token / Cookie / JSON",
+                            placeholder="优先粘贴 Network 复制的 fetch(...) 或 curl -H ...；也兼容纯 Token、整段 Cookie、JSON。",
+                        ).props("outlined").classes("w-full credential-input auth-import-box")
+                        with ui.row().classes("account-actions w-full items-center justify-end"):
+                            ui.button("清空输入", icon="backspace", on_click=lambda: (
+                                account_name.set_value(""),
+                                account_auth_value.set_value(""),
+                            )).props("flat no-caps")
+                            ui.button(
+                                "验证并保存",
+                                icon="verified_user",
+                                on_click=save_account,
+                            ).classes("primary-action").props("unelevated no-caps color=primary")
 
     def refresh() -> None:
+        nonlocal history_page
         logs, records, stats, running = app_state.snapshot()
         view = status_view(stats, running)
         stage_text = str(view["stage"])
@@ -1133,8 +1201,25 @@ def build_ui() -> None:
         table_records = [] if stats.task_mode == "estimate" else records
         table.rows = display_record_rows(table_records)
         table.update()
-        task_table.rows = display_task_rows(TaskHistory(task_history_path()).recent(20, mode="crawl"))
+        history_tasks = TaskHistory(task_history_path()).recent(200, mode="crawl")
+        total_history = len(history_tasks)
+        total_pages = max(1, (total_history + history_page_size - 1) // history_page_size)
+        history_page = min(max(1, history_page), total_pages)
+        history_start = (history_page - 1) * history_page_size
+        history_end = history_start + history_page_size
+        task_table.rows = display_task_rows(history_tasks[history_start:history_end])
         task_table.update()
+        history_page_label.set_text(f"第 {history_page} / {total_pages} 页，共 {total_history} 条")
+        if total_history <= history_page_size:
+            history_prev_button.disable()
+            history_next_button.disable()
+        else:
+            history_prev_button.enable()
+            history_next_button.enable()
+            if history_page <= 1:
+                history_prev_button.disable()
+            if history_page >= total_pages:
+                history_next_button.disable()
         escaped = [line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") for line in logs]
         log_label.set_content("<br>".join(escaped[-120:]) or "等待任务启动")
 

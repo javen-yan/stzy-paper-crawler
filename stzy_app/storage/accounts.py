@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Any
 
 from stzy_app.storage.db import connect, record_schema_version
 
@@ -14,6 +15,11 @@ class AccountCredential:
     name: str
     cookie: str = ""
     access_token: str = ""
+    user_agent: str = ""
+    request_headers_json: str = ""
+    import_method: str = ""
+    login_phone: str = ""
+    login_password: str = ""
     enabled: bool = True
     user_type: int | None = None
     rank: int | None = None
@@ -26,7 +32,22 @@ class AccountCredential:
 
     @property
     def usable(self) -> bool:
-        return self.enabled and bool(self.cookie or self.access_token)
+        return self.enabled and bool(self.cookie or self.access_token or self.login_phone)
+
+    @property
+    def request_headers(self) -> dict[str, str]:
+        try:
+            data = json.loads(self.request_headers_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        headers = {}
+        for key, value in data.items():
+            if value is None:
+                continue
+            headers[str(key).lower()] = str(value)
+        return headers
 
     @property
     def in_cooldown(self) -> bool:
@@ -77,6 +98,11 @@ class AccountPool:
                     name TEXT PRIMARY KEY,
                     cookie TEXT NOT NULL DEFAULT '',
                     access_token TEXT NOT NULL DEFAULT '',
+                    user_agent TEXT NOT NULL DEFAULT '',
+                    request_headers_json TEXT NOT NULL DEFAULT '',
+                    import_method TEXT NOT NULL DEFAULT '',
+                    login_phone TEXT NOT NULL DEFAULT '',
+                    login_password TEXT NOT NULL DEFAULT '',
                     enabled INTEGER NOT NULL DEFAULT 1,
                     user_type INTEGER,
                     rank INTEGER,
@@ -97,6 +123,11 @@ class AccountPool:
             }
             migrations = {
                 "user_type": "ALTER TABLE accounts ADD COLUMN user_type INTEGER",
+                "user_agent": "ALTER TABLE accounts ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''",
+                "request_headers_json": "ALTER TABLE accounts ADD COLUMN request_headers_json TEXT NOT NULL DEFAULT ''",
+                "import_method": "ALTER TABLE accounts ADD COLUMN import_method TEXT NOT NULL DEFAULT ''",
+                "login_phone": "ALTER TABLE accounts ADD COLUMN login_phone TEXT NOT NULL DEFAULT ''",
+                "login_password": "ALTER TABLE accounts ADD COLUMN login_password TEXT NOT NULL DEFAULT ''",
                 "rank": "ALTER TABLE accounts ADD COLUMN rank INTEGER",
                 "last_price": "ALTER TABLE accounts ADD COLUMN last_price REAL",
                 "surplus_num": "ALTER TABLE accounts ADD COLUMN surplus_num INTEGER",
@@ -108,14 +139,15 @@ class AccountPool:
             for column, statement in migrations.items():
                 if column not in columns:
                     connection.execute(statement)
-            record_schema_version(connection, "accounts", 2)
+            record_schema_version(connection, "accounts", 4)
 
     def _load_db(self) -> list[AccountCredential]:
         with connect(self.path) as connection:
             rows = connection.execute(
                 """
                 SELECT
-                    name, cookie, access_token, enabled, user_type, rank, last_price,
+                    name, cookie, access_token, user_agent, request_headers_json, import_method,
+                    login_phone, login_password, enabled, user_type, rank, last_price,
                     surplus_num, fail_count, last_error, cooldown_until, last_checked_at
                 FROM accounts
                 ORDER BY created_at, name
@@ -126,6 +158,11 @@ class AccountPool:
                 name=str(row["name"]),
                 cookie=str(row["cookie"] or ""),
                 access_token=str(row["access_token"] or ""),
+                user_agent=str(row["user_agent"] or ""),
+                request_headers_json=str(row["request_headers_json"] or ""),
+                import_method=str(row["import_method"] or ""),
+                login_phone=str(row["login_phone"] or ""),
+                login_password=str(row["login_password"] or ""),
                 enabled=bool(row["enabled"]),
                 user_type=row["user_type"],
                 rank=row["rank"],
@@ -145,14 +182,20 @@ class AccountPool:
                 connection.execute(
                     """
                     INSERT INTO accounts (
-                        name, cookie, access_token, enabled, user_type, rank, last_price,
+                        name, cookie, access_token, user_agent, request_headers_json, import_method,
+                        login_phone, login_password, enabled, user_type, rank, last_price,
                         surplus_num, fail_count, last_error, cooldown_until, last_checked_at,
                         updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     ON CONFLICT(name) DO UPDATE SET
                         cookie = excluded.cookie,
                         access_token = excluded.access_token,
+                        user_agent = excluded.user_agent,
+                        request_headers_json = excluded.request_headers_json,
+                        import_method = excluded.import_method,
+                        login_phone = excluded.login_phone,
+                        login_password = excluded.login_password,
                         enabled = excluded.enabled,
                         user_type = excluded.user_type,
                         rank = excluded.rank,
@@ -168,6 +211,11 @@ class AccountPool:
                         account.name,
                         account.cookie,
                         account.access_token,
+                        account.user_agent,
+                        account.request_headers_json,
+                        account.import_method,
+                        account.login_phone,
+                        account.login_password,
                         1 if account.enabled else 0,
                         account.user_type,
                         account.rank,
@@ -276,11 +324,20 @@ class AccountPool:
         credentials_changed = (
             incoming.cookie != current.cookie
             or incoming.access_token != current.access_token
+            or (bool(incoming.user_agent) and incoming.user_agent != current.user_agent)
+            or (bool(incoming.request_headers_json) and incoming.request_headers_json != current.request_headers_json)
+            or incoming.login_phone != current.login_phone
+            or incoming.login_password != current.login_password
         )
         return AccountCredential(
             name=incoming.name,
             cookie=incoming.cookie,
             access_token=incoming.access_token,
+            user_agent=incoming.user_agent or current.user_agent,
+            request_headers_json=incoming.request_headers_json or current.request_headers_json,
+            import_method=incoming.import_method or current.import_method,
+            login_phone=incoming.login_phone or current.login_phone,
+            login_password=incoming.login_password or current.login_password,
             enabled=incoming.enabled,
             user_type=incoming.user_type if incoming.user_type is not None else current.user_type,
             rank=incoming.rank if incoming.rank is not None else current.rank,

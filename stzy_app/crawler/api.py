@@ -1,18 +1,13 @@
 from __future__ import annotations
 
-import json
-from base64 import b64decode, b64encode
 from typing import Any
 from urllib.parse import urljoin
-
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad, unpad
 
 from stzy_app.config import AppSettings
 from stzy_app.http import StzyHttpClient
 from stzy_app.models import CrawlCombo, CrawlFilters, ResourceRecord, ResourceStatus
+from stzy_app.security import decrypt_text, encrypt_json
 
-AES_KEY = "abADefg234cdegsd"
 CDN_BASE_URL = "https://cdn.stzy.com/"
 
 
@@ -119,13 +114,8 @@ def build_record(item: dict[str, Any], combo: CrawlCombo) -> ResourceRecord:
 
 
 def _encrypt_download_payload(data: dict[str, Any]) -> str:
-    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
-    key = AES_KEY.encode()
-    cipher = AES.new(key, AES.MODE_CBC, iv=key)
-    return b64encode(cipher.encrypt(pad(payload, AES.block_size))).decode()
+    return encrypt_json(data)
 
 
 def _decrypt_download_value(value: str) -> str:
-    key = AES_KEY.encode()
-    cipher = AES.new(key, AES.MODE_CBC, iv=key)
-    return unpad(cipher.decrypt(b64decode(value)), AES.block_size).decode()
+    return decrypt_text(value)

@@ -339,23 +339,12 @@ class CrawlRunner:
         DocumentConverter.convert_svg_to_png(svg_path, png_path)
 
     @staticmethod
-    def _svg_needs_browser_renderer(svg_path: Path) -> bool:
-        return DocumentConverter.svg_needs_browser_renderer(svg_path)
-
-    def _convert_svg_to_png_with_browser(self, svg_path: Path, png_path: Path) -> None:
-        DocumentConverter.convert_svg_to_png_with_browser(svg_path, png_path)
-
-    @staticmethod
     def _svg_size(svg_path: Path) -> tuple[int, int]:
         return DocumentConverter.svg_size(svg_path)
 
     @staticmethod
     def _svg_dimension(content: str, name: str) -> int | None:
         return DocumentConverter.svg_dimension(content, name)
-
-    @staticmethod
-    def _svg_render_html(svg_path: Path, width: int, height: int) -> str:
-        return DocumentConverter.svg_render_html(svg_path, width, height)
 
     def _convert_image_to_png(self, image_path: Path, png_path: Path) -> None:
         DocumentConverter.convert_image_to_png(image_path, png_path)

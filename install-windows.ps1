@@ -4,10 +4,8 @@ Set-Location -LiteralPath $PSScriptRoot
 $AppName = "STZY Paper Crawler"
 $VenvDir = ".venv"
 $PipIndexUrl = "https://pypi.tuna.tsinghua.edu.cn/simple"
-$PlaywrightDownloadHost = "https://npmmirror.com/mirrors/playwright"
 
 $env:PIP_INDEX_URL = $PipIndexUrl
-$env:PLAYWRIGHT_DOWNLOAD_HOST = $PlaywrightDownloadHost
 
 function Write-Step {
     param([string]$Message)
@@ -66,19 +64,6 @@ Write-Step "升级 pip"
 Write-Step "安装 Python 依赖"
 & $VenvPython -m pip install -i $PipIndexUrl -r requirements.txt
 
-Write-Step "安装 Playwright Chromium"
-& $VenvPython -m playwright install chromium
-
-Write-Step "检查 PDF 转图片依赖"
-$PdfToPpm = Get-Command pdftoppm -ErrorAction SilentlyContinue
-if ($PdfToPpm) {
-    Write-Host "已找到 pdftoppm。"
-} else {
-    Write-Host "未找到 pdftoppm。完整 PDF 转 PNG 需要 Poppler。"
-    Write-Host "如果安装了 winget，可以运行：winget install oschwartz10612.Poppler"
-    Write-Host "安装后重新打开终端，确认 pdftoppm 可用。"
-}
-
 Write-Step "生成启动脚本"
 $StartWindowsBat = @"
 @echo off
@@ -86,7 +71,6 @@ chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
 set PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-set PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
 set PYTHONUNBUFFERED=1
 cls
 echo ========================================
@@ -119,7 +103,6 @@ $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 `$ErrorActionPreference = "Stop"
 Set-Location -LiteralPath `$PSScriptRoot
 `$env:PIP_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
-`$env:PLAYWRIGHT_DOWNLOAD_HOST = "https://npmmirror.com/mirrors/playwright"
 `$env:PYTHONUNBUFFERED = "1"
 Clear-Host
 Write-Host "========================================"

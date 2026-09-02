@@ -6,10 +6,8 @@ cd "$(dirname "$0")"
 APP_NAME="STZY Paper Crawler"
 VENV_DIR=".venv"
 PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
-PLAYWRIGHT_DOWNLOAD_HOST="https://npmmirror.com/mirrors/playwright"
 
 export PIP_INDEX_URL
-export PLAYWRIGHT_DOWNLOAD_HOST
 
 say_step() {
   printf "\n==> %s\n" "$1"
@@ -53,34 +51,12 @@ say_step "升级 pip"
 say_step "安装 Python 依赖"
 "${VENV_PYTHON}" -m pip install -i "${PIP_INDEX_URL}" -r requirements.txt
 
-say_step "安装 Playwright Chromium"
-"${VENV_PYTHON}" -m playwright install chromium
-
-say_step "检查 PDF 转图片依赖"
-if command -v pdftoppm >/dev/null 2>&1; then
-  echo "已找到 pdftoppm。"
-else
-  echo "未找到 pdftoppm。完整 PDF 转 PNG 需要 Poppler。"
-  if command -v brew >/dev/null 2>&1; then
-    read -r -p "是否现在通过 Homebrew 安装 poppler？[Y/n] " answer
-    answer="${answer:-Y}"
-    if [[ "${answer}" =~ ^[Yy]$ ]]; then
-      brew install poppler
-    else
-      echo "稍后可手动运行：brew install poppler"
-    fi
-  else
-    echo "可先安装 Homebrew，然后运行：brew install poppler"
-  fi
-fi
-
 say_step "生成启动脚本"
 cat > start-macos.command <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
 export PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
-export PLAYWRIGHT_DOWNLOAD_HOST="https://npmmirror.com/mirrors/playwright"
 export PYTHONUNBUFFERED=1
 clear 2>/dev/null || true
 echo "========================================"
