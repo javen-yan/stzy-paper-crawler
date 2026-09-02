@@ -99,10 +99,13 @@ class DocumentConverter:
 
     @staticmethod
     def convert_svg_to_png(svg_path: Path, png_path: Path) -> None:
-        import cairosvg
+        import pymupdf
 
         content = DocumentConverter.svg_with_font_fallback(svg_path)
-        cairosvg.svg2png(bytestring=content.encode("utf-8"), write_to=str(png_path), background_color="white")
+        with pymupdf.open(stream=content.encode("utf-8"), filetype="svg") as document:
+            page = document[0]
+            pixmap = page.get_pixmap(dpi=180, alpha=False)
+            pixmap.save(png_path)
         DocumentConverter.flatten_png_on_white(png_path)
 
     @staticmethod
@@ -153,7 +156,6 @@ class DocumentConverter:
             return None
         return int(float(match.group(1)))
 
-    @staticmethod
     @staticmethod
     def convert_image_to_png(image_path: Path, png_path: Path) -> None:
         from PIL import Image

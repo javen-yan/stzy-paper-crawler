@@ -28,15 +28,21 @@ class SvgConversionTest(unittest.TestCase):
 
             self.assertTrue(DocumentConverter.svg_needs_font_fallback(svg_path))
 
-    def test_simple_svg_can_still_use_cairosvg(self) -> None:
+    def test_svg_conversion_uses_pymupdf_without_cairo_dependency(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             svg_path = Path(tmpdir) / "simple.svg"
+            png_path = Path(tmpdir) / "simple.png"
             svg_path.write_text(
-                '<svg xmlns="http://www.w3.org/2000/svg"><text>OK</text></svg>',
+                '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80">'
+                '<rect width="200" height="80" fill="white"/>'
+                '<text x="20" y="45" font-size="28">OK</text>'
+                '</svg>',
                 encoding="utf-8",
             )
 
             self.assertFalse(DocumentConverter.svg_needs_font_fallback(svg_path))
+            DocumentConverter.convert_svg_to_png(svg_path, png_path)
+            self.assertGreater(png_path.stat().st_size, 0)
 
     def test_pdf_conversion_uses_python_dependency(self) -> None:
         import pymupdf

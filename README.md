@@ -44,7 +44,7 @@ chmod +x install-linux.sh
 ./start-linux.sh
 ```
 
-PDF 转图片能力由 Python 依赖内置提供，三端无需额外安装 Poppler。
+PDF/SVG 转图片能力由 PyMuPDF 这类 Python 依赖内置提供，三端无需额外安装 Poppler、Cairo 或浏览器内核。
 
 ## 手动安装
 
@@ -55,7 +55,7 @@ export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 ```
 
-PDF 转图片和 SVG 转图片都由 Python 依赖处理，不需要额外安装浏览器内核或 Poppler。
+PDF 转图片和 SVG 转图片都由 PyMuPDF 处理，不需要额外安装浏览器内核、Poppler 或 Cairo 原生库。
 
 ## 账号登录
 
