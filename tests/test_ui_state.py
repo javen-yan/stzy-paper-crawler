@@ -5,6 +5,8 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
+from stzy_app.crawler import CrawlStats
+from stzy_app.models import ResourceRecord, ResourceStatus
 from stzy_app.ui.state import UiState
 
 
@@ -30,6 +32,34 @@ class UiStateTest(unittest.TestCase):
 
         self.assertIn("任务日志", output.getvalue())
         self.assertIn("任务日志", state.snapshot()[0][0])
+
+    def test_stop_request_is_cleared_when_task_finishes(self) -> None:
+        state = UiState()
+
+        state.request_stop()
+        self.assertTrue(state.snapshot()[5])
+
+        state.progress(CrawlStats(running=False))
+
+        self.assertFalse(state.snapshot()[5])
+
+    def test_record_updates_existing_resource_row(self) -> None:
+        state = UiState()
+        record = ResourceRecord(
+            resource_id="paper-1",
+            resource_name="试卷",
+            status=ResourceStatus.downloading,
+        )
+        state.record(record)
+
+        record.status = ResourceStatus.completed
+        record.image_count = 8
+        state.record(record)
+
+        rows = state.snapshot()[1]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "completed")
+        self.assertEqual(rows[0]["image_count"], 8)
 
 
 if __name__ == "__main__":

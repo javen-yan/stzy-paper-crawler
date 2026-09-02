@@ -11,6 +11,8 @@ from stzy_app.storage.db import connect, record_schema_version
 
 ARCHIVED_TASK_STATUS = "del"
 TERMINAL_TASK_STATUSES = {"completed", "partial", "failed", "auth_expired"}
+RESUMABLE_TASK_STATUSES = {"running", "paused", "partial", "failed", "auth_expired"}
+ACTIVE_TASK_STATUSES = {"running", "paused"}
 
 
 class TaskHistory:
@@ -124,6 +126,7 @@ class TaskHistory:
                     stats_json = ?,
                     updated_at = ?
                 WHERE id = ?
+                    AND status != ?
                 """,
                 (
                     str(updates.get("status") or "failed"),
@@ -132,22 +135,41 @@ class TaskHistory:
                     self._json(updates.get("stats") or {}),
                     now,
                     task_id,
+                    ARCHIVED_TASK_STATUS,
                 ),
             )
 
     def resume(self, task_id: str, stats: dict[str, Any] | None = None) -> bool:
         now = datetime.now().isoformat(timespec="seconds")
+        placeholders = ", ".join("?" for _ in RESUMABLE_TASK_STATUSES)
         with connect(self.path) as connection:
             cursor = connection.execute(
-                """
+                f"""
                 UPDATE tasks
                 SET status = 'running',
                     stats_json = ?,
                     updated_at = ?
                 WHERE id = ?
-                    AND status IN ('running', 'paused')
+                    AND status IN ({placeholders})
                 """,
-                (self._json(stats or {}), now, task_id),
+                (self._json(stats or {}), now, task_id, *RESUMABLE_TASK_STATUSES),
+            )
+        return cursor.rowcount > 0
+
+    def cancel(self, task_id: str) -> bool:
+        now = datetime.now().isoformat(timespec="seconds")
+        placeholders = ", ".join("?" for _ in ACTIVE_TASK_STATUSES)
+        with connect(self.path) as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE tasks
+                SET status = ?,
+                    ended_at = COALESCE(ended_at, ?),
+                    updated_at = ?
+                WHERE id = ?
+                    AND status IN ({placeholders})
+                """,
+                (ARCHIVED_TASK_STATUS, now, now, task_id, *ACTIVE_TASK_STATUSES),
             )
         return cursor.rowcount > 0
 

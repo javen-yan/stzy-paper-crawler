@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from stzy_app.config import AppSettings
 from stzy_app.crawler.account_scheduler import AccountScheduler
 from stzy_app.crawler.runner import CrawlRunner
+from stzy_app.http import RequestStopped
 from stzy_app.models import CrawlCombo, ResourceRecord, ResourceStatus, TagOption
 
 
@@ -179,6 +180,8 @@ class RunnerFilterTest(unittest.TestCase):
         runner = CrawlRunner.__new__(CrawlRunner)
         runner.settings = AppSettings(concurrency=3)
         runner._stop = threading.Event()
+        logs: list[str] = []
+        runner.on_log = logs.append
         handled: list[str] = []
         lock = threading.Lock()
 
@@ -196,6 +199,91 @@ class RunnerFilterTest(unittest.TestCase):
         CrawlRunner._handle_resources(runner, records)
 
         self.assertCountEqual(handled, ["paper-1", "paper-2", "paper-3"])
+        self.assertIn("本页待下载 3 份，启动 3 个下载线程", logs)
+
+    def test_stopped_resource_is_not_marked_failed(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.settings = AppSettings(concurrency=1)
+        runner._stop = threading.Event()
+        runner.stats = type(
+            "Stats",
+            (),
+            {
+                "resources_seen": 0,
+                "resources_completed": 0,
+                "current_resource_name": "",
+                "images_downloaded": 0,
+                "paid_skipped": 0,
+                "preview_limited": 0,
+                "failed": 0,
+                "paused": False,
+            },
+        )()
+        runner._stats_lock = threading.RLock()
+        runner._emit_progress = lambda: None
+        runner._store_record = lambda record: None
+        runner._log = lambda message: None
+        runner.on_record = lambda record: None
+
+        class StoppedDownloader:
+            def handle_resource(self, record: ResourceRecord):
+                raise RequestStopped("任务已停止")
+
+        runner.downloader = StoppedDownloader()
+        record = ResourceRecord(resource_id="paper-1", resource_name="试卷1")
+
+        CrawlRunner._handle_resource(runner, record)
+
+        self.assertTrue(runner.stats.paused)
+        self.assertEqual(runner.stats.failed, 0)
+        self.assertEqual(record.status, ResourceStatus.pending)
+
+    def test_resource_is_reported_as_downloading_before_completion(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.settings = AppSettings(concurrency=1)
+        runner._stop = threading.Event()
+        runner.stats = type(
+            "Stats",
+            (),
+            {
+                "resources_seen": 0,
+                "resources_completed": 0,
+                "current_resource_name": "",
+                "images_downloaded": 0,
+                "paid_skipped": 0,
+                "preview_limited": 0,
+                "failed": 0,
+                "paused": False,
+            },
+        )()
+        runner._stats_lock = threading.RLock()
+        runner._emit_progress = lambda: None
+        runner._store_record = lambda record: None
+        runner._log = lambda message: None
+        seen_statuses: list[ResourceStatus] = []
+        runner.on_record = lambda record: seen_statuses.append(record.status)
+
+        class DoneDownloader:
+            def handle_resource(self, record: ResourceRecord):
+                return type(
+                    "Result",
+                    (),
+                    {
+                        "local_dir": "/tmp/paper",
+                        "saved_pages": 3,
+                        "status": ResourceStatus.completed,
+                        "error": "",
+                        "images_added": 3,
+                        "paid_unavailable": 0,
+                    },
+                )()
+
+        runner.downloader = DoneDownloader()
+        record = ResourceRecord(resource_id="paper-1", resource_name="试卷1")
+
+        CrawlRunner._handle_resource(runner, record)
+
+        self.assertEqual(seen_statuses, [ResourceStatus.downloading, ResourceStatus.completed])
 
     def test_resume_skips_completed_resources_and_retries_remaining(self) -> None:
         runner = CrawlRunner.__new__(CrawlRunner)

@@ -4,7 +4,9 @@ from stzy_app.crawler import CrawlStats
 from stzy_app.ui.view_model import (
     action_hint,
     combo_metric,
+    config_status_cards,
     current_result_empty_copy,
+    display_record_rows,
     display_task_rows,
     download_action_text,
     log_level_counts,
@@ -144,16 +146,53 @@ class StatusViewTest(unittest.TestCase):
     def test_running_task_hint_explains_stop_flow(self) -> None:
         stats = CrawlStats(task_mode="crawl", running=True)
 
-        self.assertEqual(action_hint(stats, running=True), "停止后会在当前请求结束。")
+        self.assertEqual(action_hint(stats, running=True), "停止后不再发起新请求。")
         self.assertEqual(download_action_text(stats, running=True), "下载中")
 
     def test_stopped_crawl_can_be_restarted(self) -> None:
         stats = CrawlStats(task_mode="crawl", phase="finished", outcome="paused", paused=True)
 
         self.assertEqual(action_hint(stats, running=False), "可调整筛选后重新运行。")
-        self.assertEqual(download_action_text(stats, running=False), "重新下载")
+        self.assertEqual(download_action_text(stats, running=False), "继续下载")
 
-    def test_history_rows_only_allow_manage_for_unfinished_tasks(self) -> None:
+    def test_config_status_cards_show_core_setup(self) -> None:
+        cards = config_status_cards(
+            "/tmp/output",
+            2,
+            {
+                "proxy_mode": "fixed",
+                "proxy_pool": "http://127.0.0.1:7890\nhttp://10.0.0.1:8080",
+                "file_type": "PDF",
+                "concurrency": 3,
+            },
+        )
+
+        by_key = {card["key"]: card for card in cards}
+        self.assertEqual(by_key["path"]["status"], "已配置")
+        self.assertEqual(by_key["path"]["detail"], "output")
+        self.assertEqual(by_key["account"]["detail"], "2 个账号可用")
+        self.assertEqual(by_key["proxy"]["status"], "已配置")
+        self.assertEqual(by_key["proxy"]["detail"], "固定代理 · 2 个")
+        self.assertEqual(by_key["strategy"]["detail"], "PDF · 3 个并发")
+
+    def test_config_status_cards_show_api_proxy_runtime_ip(self) -> None:
+        cards = config_status_cards(
+            "output",
+            0,
+            {
+                "proxy_mode": "api",
+                "proxy_provider": "shenlong",
+                "proxy_api_url": "http://api.shenlongip.com/ip?count=1",
+            },
+            "http://49.85.120.175:40078",
+        )
+
+        by_key = {card["key"]: card for card in cards}
+        self.assertEqual(by_key["account"]["status"], "需要处理")
+        self.assertEqual(by_key["proxy"]["status"], "检测通过")
+        self.assertEqual(by_key["proxy"]["detail"], "49.85.120.175")
+
+    def test_task_rows_expose_manage_cancel_and_archive_actions_by_status(self) -> None:
         rows = display_task_rows(
             [
                 {
@@ -176,6 +215,13 @@ class StatusViewTest(unittest.TestCase):
                     "started_at": "2026-09-02T11:30:00",
                     "filters": {"brief": "安徽 / 高一下 / 英语"},
                     "stats": {"resources_seen": 3},
+                },
+                {
+                    "id": "task-4",
+                    "status": "partial",
+                    "started_at": "2026-09-02T11:31:00",
+                    "filters": {"brief": "安徽 / 高一下 / 生物"},
+                    "stats": {"resources_seen": 4},
                 }
             ]
         )
@@ -186,9 +232,27 @@ class StatusViewTest(unittest.TestCase):
         self.assertTrue(rows[0]["can_archive"])
         self.assertEqual(rows[0]["stats"]["images_downloaded"], 17)
         self.assertTrue(rows[1]["can_manage"])
+        self.assertTrue(rows[1]["can_cancel"])
         self.assertFalse(rows[1]["can_archive"])
         self.assertTrue(rows[2]["can_manage"])
+        self.assertTrue(rows[2]["can_cancel"])
         self.assertFalse(rows[2]["can_archive"])
+        self.assertTrue(rows[3]["can_manage"])
+        self.assertFalse(rows[3]["can_cancel"])
+        self.assertTrue(rows[3]["can_archive"])
+
+    def test_record_rows_show_downloading_state(self) -> None:
+        rows = display_record_rows(
+            [
+                {
+                    "resource_id": "r1",
+                    "resource_name": "试卷1",
+                    "status": "downloading",
+                }
+            ]
+        )
+
+        self.assertEqual(rows[0]["status_label"], "下载中")
 
     def test_logs_distinguish_filter_from_warning_and_error(self) -> None:
         logs = [

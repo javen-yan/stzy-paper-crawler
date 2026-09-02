@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import html
+from pathlib import Path
+from urllib.parse import urlparse
 
 from stzy_app.crawler import CrawlStats
 
@@ -91,7 +93,7 @@ def progress_value(stats: CrawlStats, running: bool) -> float:
 
 def action_hint(stats: CrawlStats, running: bool) -> str:
     if running:
-        return "停止后会在当前请求结束。"
+        return "停止后不再发起新请求。"
     if stats.task_mode == "estimate" and stats.outcome == "estimated":
         return f"匹配 {stats.resources_seen} 份试卷。"
     if stats.paused or stats.outcome == "paused":
@@ -104,9 +106,100 @@ def action_hint(stats: CrawlStats, running: bool) -> str:
 def download_action_text(stats: CrawlStats, running: bool) -> str:
     if running:
         return "下载中"
+    if stats.paused or stats.outcome == "paused":
+        return "继续下载"
     if stats.task_mode == "crawl" and (stats.phase == "finished" or stats.outcome in {"paused", "partial", "completed"}):
         return "重新下载"
     return "开始下载"
+
+
+def config_status_cards(
+    output_dir: str,
+    account_count: int,
+    raw_settings: dict[str, object],
+    active_proxy: object = "",
+) -> list[dict[str, str]]:
+    proxy_mode = str(raw_settings.get("proxy_mode") or "off").strip().lower()
+    proxy_pool = str(raw_settings.get("proxy_pool") or "")
+    proxy_api_url = str(raw_settings.get("proxy_api_url") or "").strip()
+    proxy_provider = str(raw_settings.get("proxy_provider") or "generic").strip().lower()
+    file_type = str(raw_settings.get("file_type") or "PDF")
+    concurrency = str(raw_settings.get("concurrency") or "1")
+
+    output_path = str(output_dir or "").strip()
+    output_label = Path(output_path).name or output_path if output_path else "未设置"
+    cards = [
+        {
+            "key": "path",
+            "title": "保存位置",
+            "status": "已配置" if output_path else "需要处理",
+            "detail": output_label,
+            "class": "done" if output_path else "warn",
+            "icon": "folder_open",
+        },
+        {
+            "key": "account",
+            "title": "账号",
+            "status": "已配置" if account_count else "需要处理",
+            "detail": f"{account_count} 个账号可用" if account_count else "添加账号",
+            "class": "done" if account_count else "warn",
+            "icon": "manage_accounts",
+        },
+    ]
+
+    if proxy_mode == "fixed":
+        fixed_count = len([line for line in proxy_pool.splitlines() if line.strip()])
+        proxy_card = {
+            "key": "proxy",
+            "title": "代理",
+            "status": "已配置" if fixed_count else "需要处理",
+            "detail": f"固定代理 · {fixed_count} 个" if fixed_count else "填写固定代理",
+            "class": "done" if fixed_count else "warn",
+            "icon": "hub",
+        }
+    elif proxy_mode == "api":
+        provider_name = "神龙 HTTP" if proxy_provider == "shenlong" else "通用接口"
+        if active_proxy:
+            parsed = urlparse(str(active_proxy))
+            host = parsed.hostname or str(active_proxy)
+            proxy_card = {
+                "key": "proxy",
+                "title": "代理",
+                "status": "检测通过",
+                "detail": host,
+                "class": "done",
+                "icon": "hub",
+            }
+        else:
+            proxy_card = {
+                "key": "proxy",
+                "title": "代理",
+                "status": "已配置" if proxy_api_url else "需要处理",
+                "detail": provider_name if proxy_api_url else "填写提取接口",
+                "class": "done" if proxy_api_url else "warn",
+                "icon": "hub",
+            }
+    else:
+        proxy_card = {
+            "key": "proxy",
+            "title": "代理",
+            "status": "已配置",
+            "detail": "直连",
+            "class": "idle",
+            "icon": "hub",
+        }
+    cards.append(proxy_card)
+    cards.append(
+        {
+            "key": "strategy",
+            "title": "采集策略",
+            "status": "已配置",
+            "detail": f"{file_type} · {concurrency} 个并发",
+            "class": "done",
+            "icon": "speed",
+        }
+    )
+    return cards
 
 
 def combo_metric(stats: CrawlStats) -> tuple[str, str]:
@@ -173,7 +266,8 @@ def display_task_rows(tasks: list[dict[str, object]]) -> list[dict[str, object]]
         started_at = str(task.get("started_at") or task.get("created_at") or "")
         local_dir = str(task.get("first_local_dir") or filters.get("保存位置") or "")
         status = str(task.get("status") or "")
-        can_manage = status in {"running", "paused"}
+        can_manage = status in {"running", "paused", "partial", "failed", "auth_expired"}
+        can_cancel = status in {"running", "paused"}
         can_archive = status in {"completed", "partial", "failed", "auth_expired"}
         rows.append(
             {
@@ -190,6 +284,7 @@ def display_task_rows(tasks: list[dict[str, object]]) -> list[dict[str, object]]
                 "stats": stats,
                 "mode": str(task.get("mode") or "crawl"),
                 "can_manage": can_manage,
+                "can_cancel": can_cancel,
                 "can_archive": can_archive,
             }
         )
@@ -204,6 +299,7 @@ def display_record_rows(records: list[dict[str, object]]) -> list[dict[str, obje
         "paid_unavailable": "付费不可用",
         "failed": "失败",
         "pending": "等待中",
+        "downloading": "下载中",
     }
     rows = []
     for record in records:

@@ -41,19 +41,31 @@ class DocumentConverter:
         artifacts.prepare_original_dir()
         images_added = 0
         originals: list[Path] = []
+        total = len(pictures)
         for index, url in enumerate(pictures, start=1):
             suffix = Path(url.split("?", 1)[0]).suffix or ".svg"
             original = artifacts.original_dir / f"练习{index}{suffix}"
             target = artifacts.page_png(index)
             had_target = target.exists() and target.stat().st_size > 0
+            if original.exists() and not self.original_file_looks_valid(original, url):
+                original.unlink()
             if not original.exists() or original.stat().st_size <= 0:
+                self.on_log(f"预览图下载：{record.resource_id} - {index}/{total}")
                 self.client.download(url, original)
-            self.convert_original_to_png(original, target)
+            self.convert_original_to_png(
+                original,
+                target,
+                resource_id=record.resource_id,
+                page_index=index,
+                page_total=total,
+            )
             originals.append(original)
             if not had_target and target.exists() and target.stat().st_size > 0:
                 images_added += 1
+            self.on_log(f"预览图完成：{record.resource_id} - {index}/{total}")
             self.sleep(self.settings.image_delay_seconds)
         if originals:
+            self.on_log(f"资源进度：{record.resource_id} - 生成 PDF")
             self.convert_originals_to_pdf(originals, artifacts.temp_pdf)
             artifacts.publish_pdf(artifacts.temp_pdf)
             artifacts.cleanup_transient_artifacts()
@@ -63,6 +75,8 @@ class DocumentConverter:
         artifacts = ResourceArtifacts(directory)
         artifacts.prepare_resource_dir()
         source_pdf = pdf_path
+        if source_pdf.exists() and not self.pdf_file_looks_valid(source_pdf):
+            source_pdf.unlink()
         if not source_pdf.exists() or source_pdf.stat().st_size <= 0:
             self.client.download(pdf_url, artifacts.temp_pdf, headers={})
             source_pdf = artifacts.temp_pdf
@@ -72,12 +86,22 @@ class DocumentConverter:
         artifacts.cleanup_transient_artifacts()
         return converted, max(0, converted - existing_count)
 
-    def convert_original_to_png(self, original: Path, target: Path) -> None:
+    def convert_original_to_png(
+        self,
+        original: Path,
+        target: Path,
+        *,
+        resource_id: str = "",
+        page_index: int = 0,
+        page_total: int = 0,
+    ) -> None:
         suffix = original.suffix.lower()
         if suffix == ".svg":
             if not target.exists() or target.stat().st_size <= 0:
                 if self.svg_needs_font_fallback(original):
-                    self.on_log(f"使用内置转换器处理复杂 SVG：{original.name}")
+                    progress = f" - {page_index}/{page_total}" if page_index and page_total else ""
+                    prefix = f"{resource_id}{progress}，" if resource_id else ""
+                    self.on_log(f"使用内置转换器处理复杂 SVG：{prefix}{original.name}")
                 self.convert_svg_to_png(original, target)
             return
         if not target.exists() or target.stat().st_size <= 0:
@@ -89,6 +113,24 @@ class DocumentConverter:
         if not pdf_path.exists() or pdf_path.stat().st_size <= 0:
             return 0
         return self.convert_pdf_to_pngs_with_pymupdf(pdf_path, directory)
+
+    @classmethod
+    def original_file_looks_valid(cls, path: Path, url: str) -> bool:
+        if not path.exists() or path.stat().st_size <= 0:
+            return False
+        suffix = (path.suffix or Path(url.split("?", 1)[0]).suffix).lower()
+        head = path.read_bytes()[:4096].lower()
+        if b"<html" in head or b"<!doctype html" in head:
+            return False
+        if suffix == ".pdf":
+            return cls.pdf_file_looks_valid(path)
+        if suffix == ".svg":
+            return b"<svg" in head
+        return True
+
+    @staticmethod
+    def pdf_file_looks_valid(path: Path) -> bool:
+        return path.exists() and path.stat().st_size > 0 and path.read_bytes()[:4] == b"%PDF"
 
     @staticmethod
     def convert_pdf_to_pngs_with_pymupdf(pdf_path: Path, directory: Path) -> int:

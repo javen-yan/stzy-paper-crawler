@@ -11,7 +11,7 @@ from stzy_app.config import AppSettings
 from stzy_app.crawler.api import StzyCrawlerApi, build_record
 from stzy_app.crawler.download_service import DownloadService
 from stzy_app.crawler.tags import TagCatalog
-from stzy_app.http import StzyHttpClient
+from stzy_app.http import ProxyPool, RequestStopped, StzyHttpClient
 from stzy_app.models import CrawlCombo, CrawlFilters, ResourceRecord, ResourceStatus
 from stzy_app.storage import CrawlState, CsvIndex
 
@@ -56,8 +56,18 @@ class CrawlRunner:
     ) -> None:
         self.settings = settings
         self.filters = filters
+        self.on_log = on_log or (lambda message: None)
+        self.on_record = on_record or (lambda record: None)
+        self.on_progress = on_progress or (lambda stats: None)
         self.on_proxy = on_proxy or (lambda _proxy: None)
-        self.client = StzyHttpClient(settings, on_proxy=self.on_proxy)
+        self._stop = threading.Event()
+        self.proxy_pool = ProxyPool(settings, on_event=self._log)
+        self.client = StzyHttpClient(
+            settings,
+            on_proxy=self.on_proxy,
+            proxy_pool=self.proxy_pool,
+            should_stop=self._stop.is_set,
+        )
         self.api = StzyCrawlerApi(self.client, settings)
         self.index = CsvIndex(settings.csv_file)
         self.state = CrawlState(settings.state_file)
@@ -68,13 +78,9 @@ class CrawlRunner:
             on_log=self._log,
             sleep=self._sleep,
         )
-        self.on_log = on_log or (lambda message: None)
-        self.on_record = on_record or (lambda record: None)
-        self.on_progress = on_progress or (lambda stats: None)
         self.stats = CrawlStats()
         self._stats_lock = threading.RLock()
         self._storage_lock = threading.Lock()
-        self._stop = threading.Event()
         self.completed_resource_ids = completed_resource_ids or set()
 
     def stop(self) -> None:
@@ -205,18 +211,28 @@ class CrawlRunner:
         return max(1, min(8, int(self.settings.concurrency or 1)))
 
     def _handle_resources(self, records: list[ResourceRecord]) -> None:
+        if not records:
+            return
         if self.download_workers == 1 or len(records) <= 1:
+            self._log(f"本页待下载 {len(records)} 份，按顺序处理")
             for record in records:
                 if self._stop.is_set():
                     return
                 self._handle_resource(record)
             return
-        with ThreadPoolExecutor(max_workers=self.download_workers) as executor:
-            futures = [executor.submit(self._handle_resource, record) for record in records]
+        workers = min(self.download_workers, len(records))
+        self._log(f"本页待下载 {len(records)} 份，启动 {workers} 个下载线程")
+        executor = ThreadPoolExecutor(max_workers=workers)
+        futures = [executor.submit(self._handle_resource, record) for record in records]
+        try:
             for future in as_completed(futures):
-                if self._stop.is_set():
-                    return
                 future.result()
+                if self._stop.is_set():
+                    for pending in futures:
+                        pending.cancel()
+                    return
+        finally:
+            executor.shutdown(wait=True, cancel_futures=self._stop.is_set())
 
     def _skip_completed_resource(self, record: ResourceRecord) -> None:
         with self._stats_lock:
@@ -227,10 +243,15 @@ class CrawlRunner:
         self._log(f"续跑跳过已完成资源：{record.resource_id} - {record.resource_name}")
 
     def _handle_resource(self, record: ResourceRecord) -> None:
+        if self._stop.is_set():
+            return
         with self._stats_lock:
             self.stats.resources_seen += 1
             self.stats.current_resource_name = record.resource_name
             self._emit_progress()
+        record.status = ResourceStatus.downloading
+        self.on_record(record)
+        self._log(f"开始下载：{record.resource_id} - {record.resource_name}")
         try:
             downloader = self.downloader if self.download_workers == 1 else self._build_downloader()
             result = downloader.handle_resource(record)
@@ -249,6 +270,10 @@ class CrawlRunner:
                 with self._stats_lock:
                     self.stats.preview_limited += 1
                 self._store_record(record)
+        except RequestStopped:
+            record.status = ResourceStatus.pending
+            with self._stats_lock:
+                self.stats.paused = True
         except Exception as exc:  # noqa: BLE001
             record.status = ResourceStatus.failed
             record.error = str(exc)
@@ -260,10 +285,17 @@ class CrawlRunner:
             with self._stats_lock:
                 self.stats.resources_completed += 1
         self.on_record(record)
+        if record.status == ResourceStatus.completed:
+            self._log(f"下载完成：{record.resource_id} - {record.resource_name}")
         self._emit_progress()
 
     def _build_downloader(self) -> DownloadService:
-        client = StzyHttpClient(self.settings, on_proxy=self.on_proxy)
+        client = StzyHttpClient(
+            self.settings,
+            on_proxy=self.on_proxy,
+            proxy_pool=self.proxy_pool,
+            should_stop=self._stop.is_set,
+        )
         api = StzyCrawlerApi(client, self.settings)
         return DownloadService(
             self.settings,
@@ -290,7 +322,9 @@ class CrawlRunner:
         self._stop.wait(delay)
 
     def _log(self, message: str) -> None:
-        self.on_log(message)
+        on_log = getattr(self, "on_log", None)
+        if on_log:
+            on_log(message)
 
     def _emit_progress(self) -> None:
         with self._stats_lock:

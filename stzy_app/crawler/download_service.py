@@ -42,9 +42,15 @@ class DownloadService:
         ensure_directory(directory)
         expected_pages = record.page_count or 0
         if record.page_count > 10:
+            self.on_log(f"资源进度：{record.resource_id} - 页数 {record.page_count}，下载 PDF")
             return self.download_full_pdf(record)
 
+        self.on_log(f"资源进度：{record.resource_id} - 获取预览图")
         pictures = self.api.resource_pictures(record.resource_id)
+        if pictures:
+            self.on_log(f"资源进度：{record.resource_id} - 预览图 {len(pictures)} 张")
+        else:
+            self.on_log(f"资源进度：{record.resource_id} - 未返回预览图，下载 PDF")
         images_added = self.converter.download_preview_images(record, pictures, directory)
         saved_count = self.converter.saved_picture_count_from_dir(directory)
         if record.page_count and saved_count < record.page_count:
@@ -94,7 +100,10 @@ class DownloadService:
         artifacts = ResourceArtifacts(directory)
         artifacts.prepare_resource_dir()
         pdf_path = artifacts.temp_pdf if artifacts.temp_pdf.exists() else artifacts.final_pdf
+        if pdf_path.exists() and not self.converter.pdf_file_looks_valid(pdf_path):
+            pdf_path.unlink()
         if not pdf_path.exists() or pdf_path.stat().st_size <= 0:
+            self.on_log(f"资源进度：{record.resource_id} - 获取 PDF 地址")
             url_result = self.account_scheduler.download_pdf_url(record)
             if url_result.status == ResourceStatus.paid_unavailable:
                 return DownloadResult(
@@ -112,6 +121,7 @@ class DownloadService:
             pdf_path = artifacts.temp_pdf
         else:
             pdf_url = ""
+        self.on_log(f"资源进度：{record.resource_id} - PDF 转图片")
         converted, images_added = self.converter.download_pdf_and_convert(pdf_url, pdf_path, directory)
         self.on_log(f"完成：{record.resource_id} - 已保存 {converted} 页")
         return self._result_from_count(

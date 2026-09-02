@@ -214,9 +214,19 @@ class SqliteStorageTest(unittest.TestCase):
         self.assertEqual(recent_ids, ["running-1"])
         self.assertEqual(history.resources("done-1")[0]["resource_id"], "r1")
 
+    def test_task_history_cancel_active_task_without_resurrecting_on_finish(self) -> None:
+        history = TaskHistory(self.db_path)
+        history.start({"id": "running-1", "mode": "crawl", "status": "running"})
+
+        self.assertTrue(history.cancel("running-1"))
+        history.finish("running-1", {"status": "paused", "stats": {"resources_seen": 1}})
+
+        self.assertEqual(history.recent(mode="crawl"), [])
+
     def test_task_history_resume_and_completed_resource_ids(self) -> None:
         history = TaskHistory(self.db_path)
         history.start({"id": "paused-1", "mode": "crawl", "status": "paused"})
+        history.start({"id": "partial-1", "mode": "crawl", "status": "partial"})
         history.start({"id": "done-1", "mode": "crawl", "status": "completed"})
         history.record_resource(
             "paused-1",
@@ -236,6 +246,7 @@ class SqliteStorageTest(unittest.TestCase):
         )
 
         self.assertTrue(history.resume("paused-1", {"resources_seen": 1}))
+        self.assertTrue(history.resume("partial-1", {"resources_seen": 1}))
         self.assertFalse(history.resume("done-1", {"resources_seen": 1}))
         self.assertEqual(history.completed_resource_ids("paused-1"), {"done-resource"})
 

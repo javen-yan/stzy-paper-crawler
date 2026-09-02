@@ -128,12 +128,41 @@ class SvgConversionTest(unittest.TestCase):
             self.assertFalse((directory / "原文.pdf").exists())
             self.assertGreater((root / "试卷B.pdf").stat().st_size, 0)
 
+    def test_bad_existing_preview_original_is_downloaded_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            directory = root / "试卷C"
+            original_dir = directory / "original"
+            original_dir.mkdir(parents=True)
+            (original_dir / "练习1.svg").write_text("<html>proxy failed</html>", encoding="utf-8")
+            client = FakeClient(
+                {
+                    "https://cdn.test/1.svg": (
+                        '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80">'
+                        '<rect width="200" height="80" fill="white"/>'
+                        "</svg>"
+                    ).encode("utf-8"),
+                }
+            )
+            converter = DocumentConverter(AppSettings(output_dir=root), client, sleep=lambda _: None)
+
+            added = converter.download_preview_images(
+                ResourceRecord(resource_id="r1", resource_name="试卷C"),
+                ["https://cdn.test/1.svg"],
+                directory,
+            )
+
+            self.assertEqual(added, 1)
+            self.assertEqual(client.download_calls, 1)
+
 
 class FakeClient:
     def __init__(self, payloads: dict[str, bytes]) -> None:
         self.payloads = payloads
+        self.download_calls = 0
 
     def download(self, url: str, target: Path, *, headers: dict[str, str] | None = None) -> int:
+        self.download_calls += 1
         payload = self.payloads[url]
         target.write_bytes(payload)
         return len(payload)

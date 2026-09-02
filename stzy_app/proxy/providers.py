@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
 
@@ -43,18 +43,18 @@ class ProxyProvider:
     def prepare(self) -> ProxyPrepareResult:
         return ProxyPrepareResult(message="")
 
-    def fetch_proxies(self) -> list[ProxyEndpoint]:
+    def fetch_proxies(self, count: int | None = None) -> list[ProxyEndpoint]:
         raise NotImplementedError
 
 
 class GenericProxyProvider(ProxyProvider):
     display_name = "通用接口"
 
-    def fetch_proxies(self) -> list[ProxyEndpoint]:
+    def fetch_proxies(self, count: int | None = None) -> list[ProxyEndpoint]:
         if not self.settings.proxy_api_url:
             return []
         try:
-            response = _direct_get(self.settings.proxy_api_url, timeout=self.timeout)
+            response = _direct_get(self._url_for_count(count), timeout=self.timeout)
             response.raise_for_status()
         except requests.RequestException:
             return []
@@ -64,6 +64,23 @@ class GenericProxyProvider(ProxyProvider):
             proxy = normalize_proxy_url(response.text)
             return [ProxyEndpoint(proxy)] if proxy else []
         return self.proxies_from_payload(data)
+
+    def _url_for_count(self, count: int | None) -> str:
+        if not count or count <= 0:
+            return self.settings.proxy_api_url
+        parsed = urlparse(self.settings.proxy_api_url)
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        found = False
+        updated = []
+        for key, value in query:
+            if key == "count":
+                updated.append((key, str(count)))
+                found = True
+            else:
+                updated.append((key, value))
+        if not found:
+            updated.append(("count", str(count)))
+        return urlunparse(parsed._replace(query=urlencode(updated)))
 
     @classmethod
     def proxies_from_payload(cls, data: object) -> list[ProxyEndpoint]:

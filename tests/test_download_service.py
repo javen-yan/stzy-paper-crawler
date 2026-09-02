@@ -19,10 +19,12 @@ class DownloadServiceTest(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def test_preview_complete_does_not_request_pdf(self) -> None:
+        logs: list[str] = []
         service = self._service(
             pictures=["https://cdn.test/1.svg", "https://cdn.test/2.svg"],
             converter=FakeConverter(saved_count=2, preview_added=2),
             scheduler=FakeScheduler(),
+            logs=logs,
         )
         record = ResourceRecord(resource_id="r1", resource_name="试卷", page_count=2)
 
@@ -32,12 +34,16 @@ class DownloadServiceTest(unittest.TestCase):
         self.assertEqual(result.saved_pages, 2)
         self.assertEqual(result.images_added, 2)
         self.assertEqual(service.account_scheduler.download_calls, 0)
+        self.assertIn("资源进度：r1 - 获取预览图", logs)
+        self.assertIn("资源进度：r1 - 预览图 2 张", logs)
 
     def test_preview_incomplete_falls_back_to_pdf(self) -> None:
+        logs: list[str] = []
         service = self._service(
             pictures=["https://cdn.test/1.svg", "https://cdn.test/2.svg"],
             converter=FakeConverter(saved_count=2, preview_added=2, pdf_count=4, pdf_added=2),
             scheduler=FakeScheduler(url="https://cdn.test/file.pdf"),
+            logs=logs,
         )
         record = ResourceRecord(resource_id="r1", resource_name="试卷", page_count=4)
 
@@ -47,6 +53,8 @@ class DownloadServiceTest(unittest.TestCase):
         self.assertEqual(result.saved_pages, 4)
         self.assertEqual(result.source, "preview_fallback_pdf")
         self.assertEqual(service.account_scheduler.download_calls, 1)
+        self.assertIn("资源进度：r1 - 获取 PDF 地址", logs)
+        self.assertIn("资源进度：r1 - PDF 转图片", logs)
 
     def test_large_resource_goes_directly_to_pdf(self) -> None:
         service = self._service(
@@ -62,6 +70,21 @@ class DownloadServiceTest(unittest.TestCase):
         self.assertEqual(result.saved_pages, 12)
         self.assertEqual(result.source, "pdf")
         self.assertEqual(service.api.picture_calls, 0)
+
+    def test_bad_existing_sibling_pdf_requests_download_url_again(self) -> None:
+        service = self._service(
+            pictures=[],
+            converter=FakeConverter(pdf_count=12, pdf_added=12, pdf_valid=False),
+            scheduler=FakeScheduler(url="https://cdn.test/file.pdf"),
+        )
+        record = ResourceRecord(resource_id="r1", resource_name="试卷", page_count=12)
+        existing_pdf = self.output_dir / "试卷.pdf"
+        existing_pdf.write_text("<html>proxy failed</html>", encoding="utf-8")
+
+        result = service.handle_resource(record)
+
+        self.assertEqual(result.status, ResourceStatus.completed)
+        self.assertEqual(service.account_scheduler.download_calls, 1)
 
     def test_all_accounts_failed_returns_paid_unavailable(self) -> None:
         service = self._service(
@@ -83,8 +106,10 @@ class DownloadServiceTest(unittest.TestCase):
         pictures: list[str],
         converter: "FakeConverter",
         scheduler: "FakeScheduler",
+        logs: list[str] | None = None,
     ) -> DownloadService:
-        service = DownloadService(self.settings, FakeClient(), FakeApi(pictures))
+        log_sink = logs.append if logs is not None else None
+        service = DownloadService(self.settings, FakeClient(), FakeApi(pictures), on_log=log_sink)
         service.converter = converter
         service.account_scheduler = scheduler
         return service
@@ -114,11 +139,13 @@ class FakeConverter:
         preview_added: int = 0,
         pdf_count: int = 0,
         pdf_added: int = 0,
+        pdf_valid: bool = True,
     ) -> None:
         self.saved_count = saved_count
         self.preview_added = preview_added
         self.pdf_count = pdf_count
         self.pdf_added = pdf_added
+        self.pdf_valid = pdf_valid
 
     def download_preview_images(
         self,
@@ -133,6 +160,9 @@ class FakeConverter:
 
     def download_pdf_and_convert(self, pdf_url: str, pdf_path: Path, directory: Path) -> tuple[int, int]:
         return self.pdf_count, self.pdf_added
+
+    def pdf_file_looks_valid(self, path: Path) -> bool:
+        return self.pdf_valid
 
 
 class FakeUrlResult:

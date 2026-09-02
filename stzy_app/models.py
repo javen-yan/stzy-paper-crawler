@@ -7,6 +7,7 @@ from typing import Any
 
 class ResourceStatus(str, Enum):
     pending = "pending"
+    downloading = "downloading"
     completed = "completed"
     partial = "partial"
     skipped_paid = "skipped_paid"
