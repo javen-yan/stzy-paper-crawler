@@ -302,6 +302,7 @@ class RunnerFilterTest(unittest.TestCase):
         runner._stats_lock = threading.RLock()
         runner._stop = threading.Event()
         runner.completed_resource_ids = {"done-1"}
+        runner.retry_resource_ids = None
         runner.api = FakeListApi(
             [
                 {"resourceId": "done-1", "resourceName": "已完成", "provinceName": "安徽"},
@@ -320,6 +321,45 @@ class RunnerFilterTest(unittest.TestCase):
         self.assertEqual(handled, ["todo-1"])
         self.assertEqual(runner.stats.resources_seen, 1)
         self.assertEqual(runner.stats.resources_completed, 1)
+
+    def test_resume_with_retry_set_only_handles_incomplete_resources(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.settings = AppSettings(subject_name="数学")
+        runner.filters = type("Filters", (), {"max_pages_per_combo": None})()
+        runner.stats = type(
+            "Stats",
+            (),
+            {
+                "resources_total": 0,
+                "resources_seen": 0,
+                "resources_completed": 0,
+                "current_resource_name": "",
+            },
+        )()
+        runner._stats_lock = threading.RLock()
+        runner._stop = threading.Event()
+        runner.completed_resource_ids = {"done-1"}
+        runner.retry_resource_ids = {"failed-1", "partial-1"}
+        runner.api = FakeListApi(
+            [
+                {"resourceId": "done-1", "resourceName": "已完成", "provinceName": "安徽"},
+                {"resourceId": "failed-1", "resourceName": "失败", "provinceName": "安徽"},
+                {"resourceId": "partial-1", "resourceName": "未完成", "provinceName": "安徽"},
+                {"resourceId": "new-1", "resourceName": "新资源", "provinceName": "安徽"},
+            ]
+        )
+        runner._log = lambda message: None
+        runner._emit_progress = lambda: None
+        handled: list[str] = []
+        runner._handle_resources = lambda records: handled.extend(
+            record.resource_id for record in records
+        )
+
+        CrawlRunner._crawl_combo(runner, self._combo(TagOption("provinceCode", "340000", "安徽")))
+
+        self.assertEqual(handled, ["failed-1", "partial-1"])
+        self.assertEqual(runner.stats.resources_seen, 0)
+        self.assertEqual(runner.stats.resources_completed, 0)
 
     @staticmethod
     def _combo(province: TagOption) -> CrawlCombo:

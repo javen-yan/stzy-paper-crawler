@@ -53,6 +53,7 @@ class CrawlRunner:
         on_progress: ProgressCallback | None = None,
         on_proxy: ProxyCallback | None = None,
         completed_resource_ids: set[str] | None = None,
+        retry_resource_ids: set[str] | None = None,
     ) -> None:
         self.settings = settings
         self.filters = filters
@@ -82,6 +83,7 @@ class CrawlRunner:
         self._stats_lock = threading.RLock()
         self._storage_lock = threading.Lock()
         self.completed_resource_ids = completed_resource_ids or set()
+        self.retry_resource_ids = retry_resource_ids
 
     def stop(self) -> None:
         self._stop.set()
@@ -192,6 +194,11 @@ class CrawlRunner:
                     continue
                 record = build_record(item, combo)
                 record.subject = self.settings.subject_name
+                if self.retry_resource_ids is not None:
+                    if record.resource_id not in self.retry_resource_ids:
+                        continue
+                    records.append(record)
+                    continue
                 if record.resource_id in self.completed_resource_ids:
                     self._skip_completed_resource(record)
                     continue

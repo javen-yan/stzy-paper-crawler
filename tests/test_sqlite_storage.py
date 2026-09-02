@@ -249,6 +249,8 @@ class SqliteStorageTest(unittest.TestCase):
         self.assertTrue(history.resume("partial-1", {"resources_seen": 1}))
         self.assertFalse(history.resume("done-1", {"resources_seen": 1}))
         self.assertEqual(history.completed_resource_ids("paused-1"), {"done-resource"})
+        self.assertEqual(history.resource_ids("paused-1"), {"done-resource", "partial-resource"})
+        self.assertEqual(history.retry_resource_ids("paused-1"), {"partial-resource"})
 
     def test_preferences_persist_strategy_settings(self) -> None:
         preferences = Preferences(self.db_path)

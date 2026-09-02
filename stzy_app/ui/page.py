@@ -222,12 +222,21 @@ def build_ui() -> None:
         app_state.task(task_id)
         task_history = TaskHistory(local_settings.task_history_file) if mode == "crawl" else None
         completed_resource_ids: set[str] = set()
+        retry_resource_ids: set[str] | None = None
         if task_history:
             initial_stats = asdict(CrawlStats(task_mode=mode, phase="running", running=True))
             if resume_task_id:
                 completed_resource_ids = task_history.completed_resource_ids(task_id)
+                stored_resource_ids = task_history.resource_ids(task_id)
+                if stored_resource_ids:
+                    retry_resource_ids = task_history.retry_resource_ids(task_id)
                 task_history.resume(task_id, initial_stats)
-                app_state.log(f"继续任务：跳过已完成资源 {len(completed_resource_ids)} 份")
+                if retry_resource_ids is not None:
+                    app_state.log(
+                        f"继续任务：待补资源 {len(retry_resource_ids)} 份，已完成 {len(completed_resource_ids)} 份"
+                    )
+                else:
+                    app_state.log(f"继续任务：已完成 {len(completed_resource_ids)} 份")
             else:
                 task_history.start(
                     {
@@ -303,6 +312,7 @@ def build_ui() -> None:
                 on_progress=lambda stats, index=subject_index: emit_subject_progress(index, stats),
                 on_proxy=app_state.proxy,
                 completed_resource_ids=completed_resource_ids,
+                retry_resource_ids=retry_resource_ids,
             )
             app_state.runner = runner
             try:

@@ -294,6 +294,31 @@ class TaskHistory:
             ).fetchall()
         return {str(row["resource_id"]) for row in rows}
 
+    def resource_ids(self, task_id: str) -> set[str]:
+        with connect(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT resource_id
+                FROM task_resources
+                WHERE task_id = ?
+                """,
+                (task_id,),
+            ).fetchall()
+        return {str(row["resource_id"]) for row in rows}
+
+    def retry_resource_ids(self, task_id: str) -> set[str]:
+        with connect(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT resource_id
+                FROM task_resources
+                WHERE task_id = ?
+                    AND status != 'completed'
+                """,
+                (task_id,),
+            ).fetchall()
+        return {str(row["resource_id"]) for row in rows}
+
     @staticmethod
     def _json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, default=str)
