@@ -12,3 +12,5 @@ start-macos.command
 start-linux.sh
 start-windows.bat
 start-windows.ps1
+build/
+dist/

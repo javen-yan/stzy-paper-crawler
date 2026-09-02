@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import multiprocessing
+import os
 import socket
 import tempfile
+import threading
 import webbrowser
 from pathlib import Path
 
@@ -52,14 +55,32 @@ def open_existing_instance() -> None:
     webbrowser.open(url)
 
 
+def open_browser_later(url: str) -> None:
+    if os.environ.get("STZY_NO_BROWSER") == "1":
+        return
+    threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+
+
 def main() -> None:
     if not acquire_single_instance_lock():
         open_existing_instance()
         return
-    build_ui()
     port = find_free_port()
     PORT_FILE.write_text(str(port), encoding="utf-8")
-    ui.run(title="STZY 试卷图片抓取", reload=False, port=port)
+    url = f"http://127.0.0.1:{port}"
+    print(f"STZY Paper Crawler 正在启动：{url}")
+    print("如果浏览器没有自动打开，请复制上面的地址到浏览器。")
+    open_browser_later(url)
+    ui.run(
+        build_ui,
+        host="127.0.0.1",
+        title="STZY 试卷图片抓取",
+        reload=False,
+        port=port,
+        show=False,
+        show_welcome_message=False,
+        uvicorn_logging_level="critical",
+    )
 
 
 @app.exception_handler(HTTPException)
@@ -67,7 +88,8 @@ async def http_exception_handler(_: Request, exc: HTTPException) -> PlainTextRes
     return PlainTextResponse(str(exc.detail), status_code=exc.status_code)
 
 
-if __name__ in {"__main__", "__mp_main__"}:
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
     try:
         main()
     except KeyboardInterrupt:
