@@ -318,4 +318,13 @@ jobs:
         env:
           UPLOAD_DIR: downloaded-artifacts
           OSS_PREFIX: stzy-paper-crawler/${{ steps.version.outputs.value }}
+          OSS_URLS_OUTPUT: oss-urls.txt
         run: python scripts/upload_to_oss.py
+
+      - name: Update Release OSS links
+        if: ${{ github.event_name == 'release' || github.event_name == 'workflow_dispatch' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+          OSS_URLS_OUTPUT: oss-urls.txt
+        run: python scripts/update_release_oss_links.py

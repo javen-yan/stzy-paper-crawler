@@ -43,6 +43,10 @@ def main() -> None:
     for url in uploaded:
         print(url)
 
+    output_path = os.environ.get("OSS_URLS_OUTPUT", "").strip()
+    if output_path:
+        Path(output_path).write_text("\n".join(uploaded) + "\n", encoding="utf-8")
+
 
 if __name__ == "__main__":
     main()
