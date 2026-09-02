@@ -123,7 +123,7 @@ class PhoneLoginTest(unittest.TestCase):
                 }
             )
         )
-        client = StzyHttpClient(AppSettings())
+        client = StzyHttpClient(AppSettings(proxy_pool="", proxy_api_url=""))
 
         headers = client.headers_for_account(credential)
 
@@ -153,6 +153,8 @@ class PhoneLoginTest(unittest.TestCase):
             settings = AppSettings(
                 state_file=Path(tmpdir) / "stzy.db",
                 account_pool_file=Path(tmpdir) / "stzy.db",
+                proxy_pool="",
+                proxy_api_url="",
             )
             with patch("stzy_app.http.client.StzyHttpClient.post_json", fake_post_json):
                 credential = login_with_phone_password(settings, "13800138000")
@@ -172,6 +174,8 @@ class PhoneLoginTest(unittest.TestCase):
             settings = AppSettings(
                 state_file=Path(tmpdir) / "stzy.db",
                 account_pool_file=Path(tmpdir) / "stzy.db",
+                proxy_pool="",
+                proxy_api_url="",
             )
             AccountPool(settings.account_pool_file).upsert(
                 AccountCredential(

@@ -72,8 +72,30 @@ Token、Cookie、User-Agent、Referer、Origin 和必要浏览器请求头；Tok
 python -m stzy_app.main
 ```
 
-默认会在本机启动 NiceGUI 控制台。输出目录为 `output/stzy`，索引文件为
-`output/stzy/index.csv`。
+默认会在本机启动 NiceGUI 控制台。输出目录为 `output`，任务和索引数据记录在
+`stzy.db`。
+
+终端同步显示运行日志：
+
+```bash
+STZY_CONSOLE_LOG=1 STZY_NO_BROWSER=1 python -m stzy_app.main
+```
+
+固定代理可以在“采集策略”里填写，也可以通过环境变量传入：
+
+```bash
+STZY_PROXY_MODE=fixed STZY_PROXY_POOL="socks5://user:pass@host:443" python -m stzy_app.main
+```
+
+也可以使用提取接口：
+
+```bash
+STZY_PROXY_MODE=api STZY_PROXY_PROVIDER=shenlong STZY_PROXY_API_URL="http://api.shenlongip.com/ip?key=...&pattern=json&count=1&sign=..." python -m stzy_app.main
+```
+
+提取接口返回神龙 HTTP 的 `{"code":200,"data":[{"ip":"...","port":...}]}` 格式时会自动拼成 `http://ip:port`。接口代理会复用到失败后再刷新，不会每个请求都提取。
+
+使用神龙 HTTP 时，可在“采集策略”里填写白名单账号和签名，点击“绑定本机 IP”。任务开始前也会自动检查一次。
 
 筛选项里的“不限”表示不向接口传该字段，例如选择“安徽 + 七年级上 + 期末”，年份保持“不限”时会一次查询全部年份。
 

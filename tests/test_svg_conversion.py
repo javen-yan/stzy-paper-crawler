@@ -4,7 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PIL import Image
+
+from stzy_app.config import AppSettings
 from stzy_app.crawler.converters import DocumentConverter
+from stzy_app.models import ResourceRecord
 
 
 class SvgConversionTest(unittest.TestCase):
@@ -60,6 +64,79 @@ class SvgConversionTest(unittest.TestCase):
 
             self.assertEqual(converted, 1)
             self.assertGreater((directory / "练习1.png").stat().st_size, 0)
+
+    def test_preview_originals_generate_sibling_pdf_and_cleanup_originals(self) -> None:
+        import pymupdf
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fixture_png = root / "source.png"
+            Image.new("RGB", (120, 80), "white").save(fixture_png)
+            client = FakeClient(
+                {
+                    "https://cdn.test/1.svg": (
+                        '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80">'
+                        '<rect width="200" height="80" fill="white"/>'
+                        '<text x="20" y="45" font-size="28">A</text>'
+                        "</svg>"
+                    ).encode("utf-8"),
+                    "https://cdn.test/2.png": fixture_png.read_bytes(),
+                }
+            )
+            converter = DocumentConverter(AppSettings(output_dir=root), client, sleep=lambda _: None)
+            directory = root / "试卷A"
+
+            added = converter.download_preview_images(
+                ResourceRecord(resource_id="r1", resource_name="试卷A"),
+                ["https://cdn.test/1.svg", "https://cdn.test/2.png"],
+                directory,
+            )
+
+            self.assertEqual(added, 2)
+            self.assertGreater((directory / "练习1.png").stat().st_size, 0)
+            self.assertGreater((directory / "练习2.png").stat().st_size, 0)
+            self.assertFalse((directory / "original").exists())
+            final_pdf = root / "试卷A.pdf"
+            self.assertGreater(final_pdf.stat().st_size, 0)
+            with pymupdf.open(final_pdf) as document:
+                self.assertEqual(document.page_count, 2)
+
+    def test_pdf_download_moves_to_sibling_pdf_and_removes_legacy_pdf(self) -> None:
+        import pymupdf
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_pdf = root / "download.pdf"
+            document = pymupdf.open()
+            page = document.new_page(width=200, height=120)
+            page.insert_text((24, 60), "STZY")
+            document.save(source_pdf)
+            document.close()
+            client = FakeClient({"https://cdn.test/file.pdf": source_pdf.read_bytes()})
+            converter = DocumentConverter(AppSettings(output_dir=root), client, sleep=lambda _: None)
+            directory = root / "试卷B"
+
+            converted, added = converter.download_pdf_and_convert(
+                "https://cdn.test/file.pdf",
+                directory / "原文.pdf",
+                directory,
+            )
+
+            self.assertEqual(converted, 1)
+            self.assertEqual(added, 1)
+            self.assertGreater((directory / "练习1.png").stat().st_size, 0)
+            self.assertFalse((directory / "原文.pdf").exists())
+            self.assertGreater((root / "试卷B.pdf").stat().st_size, 0)
+
+
+class FakeClient:
+    def __init__(self, payloads: dict[str, bytes]) -> None:
+        self.payloads = payloads
+
+    def download(self, url: str, target: Path, *, headers: dict[str, str] | None = None) -> int:
+        payload = self.payloads[url]
+        target.write_bytes(payload)
+        return len(payload)
 
 
 if __name__ == "__main__":

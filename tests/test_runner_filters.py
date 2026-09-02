@@ -5,6 +5,7 @@ import threading
 from dataclasses import dataclass
 
 from stzy_app.config import AppSettings
+from stzy_app.crawler.account_scheduler import AccountScheduler
 from stzy_app.crawler.runner import CrawlRunner
 from stzy_app.models import CrawlCombo, ResourceRecord, ResourceStatus, TagOption
 
@@ -38,6 +39,32 @@ class RunnerFilterTest(unittest.TestCase):
 
         self.assertTrue(matched)
 
+    def test_selected_province_rejects_missing_province_result(self) -> None:
+        combo = self._combo(TagOption("provinceCode", "340000", "安徽"))
+
+        matched = CrawlRunner._matches_selected_province(
+            {"resourceName": "高一数学期末卷"},
+            combo,
+        )
+
+        self.assertFalse(matched)
+
+    def test_selected_national_province_only_accepts_national_result(self) -> None:
+        combo = self._combo(TagOption("provinceCode", "000000", "全国"))
+
+        self.assertTrue(
+            CrawlRunner._matches_selected_province(
+                {"provinceName": "全国", "resourceName": "全国高一数学期末卷"},
+                combo,
+            )
+        )
+        self.assertFalse(
+            CrawlRunner._matches_selected_province(
+                {"provinceName": "安徽", "resourceName": "安徽高一数学期末卷"},
+                combo,
+            )
+        )
+
     def test_unlimited_province_keeps_api_results(self) -> None:
         combo = self._combo(TagOption("provinceCode", "", "不限"))
 
@@ -49,33 +76,27 @@ class RunnerFilterTest(unittest.TestCase):
         self.assertTrue(matched)
 
     def test_paid_resource_can_be_downloaded_when_later_account_succeeds(self) -> None:
-        runner = CrawlRunner.__new__(CrawlRunner)
-        runner.stats = type("Stats", (), {"paid_skipped": 0})()
-        runner.client = FakeClient([FakeAccount("普通账号"), FakeAccount("VIP账号")])
-        runner.api = FakeDownloadApi(
+        client = FakeClient([FakeAccount("普通账号"), FakeAccount("VIP账号")])
+        api = FakeDownloadApi(
             {
                 "普通账号": RuntimeError("额度不足"),
                 "VIP账号": "https://cdn.stzy.com/stzy/pdf/vip.pdf",
             }
         )
-        runner._log = lambda message: None
         record = ResourceRecord(
             resource_id="paid-1",
             resource_name="付费试卷",
             price=5,
         )
 
-        url = CrawlRunner._download_pdf_url_with_accounts(runner, record)
+        result = AccountScheduler(client, api).download_pdf_url(record)
 
-        self.assertEqual(url, "https://cdn.stzy.com/stzy/pdf/vip.pdf")
-        self.assertEqual(record.status, ResourceStatus.pending)
-        self.assertEqual(runner.stats.paid_skipped, 0)
+        self.assertEqual(result.url, "https://cdn.stzy.com/stzy/pdf/vip.pdf")
+        self.assertEqual(result.paid_unavailable, 0)
 
     def test_paid_resource_is_unavailable_only_after_all_accounts_fail(self) -> None:
-        runner = CrawlRunner.__new__(CrawlRunner)
-        runner.stats = type("Stats", (), {"paid_skipped": 0})()
-        runner.client = FakeClient([FakeAccount("普通账号"), FakeAccount("VIP账号")])
-        runner.api = FakeDownloadApi(
+        client = FakeClient([FakeAccount("普通账号"), FakeAccount("VIP账号")])
+        api = FakeDownloadApi(
             {
                 "普通账号": RuntimeError("额度不足"),
                 "VIP账号": RuntimeError("无权限"),
@@ -85,73 +106,65 @@ class RunnerFilterTest(unittest.TestCase):
                 "VIP账号": {"price": 3, "surplusNum": 0, "userType": 1},
             },
         )
-        runner._log = lambda message: None
         record = ResourceRecord(
             resource_id="paid-1",
             resource_name="付费试卷",
             price=5,
         )
 
-        url = CrawlRunner._download_pdf_url_with_accounts(runner, record)
+        result = AccountScheduler(client, api).download_pdf_url(record)
 
-        self.assertEqual(url, "")
-        self.assertEqual(record.status, ResourceStatus.paid_unavailable)
-        self.assertEqual(runner.stats.paid_skipped, 1)
+        self.assertEqual(result.url, "")
+        self.assertEqual(result.status, ResourceStatus.paid_unavailable)
+        self.assertEqual(result.paid_unavailable, 1)
 
     def test_paid_resource_auth_error_is_compact(self) -> None:
-        runner = CrawlRunner.__new__(CrawlRunner)
-        runner.stats = type("Stats", (), {"paid_skipped": 0})()
-        runner.client = FakeClient([FakeAccount("过期账号")])
-        runner.api = FakeDownloadApi(
+        client = FakeClient([FakeAccount("过期账号")])
+        api = FakeDownloadApi(
             {"过期账号": RuntimeError("STZY API error -1: 暂未登录或token已经过期")},
             {"过期账号": {"check_error": "STZY API error -1: 暂未登录或token已经过期"}},
         )
-        runner._log = lambda message: None
         record = ResourceRecord(resource_id="paid-1", resource_name="付费试卷", price=5)
 
-        url = CrawlRunner._download_pdf_url_with_accounts(runner, record)
+        result = AccountScheduler(client, api).download_pdf_url(record)
 
-        self.assertEqual(url, "")
-        self.assertEqual(record.error, "登录态已失效，请重新登录或换一个可用账号")
-        self.assertNotIn("STZY API error", record.error)
+        self.assertEqual(result.url, "")
+        self.assertEqual(result.error, "登录态已失效，请重新登录或换一个可用账号")
+        self.assertNotIn("STZY API error", result.error)
 
     def test_paid_resource_with_vip_zero_price_is_not_marked_paid_unavailable(self) -> None:
-        runner = CrawlRunner.__new__(CrawlRunner)
-        runner.stats = type("Stats", (), {"paid_skipped": 0})()
-        runner.client = FakeClient([FakeAccount("VIP账号")])
-        runner.api = FakeDownloadApi(
+        client = FakeClient([FakeAccount("VIP账号")])
+        api = FakeDownloadApi(
             {"VIP账号": RuntimeError("下载接口失败")},
             {"VIP账号": {"price": 0, "surplusNum": 92, "userType": 3, "rank": 3}},
         )
-        runner._log = lambda message: None
         record = ResourceRecord(
             resource_id="paid-1",
             resource_name="付费试卷",
             price=3,
         )
 
-        with self.assertRaisesRegex(RuntimeError, "实付 0"):
-            CrawlRunner._download_pdf_url_with_accounts(runner, record)
+        result = AccountScheduler(client, api).download_pdf_url(record)
 
-        self.assertEqual(record.status, ResourceStatus.pending)
-        self.assertEqual(runner.stats.paid_skipped, 0)
+        self.assertEqual(result.url, "")
+        self.assertIn("实付 0", result.error)
+        self.assertIsNone(result.status)
+        self.assertEqual(result.paid_unavailable, 0)
 
     def test_paid_resource_schedules_zero_price_vip_account_first(self) -> None:
-        runner = CrawlRunner.__new__(CrawlRunner)
-        runner.client = FakeClient([FakeAccount("普通账号"), FakeAccount("VIP账号")])
-        runner.api = FakeDownloadApi(
+        client = FakeClient([FakeAccount("普通账号"), FakeAccount("VIP账号")])
+        api = FakeDownloadApi(
             {},
             {
                 "普通账号": {"price": 3, "surplusNum": 5, "userType": 1},
                 "VIP账号": {"price": 0, "surplusNum": 92, "userType": 3, "rank": 3},
             },
         )
-        runner._log = lambda message: None
         record = ResourceRecord(resource_id="paid-1", resource_name="付费试卷", price=3)
 
-        attempts = CrawlRunner._scheduled_download_attempts(runner, record)
+        attempts = AccountScheduler(client, api).scheduled_attempts(record)
 
-        self.assertEqual([attempt[0] for attempt in attempts], ["VIP账号", "普通账号"])
+        self.assertEqual([attempt.name for attempt in attempts], ["VIP账号", "普通账号"])
 
     def test_download_workers_are_clamped_for_paper_concurrency(self) -> None:
         runner = CrawlRunner.__new__(CrawlRunner)
@@ -184,6 +197,42 @@ class RunnerFilterTest(unittest.TestCase):
 
         self.assertCountEqual(handled, ["paper-1", "paper-2", "paper-3"])
 
+    def test_resume_skips_completed_resources_and_retries_remaining(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.settings = AppSettings(subject_name="数学")
+        runner.filters = type("Filters", (), {"max_pages_per_combo": None})()
+        runner.stats = type(
+            "Stats",
+            (),
+            {
+                "resources_total": 0,
+                "resources_seen": 0,
+                "resources_completed": 0,
+                "current_resource_name": "",
+            },
+        )()
+        runner._stats_lock = threading.RLock()
+        runner._stop = threading.Event()
+        runner.completed_resource_ids = {"done-1"}
+        runner.api = FakeListApi(
+            [
+                {"resourceId": "done-1", "resourceName": "已完成", "provinceName": "安徽"},
+                {"resourceId": "todo-1", "resourceName": "待继续", "provinceName": "安徽"},
+            ]
+        )
+        runner._log = lambda message: None
+        runner._emit_progress = lambda: None
+        handled: list[str] = []
+        runner._handle_resources = lambda records: handled.extend(
+            record.resource_id for record in records
+        )
+
+        CrawlRunner._crawl_combo(runner, self._combo(TagOption("provinceCode", "340000", "安徽")))
+
+        self.assertEqual(handled, ["todo-1"])
+        self.assertEqual(runner.stats.resources_seen, 1)
+        self.assertEqual(runner.stats.resources_completed, 1)
+
     @staticmethod
     def _combo(province: TagOption) -> CrawlCombo:
         return CrawlCombo(
@@ -206,6 +255,14 @@ class FakeClient:
 
     def headers_for_account(self, account: FakeAccount) -> dict[str, str]:
         return {"x-test-account": account.name}
+
+
+class FakeListApi:
+    def __init__(self, items: list[dict[str, object]]) -> None:
+        self.items = items
+
+    def list_resources(self, combo: object, filters: object, page_num: int) -> dict[str, object]:
+        return {"total": len(self.items), "totalPage": 1, "list": self.items}
 
 
 class FakeDownloadApi:

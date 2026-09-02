@@ -5,7 +5,11 @@ from stzy_app.ui.view_model import (
     action_hint,
     combo_metric,
     current_result_empty_copy,
+    display_task_rows,
+    download_action_text,
+    log_level_counts,
     progress_value,
+    render_log_lines,
     status_view,
 )
 
@@ -23,8 +27,8 @@ class StatusViewTest(unittest.TestCase):
 
         view = status_view(stats, running=False)
 
-        self.assertEqual(view["stage"], "预览")
-        self.assertEqual(view["detail"], "预估完成，找到 24 份匹配试卷")
+        self.assertEqual(view["stage"], "可下载")
+        self.assertEqual(view["detail"], "匹配 24 份试卷")
         self.assertEqual(view["class"], "estimated")
 
     def test_crawl_complete_shows_download_complete(self) -> None:
@@ -40,7 +44,7 @@ class StatusViewTest(unittest.TestCase):
 
         view = status_view(stats, running=False)
 
-        self.assertEqual(view["stage"], "结束")
+        self.assertEqual(view["stage"], "完成")
         self.assertEqual(view["detail"], "下载完成")
         self.assertEqual(view["class"], "done")
 
@@ -49,8 +53,8 @@ class StatusViewTest(unittest.TestCase):
 
         view = status_view(stats, running=False)
 
-        self.assertEqual(view["stage"], "结束")
-        self.assertEqual(view["detail"], "登录失效，请重新登录后再开始任务")
+        self.assertEqual(view["stage"], "登录失效")
+        self.assertEqual(view["detail"], "更新账号后重试")
         self.assertEqual(view["class"], "failed")
 
     def test_partial_resources_are_reported_as_partial_completion(self) -> None:
@@ -66,8 +70,8 @@ class StatusViewTest(unittest.TestCase):
 
         view = status_view(stats, running=False)
 
-        self.assertEqual(view["stage"], "结束")
-        self.assertEqual(view["detail"], "部分完成，异常或未完整保存 2 个")
+        self.assertEqual(view["stage"], "部分完成")
+        self.assertEqual(view["detail"], "2 个未完成")
         self.assertEqual(view["class"], "partial")
 
     def test_paid_unavailable_is_reported_as_partial_completion(self) -> None:
@@ -83,8 +87,8 @@ class StatusViewTest(unittest.TestCase):
 
         view = status_view(stats, running=False)
 
-        self.assertEqual(view["stage"], "结束")
-        self.assertEqual(view["detail"], "部分完成，异常或未完整保存 3 个")
+        self.assertEqual(view["stage"], "部分完成")
+        self.assertEqual(view["detail"], "3 个未完成")
         self.assertEqual(view["class"], "partial")
 
     def test_running_copy_depends_on_task_mode(self) -> None:
@@ -105,10 +109,11 @@ class StatusViewTest(unittest.TestCase):
             running=True,
         )
 
-        self.assertEqual(status_view(estimate, running=True)["detail"], "正在预估匹配试卷 1/3")
+        self.assertEqual(status_view(estimate, running=True)["stage"], "预估中")
+        self.assertEqual(status_view(estimate, running=True)["detail"], "1/3 个组合")
         self.assertEqual(
             status_view(crawl, running=True)["detail"],
-            "已处理 1/13 份试卷：山东省青岛市高一英语期末试卷",
+            "1/13 份试卷：山东省青岛市高一英语期末试卷",
         )
         self.assertEqual(status_view(crawl, running=True)["count"], "1/13")
 
@@ -130,11 +135,73 @@ class StatusViewTest(unittest.TestCase):
             resources_seen=9,
         )
 
-        self.assertEqual(action_hint(stats, running=False), "预估找到 9 份试卷，可以开始下载。")
+        self.assertEqual(action_hint(stats, running=False), "匹配 9 份试卷。")
         self.assertEqual(
             current_result_empty_copy("estimate"),
-            ("预估不会生成下载记录", "预估只更新匹配数量，不生成下载记录"),
+            ("暂无下载记录", "预估只更新数量"),
         )
+
+    def test_running_task_hint_explains_stop_flow(self) -> None:
+        stats = CrawlStats(task_mode="crawl", running=True)
+
+        self.assertEqual(action_hint(stats, running=True), "停止后会在当前请求结束。")
+        self.assertEqual(download_action_text(stats, running=True), "下载中")
+
+    def test_stopped_crawl_can_be_restarted(self) -> None:
+        stats = CrawlStats(task_mode="crawl", phase="finished", outcome="paused", paused=True)
+
+        self.assertEqual(action_hint(stats, running=False), "可调整筛选后重新运行。")
+        self.assertEqual(download_action_text(stats, running=False), "重新下载")
+
+    def test_history_rows_only_allow_manage_for_unfinished_tasks(self) -> None:
+        rows = display_task_rows(
+            [
+                {
+                    "id": "task-1",
+                    "status": "completed",
+                    "started_at": "2026-09-02T11:28:00",
+                    "filters": {"brief": "安徽 / 高一下 / 数学"},
+                    "stats": {"resources_seen": 1, "images_downloaded": 17},
+                },
+                {
+                    "id": "task-2",
+                    "status": "paused",
+                    "started_at": "2026-09-02T11:29:00",
+                    "filters": {"brief": "安徽 / 高一下 / 语文"},
+                    "stats": {"resources_seen": 2},
+                },
+                {
+                    "id": "task-3",
+                    "status": "running",
+                    "started_at": "2026-09-02T11:30:00",
+                    "filters": {"brief": "安徽 / 高一下 / 英语"},
+                    "stats": {"resources_seen": 3},
+                }
+            ]
+        )
+
+        self.assertEqual(rows[0]["status_label"], "下载完成")
+        self.assertEqual(rows[0]["status_class"], "done")
+        self.assertFalse(rows[0]["can_manage"])
+        self.assertTrue(rows[0]["can_archive"])
+        self.assertEqual(rows[0]["stats"]["images_downloaded"], 17)
+        self.assertTrue(rows[1]["can_manage"])
+        self.assertFalse(rows[1]["can_archive"])
+        self.assertTrue(rows[2]["can_manage"])
+        self.assertFalse(rows[2]["can_archive"])
+
+    def test_logs_distinguish_filter_from_warning_and_error(self) -> None:
+        logs = [
+            "[13:01:00] 接口返回非目标地区，已过滤：已选 贵州，返回 全国 - 试卷",
+            "[13:01:16] 下载完成：下载 9 张图片，付费不可用 0 份",
+            "[13:02:00] PDF 补全失败：无权限",
+        ]
+
+        self.assertEqual(log_level_counts(logs), {"error": 1, "warning": 0, "filter": 1})
+        rendered = render_log_lines(logs)
+        self.assertIn("log-line-filter", rendered)
+        self.assertIn("log-line-success", rendered)
+        self.assertIn("log-line-error", rendered)
 
 
 if __name__ == "__main__":

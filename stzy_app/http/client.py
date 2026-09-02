@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import base64
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 from requests import Response, Session
@@ -12,6 +13,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from stzy_app.config import AppSettings
+from stzy_app.proxy import create_proxy_provider, normalize_proxy_url
 from stzy_app.storage.accounts import AccountCredential, AccountPool
 
 
@@ -31,13 +33,23 @@ class StzyApiError(RuntimeError):
 class StzyHttpClient:
     """Small requests-based client for STZY public endpoints."""
 
-    def __init__(self, settings: AppSettings) -> None:
+    def __init__(self, settings: AppSettings, *, on_proxy: Callable[[str], None] | None = None) -> None:
         self.settings = settings
+        self.on_proxy = on_proxy or (lambda _proxy: None)
         self.account_pool = AccountPool(settings.account_pool_file)
+        self._proxy_provider = create_proxy_provider(settings) if self.proxy_mode == "api" else None
+        self._proxy_urls = self._load_proxy_urls()
+        self._api_proxy_urls: list[str] = []
+        self._api_proxy_index = 0
+        self._proxy_failures: dict[str, int] = {}
+        self._proxy_cooldowns: dict[str, float] = {}
+        self._proxy_index = 0
+        self._proxy_lock = threading.Lock()
         self.session = self._build_session()
 
     def _build_session(self) -> Session:
         session = requests.Session()
+        session.trust_env = False
         retry = Retry(
             total=self.settings.max_retries,
             connect=self.settings.max_retries,
@@ -202,7 +214,8 @@ class StzyHttpClient:
             }
         )
         try:
-            response = self.session.get(
+            response = self._request(
+                "get",
                 f"{self.settings.site_base_url}/layout/paper-lib",
                 headers=headers,
                 timeout=self.timeout,
@@ -344,6 +357,106 @@ class StzyHttpClient:
     def timeout(self) -> tuple[float, float]:
         return (self.settings.connect_timeout, self.settings.read_timeout)
 
+    @property
+    def proxy_mode(self) -> str:
+        mode = str(getattr(self.settings, "proxy_mode", "off") or "off").strip().lower()
+        return mode if mode in {"off", "fixed", "api"} else "off"
+
+    def _load_proxy_urls(self) -> list[str]:
+        if self.proxy_mode != "fixed":
+            return []
+        return list(dict.fromkeys(self._parse_proxy_pool(self.settings.proxy_pool)))
+
+    @classmethod
+    def _parse_proxy_pool(cls, value: str) -> list[str]:
+        proxies: list[str] = []
+        for raw_item in value.splitlines():
+            item = normalize_proxy_url(raw_item)
+            if not item:
+                continue
+            proxies.append(item)
+        return proxies
+
+    @staticmethod
+    def _normalize_proxy_url(value: object) -> str:
+        return normalize_proxy_url(value)
+
+    def _fetch_proxy_from_api(self) -> str:
+        proxies = self._fetch_proxies_from_api()
+        return proxies[0] if proxies else ""
+
+    def _fetch_proxies_from_api(self) -> list[str]:
+        if self.proxy_mode != "api" or not self._proxy_provider:
+            return []
+        return [endpoint.url for endpoint in self._proxy_provider.fetch_proxies() if endpoint.url]
+
+    def _next_proxy_from_list(self, proxies: list[str], index_name: str, now: float) -> str:
+        if not proxies:
+            return ""
+        index = getattr(self, index_name)
+        for _ in range(len(proxies)):
+            proxy = proxies[index % len(proxies)]
+            index += 1
+            if self._proxy_cooldowns.get(proxy, 0) <= now:
+                setattr(self, index_name, index)
+                return proxy
+        setattr(self, index_name, index)
+        return ""
+
+    def _next_proxy_url(self) -> str:
+        if self.proxy_mode == "off":
+            return ""
+        now = time.time()
+        with self._proxy_lock:
+            proxy = self._next_proxy_from_list(self._proxy_urls, "_proxy_index", now)
+            if proxy:
+                return proxy
+            proxy = self._next_proxy_from_list(self._api_proxy_urls, "_api_proxy_index", now)
+            if proxy:
+                return proxy
+            self._api_proxy_urls = list(dict.fromkeys(self._fetch_proxies_from_api()))
+            self._api_proxy_index = 0
+            return self._next_proxy_from_list(self._api_proxy_urls, "_api_proxy_index", now)
+
+    def _request_proxies(self) -> dict[str, str] | None:
+        proxy = self._next_proxy_url()
+        if not proxy:
+            return None
+        return {"http": proxy, "https": proxy}
+
+    def _record_proxy_success(self, proxy: str) -> None:
+        if not proxy:
+            return
+        with self._proxy_lock:
+            self._proxy_failures.pop(proxy, None)
+            self._proxy_cooldowns.pop(proxy, None)
+
+    def _record_proxy_failure(self, proxy: str) -> None:
+        if not proxy:
+            return
+        with self._proxy_lock:
+            failures = self._proxy_failures.get(proxy, 0) + 1
+            self._proxy_failures[proxy] = failures
+            if failures >= max(1, self.settings.proxy_max_failures):
+                self._proxy_cooldowns[proxy] = time.time() + self.settings.proxy_cooldown_seconds
+                self._proxy_failures[proxy] = 0
+
+    def _request(self, method: str, url: str, **kwargs) -> Response:
+        proxy = self._next_proxy_url()
+        kwargs["proxies"] = {"http": proxy, "https": proxy} if proxy else None
+        try:
+            response = getattr(self.session, method)(url, **kwargs)
+        except requests.RequestException:
+            self._record_proxy_failure(proxy)
+            raise
+        status_code = int(getattr(response, "status_code", 200) or 200)
+        if status_code in {403, 429, 500, 502, 503, 504}:
+            self._record_proxy_failure(proxy)
+        else:
+            self._record_proxy_success(proxy)
+            self.on_proxy(proxy)
+        return response
+
     def post_json(
         self,
         path: str,
@@ -351,7 +464,8 @@ class StzyHttpClient:
         *,
         headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        response = self.session.post(
+        response = self._request(
+            "post",
             self._url(path),
             json=payload,
             headers=self._auth_headers() if headers is None else headers,
@@ -360,7 +474,8 @@ class StzyHttpClient:
         return self._decode(response)
 
     def get_json(self, path: str, *, headers: dict[str, str] | None = None) -> dict[str, Any]:
-        response = self.session.get(
+        response = self._request(
+            "get",
             self._url(path),
             headers=self._auth_headers() if headers is None else headers,
             timeout=self.timeout,
@@ -368,7 +483,8 @@ class StzyHttpClient:
         return self._decode(response)
 
     def download(self, url: str, target: Path, *, headers: dict[str, str] | None = None) -> int:
-        with self.session.get(
+        with self._request(
+            "get",
             url,
             stream=True,
             headers=self._auth_headers() if headers is None else headers,

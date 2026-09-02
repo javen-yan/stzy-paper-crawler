@@ -175,6 +175,10 @@ class SqliteStorageTest(unittest.TestCase):
         self.assertEqual(recent[0]["filters"]["brief"], "安徽 / 七年级上 / 月考 / 数学")
         self.assertEqual(recent[0]["resource_record_count"], 1)
         self.assertEqual(recent[0]["first_local_dir"], "/tmp/stzy/试卷1")
+        resources = history.resources("task-1")
+        self.assertEqual(resources[0]["resource_id"], "r1")
+        self.assertEqual(resources[0]["resource_name"], "试卷1")
+        self.assertEqual(resources[0]["image_count"], 4)
 
     def test_task_history_can_filter_download_tasks(self) -> None:
         history = TaskHistory(self.db_path)
@@ -187,6 +191,54 @@ class SqliteStorageTest(unittest.TestCase):
 
         self.assertEqual([task["id"] for task in recent], ["crawl-1"])
 
+    def test_task_history_archive_only_terminal_task_without_removing_resources(self) -> None:
+        history = TaskHistory(self.db_path)
+        history.start({"id": "running-1", "mode": "crawl", "status": "running"})
+        history.start({"id": "done-1", "mode": "crawl", "status": "running"})
+        history.record_resource(
+            "done-1",
+            ResourceRecord(
+                resource_id="r1",
+                resource_name="试卷1",
+                image_count=4,
+                status=ResourceStatus.completed,
+                local_dir="/tmp/stzy/试卷1",
+            ),
+        )
+        history.finish("done-1", {"status": "completed", "stats": {"resources_seen": 1}})
+
+        self.assertFalse(history.archive("running-1"))
+        self.assertTrue(history.archive("done-1"))
+
+        recent_ids = [task["id"] for task in history.recent(mode="crawl")]
+        self.assertEqual(recent_ids, ["running-1"])
+        self.assertEqual(history.resources("done-1")[0]["resource_id"], "r1")
+
+    def test_task_history_resume_and_completed_resource_ids(self) -> None:
+        history = TaskHistory(self.db_path)
+        history.start({"id": "paused-1", "mode": "crawl", "status": "paused"})
+        history.start({"id": "done-1", "mode": "crawl", "status": "completed"})
+        history.record_resource(
+            "paused-1",
+            ResourceRecord(
+                resource_id="done-resource",
+                resource_name="已完成",
+                status=ResourceStatus.completed,
+            ),
+        )
+        history.record_resource(
+            "paused-1",
+            ResourceRecord(
+                resource_id="partial-resource",
+                resource_name="未完成",
+                status=ResourceStatus.partial,
+            ),
+        )
+
+        self.assertTrue(history.resume("paused-1", {"resources_seen": 1}))
+        self.assertFalse(history.resume("done-1", {"resources_seen": 1}))
+        self.assertEqual(history.completed_resource_ids("paused-1"), {"done-resource"})
+
     def test_preferences_persist_strategy_settings(self) -> None:
         preferences = Preferences(self.db_path)
         preferences.set(
@@ -197,6 +249,12 @@ class SqliteStorageTest(unittest.TestCase):
                 "image_delay_seconds": 0.4,
                 "list_delay_seconds": 1.2,
                 "concurrency": 1,
+                "proxy_mode": "api",
+                "proxy_provider": "shenlong",
+                "proxy_pool": "http://127.0.0.1:7890",
+                "proxy_api_url": "http://api.example/proxy",
+                "shenlong_whitelist_key": "account",
+                "shenlong_whitelist_sign": "sign",
             },
         )
 
@@ -204,6 +262,12 @@ class SqliteStorageTest(unittest.TestCase):
 
         self.assertEqual(saved["max_pages_per_combo"], 2)
         self.assertEqual(saved["list_delay_seconds"], 1.2)
+        self.assertEqual(saved["proxy_mode"], "api")
+        self.assertEqual(saved["proxy_provider"], "shenlong")
+        self.assertEqual(saved["proxy_pool"], "http://127.0.0.1:7890")
+        self.assertEqual(saved["proxy_api_url"], "http://api.example/proxy")
+        self.assertEqual(saved["shenlong_whitelist_key"], "account")
+        self.assertEqual(saved["shenlong_whitelist_sign"], "sign")
 
 
 if __name__ == "__main__":

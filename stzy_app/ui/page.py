@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from nicegui import background_tasks, run, ui
 
@@ -13,13 +14,24 @@ from stzy_app.auth import (
 )
 from stzy_app.config import AppSettings, settings
 from stzy_app.crawler import CrawlRunner, CrawlStats, TagCatalog
-from stzy_app.http import StzyApiError, StzyHttpClient
+from stzy_app.http import (
+    StzyApiError,
+    StzyHttpClient,
+)
 from stzy_app.models import CrawlFilters
+from stzy_app.proxy import (
+    create_proxy_provider,
+    current_public_ip,
+    infer_proxy_provider,
+    normalize_proxy_url,
+)
 from stzy_app.storage import AccountCredential, AccountPool, Preferences, TaskHistory
 from stzy_app.ui.catalogs import (
     ALL_VALUE,
     DEFAULT_STUDY_PHASE_CODE,
     STUDY_PHASES,
+    load_catalog_cache,
+    save_catalog_cache,
     fetch_subject_options,
     fetch_tag_catalogs,
 )
@@ -33,10 +45,13 @@ from stzy_app.ui.view_model import (
     current_result_empty_copy,
     display_record_rows,
     display_task_rows,
+    download_action_text,
     image_metric as build_image_metric,
     issue_metric as build_issue_metric,
+    log_level_counts,
     progress_percent_text,
     progress_value as build_progress_value,
+    render_log_lines,
     resource_metric as build_resource_metric,
     status_view,
 )
@@ -45,29 +60,22 @@ def build_ui() -> None:
     app_state = UiState()
     ui.add_head_html(f"<style>{LIGHT_THEME_CSS}</style>")
 
-    try:
-        subject_options = fetch_subject_options()
-    except Exception as exc:  # noqa: BLE001
-        subject_options = {
-            "200": {},
-            "300": {},
-        }
-        app_state.log(f"学科标签加载失败：{exc}")
-    else:
-        app_state.log("学科分类已在启动时同步")
-
-    try:
-        catalogs = fetch_tag_catalogs()
-    except Exception as exc:  # noqa: BLE001
-        catalogs = {study_phase_code: TagCatalog({}) for study_phase_code in STUDY_PHASES}
-        app_state.log(f"筛选分类加载失败：{exc}")
-    else:
-        app_state.log("筛选分类已在启动时同步")
+    def notify(message: str, **kwargs) -> None:
+        kwargs.setdefault("position", "top")
+        ui.notify(message, **kwargs)
 
     preferences = Preferences(settings.task_history_file)
     strategy_settings = preferences.get("strategy")
+    subject_options, catalogs, catalog_cache_updated_at = load_catalog_cache(preferences)
+    if catalog_cache_updated_at:
+        app_state.log(f"分类缓存已加载：{catalog_cache_updated_at}")
+    else:
+        app_state.log("分类缓存为空，可手动刷新")
     history_page = 1
     history_page_size = 10
+    managed_history_task: dict[str, object] | None = None
+    unfinished_task_statuses = {"running", "paused"}
+    terminal_task_statuses = {"completed", "partial", "failed", "auth_expired"}
 
     def catalog() -> TagCatalog:
         return catalogs.get(study_phase.value, TagCatalog({}))
@@ -86,6 +94,35 @@ def build_ui() -> None:
             return values if ALL_VALUE not in value else []
         return [] if value in ("", ALL_VALUE) else [str(value)]
 
+    def normalized_proxy_mode(raw_settings: dict[str, object]) -> str:
+        mode = str(raw_settings.get("proxy_mode") or "").strip().lower()
+        if mode in {"off", "fixed", "api"}:
+            return mode
+        return "off"
+
+    def normalized_proxy_provider(raw_settings: dict[str, object]) -> str:
+        return infer_proxy_provider(raw_settings.get("proxy_provider"))
+
+    def proxy_status_text(raw_settings: dict[str, object]) -> str:
+        mode = normalized_proxy_mode(raw_settings)
+        if mode == "off":
+            return "未启用"
+        if mode == "api":
+            return "待获取" if str(raw_settings.get("proxy_api_url") or "").strip() else "未配置"
+        proxy = first_fixed_proxy(raw_settings.get("proxy_pool"))
+        return proxy if proxy else "未配置"
+
+    def first_fixed_proxy(value: object) -> str:
+        for line in str(value or "").splitlines():
+            proxy = normalize_proxy_url(line)
+            if not proxy:
+                continue
+            parsed = urlparse(proxy)
+            if parsed.hostname:
+                return parsed.hostname
+            return proxy
+        return ""
+
     def current_settings() -> AppSettings:
         subject_code = "" if subject_select.value == ALL_VALUE else str(subject_select.value or "")
         return AppSettings(
@@ -101,6 +138,12 @@ def build_ui() -> None:
             list_delay_seconds=float(list_delay.value or 0.8),
             image_delay_seconds=float(image_delay.value or 0.3),
             concurrency=int(concurrency.value or settings.concurrency),
+            proxy_mode=str(proxy_mode.value or "off"),
+            proxy_provider=str(proxy_provider.value or settings.proxy_provider),
+            proxy_pool=str(proxy_pool.value or "").strip(),
+            proxy_api_url=str(proxy_api_url.value or "").strip(),
+            shenlong_whitelist_key=str(shenlong_whitelist_key.value or "").strip(),
+            shenlong_whitelist_sign=str(shenlong_whitelist_sign.value or "").strip(),
             access_token=None,
             cookie_header=None,
         )
@@ -165,27 +208,33 @@ def build_ui() -> None:
         local_settings: AppSettings,
         local_filters: CrawlFilters,
         filter_summary: dict[str, str],
+        subject_entries: list[tuple[str, str]],
+        resume_task_id: str | None = None,
     ) -> None:
         started_at = datetime.now()
-        task_id = started_at.strftime("%Y%m%d%H%M%S%f")
+        task_id = resume_task_id or started_at.strftime("%Y%m%d%H%M%S%f")
         task_history = TaskHistory(local_settings.task_history_file) if mode == "crawl" else None
+        completed_resource_ids: set[str] = set()
         if task_history:
-            task_history.start(
-                {
-                    "id": task_id,
-                    "mode": mode,
-                    "started_at": started_at.isoformat(timespec="seconds"),
-                    "filters": filter_summary,
-                    "stats": asdict(CrawlStats(task_mode=mode, phase="running", running=True)),
-                }
-            )
-        subject_entries = [(local_settings.subject_code, local_settings.subject_name)]
-        if not local_settings.subject_code:
-            subject_entries = list(
-                fetch_subject_options().get(local_settings.study_phase_code, {}).items()
-            )
+            initial_stats = asdict(CrawlStats(task_mode=mode, phase="running", running=True))
+            if resume_task_id:
+                completed_resource_ids = task_history.completed_resource_ids(task_id)
+                task_history.resume(task_id, initial_stats)
+                app_state.log(f"继续未结束任务：跳过已完成资源 {len(completed_resource_ids)} 份")
+            else:
+                task_history.start(
+                    {
+                        "id": task_id,
+                        "mode": mode,
+                        "started_at": started_at.isoformat(timespec="seconds"),
+                        "filters": filter_summary,
+                        "stats": initial_stats,
+                    }
+                )
+        if not subject_entries and local_settings.subject_code:
+            subject_entries = [(local_settings.subject_code, local_settings.subject_name)]
         if not subject_entries:
-            app_state.log("没有可用学科，请重启工具或检查网络后再试")
+            app_state.log("没有可用学科，请刷新分类后再试")
             failed_stats = CrawlStats(task_mode=mode, phase="finished", outcome="failed", failed=1)
             app_state.progress(failed_stats)
             if task_history:
@@ -245,6 +294,8 @@ def build_ui() -> None:
                     task_history.record_resource(task_id, record) if task_history else None,
                 ),
                 on_progress=lambda stats, index=subject_index: emit_subject_progress(index, stats),
+                on_proxy=app_state.proxy,
+                completed_resource_ids=completed_resource_ids,
             )
             app_state.runner = runner
             try:
@@ -321,18 +372,56 @@ def build_ui() -> None:
             )
 
     async def start(mode: str) -> None:
-        _, _, _, running = app_state.snapshot()
+        nonlocal managed_history_task
+        _, _, _, running, _ = app_state.snapshot()
         if running:
-            ui.notify("已有任务在运行", type="warning")
+            notify("已有任务在运行", type="warning")
             return
-        await refresh_remote_categories(notify_success=False, fail_block=False)
         local_settings = current_settings()
+        if not await prepare_proxy_provider(local_settings, notify_success=False):
+            return
         local_filters = current_filters()
+        subject_entries = (
+            [(local_settings.subject_code, local_settings.subject_name)]
+            if local_settings.subject_code
+            else list(subject_options.get(local_settings.study_phase_code, {}).items())
+        )
         filter_summary = current_filter_summary(local_settings, local_filters)
+        task_filter_summary = dict(filter_summary)
+        task_filter_summary["_settings"] = {
+            "output_dir": str(local_settings.output_dir),
+            "study_phase_code": local_settings.study_phase_code,
+            "subject_code": local_settings.subject_code,
+            "proxy_mode": local_settings.proxy_mode,
+            "proxy_provider": local_settings.proxy_provider,
+            "proxy_pool": local_settings.proxy_pool,
+            "proxy_api_url": local_settings.proxy_api_url,
+            "shenlong_whitelist_key": local_settings.shenlong_whitelist_key,
+            "shenlong_whitelist_sign": local_settings.shenlong_whitelist_sign,
+        }
+        task_filter_summary["_filters"] = asdict(local_filters)
+        resume_task_id = None
+        if mode == "crawl" and managed_history_task:
+            task_status = str(managed_history_task.get("status") or "")
+            task_id = str(managed_history_task.get("id") or "")
+            if task_status in unfinished_task_statuses and task_id:
+                resume_task_id = task_id
+            else:
+                managed_history_task = None
+        else:
+            managed_history_task = None
         label = "预估" if mode == "estimate" else "抓取"
-        app_state.log(f"启动{label}任务")
+        app_state.log(f"{'继续' if resume_task_id else '启动'}{label}任务")
         background_tasks.create(
-            run.io_bound(run_crawler, mode, local_settings, local_filters, filter_summary),
+            run.io_bound(
+                run_crawler,
+                mode,
+                local_settings,
+                local_filters,
+                task_filter_summary,
+                subject_entries,
+                resume_task_id,
+            ),
             name=f"stzy-{mode}",
         )
 
@@ -345,28 +434,27 @@ def build_ui() -> None:
         phone = str(account_phone.value or "").strip()
         password = str(account_password.value or "").strip()
         if not phone:
-            ui.notify("请填写手机号", type="warning")
+            notify("请填写手机号", type="warning")
             return
         local_settings = current_settings()
         try:
             credential = await run.io_bound(login_with_phone_password, local_settings, phone, password)
         except Exception as exc:  # noqa: BLE001
             app_state.log(f"手机号登录失败：{exc}")
-            ui.notify(f"手机号登录失败：{exc}", type="negative")
+            notify(f"手机号登录失败：{exc}", type="negative")
             return
         AccountPool(local_settings.account_pool_file).upsert(credential)
         account_phone.value = ""
         account_password.value = ""
         refresh_accounts()
         app_state.log(f"手机号登录成功：{credential.name}")
-        ui.notify(f"手机号登录成功：{credential.name}", type="positive")
+        notify(f"手机号登录成功：{credential.name}", type="positive")
 
     def account_pool_path() -> Path:
         return settings.account_pool_file
 
     def account_rows() -> list[dict[str, str]]:
         pool = AccountPool(account_pool_path())
-        client = StzyHttpClient(current_settings())
         enabled_index = 0
         rows = []
         for account in pool.accounts:
@@ -376,12 +464,10 @@ def build_ui() -> None:
                 cookie_header=account.cookie,
                 access_token=account.access_token,
             )
-            is_valid = False
-            if account.enabled:
-                is_valid = client.account_is_valid(account)
+            is_valid = bool(account.enabled and account.usable and token_locally_valid)
 
             order = "-"
-            if account.usable and is_valid:
+            if is_valid:
                 enabled_index += 1
                 order = str(enabled_index)
             expires_at = StzyHttpClient.auth_expires_at(
@@ -492,7 +578,7 @@ def build_ui() -> None:
         name = str(account_name.value or "").strip()
         auth_value = str(account_auth_value.value or "").strip()
         if not auth_value:
-            ui.notify("请粘贴 Token、Cookie 或脚本复制的 JSON", type="warning")
+            notify("请粘贴 Token、Cookie 或脚本复制的 JSON", type="warning")
             return
         local_settings = current_settings()
         try:
@@ -504,10 +590,10 @@ def build_ui() -> None:
                 settings=local_settings,
             )
         except ValueError as exc:
-            ui.notify(str(exc), type="warning")
+            notify(str(exc), type="warning")
             return
         except Exception as exc:  # noqa: BLE001
-            ui.notify(f"官网接口验证失败：{exc}", type="negative")
+            notify(f"官网接口验证失败：{exc}", type="negative")
             return
         pool = AccountPool(local_settings.account_pool_file)
         pool.upsert(credential)
@@ -515,14 +601,14 @@ def build_ui() -> None:
         account_auth_value.value = ""
         refresh_accounts()
         app_state.log(f"高级导入账号已验证并保存：{credential.name}")
-        ui.notify("账号已验证并保存", type="positive")
+        notify("账号已验证并保存", type="positive")
 
     def remove_named_account(name: str) -> None:
         if not name:
             return
         AccountPool(account_pool_path()).remove(name)
         refresh_accounts()
-        ui.notify("账号已删除")
+        notify("账号已删除")
 
     def toggle_account(name: str) -> None:
         pool = AccountPool(account_pool_path())
@@ -531,7 +617,7 @@ def build_ui() -> None:
                 account.enabled = not account.enabled
                 pool.save()
                 refresh_accounts()
-                ui.notify("账号状态已更新")
+                notify("账号状态已更新")
                 return
 
     def set_output_dir(path: Path) -> None:
@@ -544,7 +630,7 @@ def build_ui() -> None:
         if selected_dir:
             set_output_dir(selected_dir)
             return
-        ui.notify("未选择目录；如果系统选择器无法打开，可以直接编辑保存位置。", type="warning")
+        notify("未选择目录，可直接编辑保存位置。", type="warning")
 
     def open_account_dialog() -> None:
         refresh_accounts()
@@ -554,7 +640,7 @@ def build_ui() -> None:
         path = Path(path_value)
         if open_path(path):
             return
-        ui.notify("目录不存在", type="warning")
+        notify("目录不存在", type="warning")
 
     def set_history_page(page: int) -> None:
         nonlocal history_page
@@ -565,31 +651,14 @@ def build_ui() -> None:
         path = Path(path_value)
         if preview_first_file(path):
             return
-        ui.notify("暂无可预览图片", type="warning")
-
-    def latest_completed_dir() -> str:
-        _, records, _, _ = app_state.snapshot()
-        for record in records:
-            if record.get("status") in {"completed", "partial"} and record.get("local_dir"):
-                return str(record["local_dir"])
-        return ""
-
-    def open_output_dir() -> None:
-        open_directory(output_dir.value)
-
-    def preview_latest() -> None:
-        local_dir = latest_completed_dir()
-        if not local_dir:
-            ui.notify("暂无已下载资源", type="warning")
-            return
-        preview_directory(local_dir)
+        notify("暂无可预览图片", type="warning")
 
     def handle_resource_action(event) -> None:
         payload = event.args or {}
         action = payload.get("action")
         local_dir = str(payload.get("local_dir") or "")
         if not local_dir:
-            ui.notify("暂无本地目录", type="warning")
+            notify("暂无本地目录", type="warning")
             return
         if action == "preview":
             preview_directory(local_dir)
@@ -597,12 +666,90 @@ def build_ui() -> None:
             open_directory(local_dir)
 
     def handle_task_action(event) -> None:
+        nonlocal managed_history_task
         payload = event.args or {}
+        action = str(payload.get("action") or "open")
         local_dir = str(payload.get("local_dir") or "")
+        if action == "manage":
+            managed_history_task = payload
+            restore_history_task(payload)
+            refresh()
+            return
+        if action == "archive":
+            task_id = str(payload.get("id") or "")
+            if not task_id:
+                notify("缺少任务 ID，无法归档", type="warning")
+                return
+            if not TaskHistory(task_history_path()).archive(task_id):
+                notify("只有已结束任务可以归档", type="warning")
+                return
+            if managed_history_task and str(managed_history_task.get("id") or "") == task_id:
+                managed_history_task = None
+            refresh()
+            notify("任务已归档，下载资源未删除", type="positive")
+            return
         if not local_dir:
-            ui.notify("暂无下载路径", type="warning")
+            notify("暂无下载路径", type="warning")
             return
         open_directory(local_dir)
+
+    def restore_history_task(task: dict[str, object]) -> None:
+        filters = task.get("filters") if isinstance(task.get("filters"), dict) else {}
+        raw_settings = filters.get("_settings") if isinstance(filters.get("_settings"), dict) else {}
+        raw_filters = filters.get("_filters") if isinstance(filters.get("_filters"), dict) else {}
+        if not raw_settings or not raw_filters:
+            notify("已选择历史任务；旧任务缺少筛选快照，可打开目录或按当前筛选重新下载。", type="warning")
+            return
+        output_dir.value = str(raw_settings.get("output_dir") or output_dir.value)
+        study_phase.value = str(raw_settings.get("study_phase_code") or study_phase.value)
+        refresh_filter_options(reset=False)
+        subject_select.value = str(raw_settings.get("subject_code") or ALL_VALUE) or ALL_VALUE
+        for control, key in [
+            (scene_select, "scenes"),
+            (year_select, "years"),
+            (rank_select, "ranks"),
+            (province_select, "provinces"),
+            (grade_select, "grades"),
+            (term_select, "terms"),
+        ]:
+            values = raw_filters.get(key) if isinstance(raw_filters.get(key), list) else []
+            control.value = str(values[0]) if values else ALL_VALUE
+        file_type.value = str(raw_filters.get("file_type") or file_type.value)
+        max_pages.value = raw_filters.get("max_pages_per_combo") or max_pages.value
+        proxy_mode.value = normalized_proxy_mode(raw_settings)
+        proxy_provider.value = normalized_proxy_provider(raw_settings)
+        proxy_pool.value = str(raw_settings.get("proxy_pool") or "")
+        proxy_api_url.value = str(raw_settings.get("proxy_api_url") or "")
+        shenlong_whitelist_key.value = str(raw_settings.get("shenlong_whitelist_key") or "")
+        shenlong_whitelist_sign.value = str(raw_settings.get("shenlong_whitelist_sign") or "")
+        proxy_ip_value.text = proxy_status_text(raw_settings)
+        proxy_ip_value.update()
+        for control in [
+            output_dir,
+            study_phase,
+            subject_select,
+            scene_select,
+            year_select,
+            rank_select,
+            province_select,
+            grade_select,
+            term_select,
+            file_type,
+            max_pages,
+        ]:
+            control.update()
+        notify("已载入暂停任务的筛选条件，可重新预估或重新下载。", type="positive")
+
+    def history_task_stats(task: dict[str, object]) -> CrawlStats:
+        raw_stats = task.get("stats") if isinstance(task.get("stats"), dict) else {}
+        stat_fields = CrawlStats.__dataclass_fields__
+        values = {key: value for key, value in raw_stats.items() if key in stat_fields}
+        stats = CrawlStats(**values)
+        stats.task_mode = str(stats.task_mode or task.get("mode") or "crawl")
+        stats.phase = str(stats.phase or "finished")
+        stats.outcome = str(stats.outcome or task.get("status") or "")
+        stats.running = False
+        return stats
 
     def keep_or_reset(control, fallback: str = ALL_VALUE, *, reset: bool = True) -> None:
         if reset or control.value not in control.options:
@@ -625,11 +772,13 @@ def build_ui() -> None:
             quick_phase_select.value = study_phase.value
             quick_subject_select.options = current_subject_options()
             quick_province_select.options = options("provinceCode")
+            quick_year_select.options = options("yearCode")
             quick_term_select.options = options("termCode")
             quick_scene_select.options = options("sceneCode")
             for control in [
                 quick_subject_select,
                 quick_province_select,
+                quick_year_select,
                 quick_term_select,
                 quick_scene_select,
             ]:
@@ -647,18 +796,21 @@ def build_ui() -> None:
         return ""
 
     def apply_quick_filter() -> None:
+        nonlocal managed_history_task
         if (
             quick_subject_select.value == ALL_VALUE
             and quick_province_select.value == ALL_VALUE
+            and quick_year_select.value == ALL_VALUE
             and quick_term_select.value == ALL_VALUE
             and quick_scene_select.value == ALL_VALUE
         ):
-            ui.notify("请选择快速筛选条件", type="warning")
+            notify("请选择快速筛选条件", type="warning")
             return
 
         study_phase.value = quick_phase_select.value
         subject_select.value = quick_subject_select.value
         province_select.value = quick_province_select.value
+        year_select.value = quick_year_select.value
         term_select.value = quick_term_select.value
         scene_select.value = quick_scene_select.value
         if quick_term_select.value != ALL_VALUE:
@@ -671,12 +823,14 @@ def build_ui() -> None:
             study_phase,
             subject_select,
             scene_select,
+            year_select,
             province_select,
             grade_select,
             term_select,
         ]:
             control.update()
-        ui.notify("快速筛选已应用", type="positive")
+        managed_history_task = None
+        notify("快速筛选已应用", type="positive")
 
     def change_quick_phase() -> None:
         study_phase.value = quick_phase_select.value
@@ -694,17 +848,63 @@ def build_ui() -> None:
         except Exception as exc:  # noqa: BLE001
             app_state.log(f"同步分类失败：{exc}")
             if fail_block:
-                ui.notify("同步分类失败，请稍后再试", type="negative")
+                notify("同步分类失败，请稍后再试", type="negative")
             else:
-                ui.notify("分类自动同步失败，继续使用当前分类", type="warning")
+                notify("分类自动同步失败，继续使用当前分类", type="warning")
             return not fail_block
         subject_options = new_subject_options
         catalogs = new_catalogs
+        save_catalog_cache(preferences, subject_options, catalogs)
         refresh_filter_options(reset=False)
-        app_state.log("分类已从远端同步")
+        app_state.log("分类已刷新并保存")
         if notify_success:
-            ui.notify("分类已同步", type="positive")
+            notify("分类已刷新", type="positive")
         return True
+
+    async def prepare_proxy_provider(
+        local_settings: AppSettings | None = None,
+        *,
+        notify_success: bool = True,
+    ) -> bool:
+        local_settings = local_settings or current_settings()
+        if local_settings.proxy_mode != "api":
+            if notify_success:
+                notify("切换到提取接口后再绑定", type="warning")
+            return True
+        provider = create_proxy_provider(local_settings)
+        if not provider.supports_whitelist:
+            if notify_success:
+                notify("当前服务商无需绑定", type="positive")
+            return True
+        try:
+            result = await run.io_bound(provider.prepare)
+        except Exception as exc:  # noqa: BLE001
+            app_state.log(f"{provider.display_name} 准备失败：{exc}")
+            notify(f"{provider.display_name} 准备失败：{exc}", type="negative")
+            return False
+        if result.message:
+            app_state.log(result.message)
+        if notify_success:
+            notify("白名单已绑定" if result.added else "白名单已存在", type="positive")
+        return True
+
+    async def bind_current_ip() -> None:
+        await prepare_proxy_provider(notify_success=True)
+
+    async def load_current_ip() -> None:
+        try:
+            ip = await run.io_bound(
+                current_public_ip,
+                (settings.connect_timeout, settings.read_timeout),
+            )
+        except Exception as exc:  # noqa: BLE001
+            my_ip_value.text = "获取失败"
+            my_ip_value.update()
+            app_state.log(f"当前 IP 获取失败：{exc}")
+            return
+        my_ip_value.text = ip
+        my_ip_value.update()
+        app_state.log(f"当前 IP：{ip}")
 
     def make_filter_toggle(label: str, options_map: dict[str, str], value: str, on_change=None):
         with ui.element("div").classes("filter-row"):
@@ -717,13 +917,93 @@ def build_ui() -> None:
             control.props("flat no-caps")
         return control
 
+    def configure_task_table(task_table, *, empty_icon: str, include_manage: bool) -> None:
+        task_table.on("task-action", handle_task_action)
+        task_table.add_slot(
+            "no-data",
+            f"""
+            <div class="table-empty-state">
+              <q-icon name="{empty_icon}" size="20px" />
+              <span>{{{{ props.message }}}}</span>
+            </div>
+            """,
+        )
+        task_table.add_slot(
+            "body-cell-status_label",
+            """
+            <q-td :props="props">
+              <span :class="'history-status-badge history-status-' + props.row.status_class">
+                {{ props.row.status_label }}
+              </span>
+            </q-td>
+            """,
+        )
+        manage_button = (
+            """
+              <q-btn
+                v-if="props.row.can_manage"
+                dense unelevated no-caps size="sm"
+                class="task-action-btn task-action-manage"
+                icon="tune"
+                label="管理"
+                title="管理任务"
+                @click="$parent.$emit('task-action', {
+                  action: 'manage',
+                  ...props.row
+                })"
+              />
+            """
+            if include_manage
+            else ""
+        )
+        archive_button = (
+            """
+              <q-btn
+                v-if="props.row.can_archive"
+                dense flat no-caps size="sm"
+                class="task-action-btn task-action-archive"
+                icon="archive"
+                label="归档"
+                title="归档任务"
+                @click="$parent.$emit('task-action', {
+                  action: 'archive',
+                  id: props.row.id
+                })"
+              />
+            """
+            if not include_manage
+            else ""
+        )
+        task_table.add_slot(
+            "body-cell-actions",
+            f"""
+            <q-td :props="props">
+              <div class="task-row-actions">
+                {manage_button}
+                <q-btn
+                  dense flat no-caps size="sm"
+                  class="task-action-btn task-action-open"
+                  icon="folder_open"
+                  label="目录"
+                  title="打开目录"
+                  @click="$parent.$emit('task-action', {{
+                    action: 'open',
+                    local_dir: props.row.local_dir
+                  }})"
+                />
+                {archive_button}
+              </div>
+            </q-td>
+            """,
+        )
+
     with ui.column().classes("stzy-shell w-full gap-0"):
         with ui.row().classes("topbar w-full items-center"):
             with ui.row().classes("topbar-inner items-center justify-between"):
-                with ui.column().classes("gap-0"):
-                    ui.label("试卷图片下载").classes("text-lg font-semibold")
-                    ui.label("本地下载工具").classes("muted text-xs")
-                with ui.row().classes("items-center gap-2"):
+                with ui.row().classes("topbar-left items-center"):
+                    with ui.column().classes("topbar-brand gap-0"):
+                        ui.label("试卷下载器").classes("text-lg font-semibold")
+                        ui.label("本地控制台").classes("muted text-xs")
                     with ui.row().classes("topbar-path items-center gap-1"):
                         output_dir = ui.input(
                             "保存位置",
@@ -733,13 +1013,36 @@ def build_ui() -> None:
                             icon="folder_open",
                             on_click=choose_output_dir,
                         ).classes("topbar-path-button").props("flat round dense")
+                with ui.row().classes("topbar-actions items-center gap-2"):
+                    with ui.row().classes("topbar-network items-center"):
+                        ui.icon("public").classes("topbar-network-icon")
+                        ui.label("我的 IP").classes("topbar-network-label")
+                        my_ip_value = ui.label("获取中").classes("topbar-network-value")
+                    with ui.row().classes("topbar-network items-center"):
+                        ui.icon("hub").classes("topbar-network-icon")
+                        ui.label("代理 IP").classes("topbar-network-label")
+                        proxy_ip_value = ui.label(proxy_status_text(strategy_settings)).classes(
+                            "topbar-network-value"
+                        )
+                    ui.button(
+                        "代理配置",
+                        icon="hub",
+                        on_click=lambda: proxy_dialog.open(),
+                    ).props("flat no-caps")
                     ui.button("采集策略", icon="speed", on_click=lambda: strategy_dialog.open()).props(
                         "flat no-caps"
                     )
+                    ui.button(
+                        "刷新分类",
+                        icon="sync",
+                        on_click=lambda: refresh_remote_categories(
+                            notify_success=True,
+                            fail_block=False,
+                        ),
+                    ).props("flat no-caps")
                     ui.button("账号配置", icon="manage_accounts", on_click=open_account_dialog).props(
                         "flat no-caps"
                     )
-                    status_label = ui.label("等待").classes("status-pill")
 
         with ui.column().classes("main-wrap gap-4 py-5"):
             with ui.element("div").classes("workbench"):
@@ -747,7 +1050,7 @@ def build_ui() -> None:
                     with ui.column().classes("panel filter-panel p-5 gap-5"):
                         with ui.row().classes("w-full items-center justify-between"):
                             ui.label("筛选条件").classes("section-title")
-                            ui.label("不选表示不限").classes("muted text-xs")
+                            ui.label("快速 + 高级").classes("muted text-xs")
                         with ui.element("div").classes("quick-filter"):
                             with ui.row().classes("quick-filter-head w-full items-center justify-between"):
                                 ui.label("快速筛选").classes("quick-filter-title")
@@ -768,6 +1071,11 @@ def build_ui() -> None:
                                     label="地区",
                                     value=ALL_VALUE,
                                 ).classes("quick-filter-input")
+                                quick_year_select = ui.select(
+                                    {ALL_VALUE: "年份不限"},
+                                    label="年份",
+                                    value=ALL_VALUE,
+                                ).classes("quick-filter-input")
                                 quick_term_select = ui.select(
                                     {ALL_VALUE: "年级学期不限"},
                                     label="年级学期",
@@ -779,7 +1087,7 @@ def build_ui() -> None:
                                     value=ALL_VALUE,
                                 ).classes("quick-filter-input")
                                 ui.button("应用", icon="bolt", on_click=apply_quick_filter).classes(
-                                    "quick-filter-button"
+                                    "quick-filter-button step-action step-action-one"
                                 ).props("unelevated no-caps color=primary")
                         with ui.expansion("高级筛选").classes("filter-more advanced-filter w-full"):
                             with ui.element("div").classes("filter-list"):
@@ -827,73 +1135,42 @@ def build_ui() -> None:
                                 )
                         refresh_filter_options(reset=True)
 
-                        with ui.element("div").classes("download-section task-control-panel"):
-                            with ui.row().classes("task-control-head w-full items-center justify-between"):
-                                ui.label("任务操作").classes("task-control-title")
-                                action_context = ui.label("当前筛选：不限").classes("task-context")
-                            with ui.element("div").classes("action-grid"):
-                                estimate_button = ui.button(
-                                    "预估",
-                                    icon="analytics",
-                                    on_click=lambda: start("estimate"),
-                                ).classes(
-                                    "secondary-action"
-                                ).props("outline no-caps")
-                                download_button = ui.button(
-                                    "开始下载",
-                                    icon="download",
-                                    on_click=lambda: start("crawl"),
-                                ).classes(
-                                    "primary-action"
-                                ).props("unelevated no-caps color=primary")
-                                pause_button = ui.button("暂停", icon="pause", on_click=stop).classes(
-                                    "secondary-action"
-                                ).props("outline no-caps")
-                                pause_button.disable()
-                            action_hint_label = ui.label("先预估确认数量，再开始下载；下载结果会进入历史任务。").classes(
-                                "task-action-hint"
-                            )
+                    task_columns = [
+                        {"name": "started_at", "label": "时间", "field": "started_at"},
+                        {
+                            "name": "brief",
+                            "label": "筛选",
+                            "field": "brief",
+                            "align": "left",
+                        },
+                        {"name": "status_label", "label": "状态", "field": "status_label"},
+                        {"name": "resources_seen", "label": "试卷", "field": "resources_seen"},
+                        {"name": "images_downloaded", "label": "图片", "field": "images_downloaded"},
+                        {"name": "actions", "label": "操作", "field": "actions", "align": "right"},
+                    ]
+
+                    with ui.column().classes("panel history-panel p-5 gap-3"):
+                        with ui.row().classes("w-full items-center justify-between"):
+                            ui.label("当前任务").classes("section-title")
+                            ui.label("运行中 / 已暂停").classes("muted text-xs")
+                        active_task_table = ui.table(columns=task_columns, rows=[], row_key="id").classes(
+                            "compact-table task-history-table w-full"
+                        )
+                        active_task_table.props('flat bordered dense no-data-label="暂无当前任务"')
+                        configure_task_table(active_task_table, empty_icon="inbox", include_manage=True)
 
                     with ui.column().classes("panel history-panel p-5 gap-3"):
                         with ui.row().classes("w-full items-center justify-between"):
                             ui.label("历史任务").classes("section-title")
-                            ui.label("只记录下载任务").classes("muted text-xs")
-                        task_columns = [
-                            {"name": "started_at", "label": "时间", "field": "started_at"},
-                            {
-                                "name": "brief",
-                                "label": "筛选",
-                                "field": "brief",
-                                "align": "left",
-                            },
-                            {"name": "status_label", "label": "状态", "field": "status_label"},
-                            {"name": "resources_seen", "label": "试卷", "field": "resources_seen"},
-                            {"name": "images_downloaded", "label": "图片", "field": "images_downloaded"},
-                            {"name": "actions", "label": "操作", "field": "actions", "align": "right"},
-                        ]
+                            ui.label("已结束任务").classes("muted text-xs")
                         task_table = ui.table(columns=task_columns, rows=[], row_key="id").classes(
                             "compact-table task-history-table w-full"
                         )
-                        task_table.props('flat bordered dense no-data-label="暂无下载任务记录"')
-                        task_table.on("task-action", handle_task_action)
-                        task_table.add_slot(
-                            "body-cell-actions",
-                            """
-                            <q-td :props="props">
-                              <q-btn
-                                dense flat no-caps size="sm"
-                                icon="folder_open"
-                                label="打开"
-                                @click="$parent.$emit('task-action', {
-                                  local_dir: props.row.local_dir
-                                })"
-                              />
-                            </q-td>
-                            """,
-                        )
+                        task_table.props('flat bordered dense no-data-label="暂无历史任务记录"')
+                        configure_task_table(task_table, empty_icon="inventory_2", include_manage=False)
                         with ui.row().classes("history-pagination w-full items-center justify-between"):
                             history_page_label = ui.label("第 1 / 1 页").classes("muted text-xs")
-                            with ui.row().classes("items-center gap-2"):
+                            with ui.row().classes("items-center gap-2") as history_page_actions:
                                 history_prev_button = ui.button(
                                     "上一页",
                                     icon="chevron_left",
@@ -909,10 +1186,37 @@ def build_ui() -> None:
                     with ui.row().classes("w-full items-center justify-between"):
                         ui.label("任务状态").classes("section-title")
                         summary = ui.label("").classes("muted text-sm")
+                    with ui.element("div").classes("download-section task-control-panel status-task-control"):
+                        with ui.row().classes("task-control-head w-full items-center justify-between"):
+                            ui.label("任务操作").classes("task-control-title")
+                            action_context = ui.label("当前筛选：不限").classes("task-context")
+                        with ui.element("div").classes("action-grid status-action-flow"):
+                            estimate_button = ui.button(
+                                "预估数量",
+                                icon="analytics",
+                                on_click=lambda: start("estimate"),
+                            ).classes(
+                                "task-control-action secondary-action step-action step-action-two"
+                            ).props("outline no-caps")
+                            download_button = ui.button(
+                                "开始下载",
+                                icon="download",
+                                on_click=lambda: start("crawl"),
+                            ).classes(
+                                "task-control-action primary-action step-action step-action-three"
+                            ).props("unelevated no-caps color=primary")
+                            pause_button = ui.button("停止任务", icon="stop_circle", on_click=stop).classes(
+                                "task-control-action secondary-action stop-action"
+                            ).props("outline no-caps")
+                            pause_button.disable()
+                        managed_task_label = ui.label("").classes("managed-task-label")
+                        action_hint_label = ui.label("预估数量，确认后下载。").classes(
+                            "task-action-hint"
+                        )
                     status_overview = ui.html(
                         '<div class="status-overview status-idle">'
-                        '<div><div class="status-stage">预览</div>'
-                        '<div class="status-detail">等待预估或开始下载</div></div>'
+                        '<div><div class="status-stage">空闲</div>'
+                        '<div class="status-detail">等待任务</div></div>'
                         '<strong>0</strong></div>'
                     ).classes("w-full")
                     with ui.element("div").classes("task-progress-wrap w-full"):
@@ -960,6 +1264,15 @@ def build_ui() -> None:
                     table.props('flat bordered dense no-data-label="还没有下载记录"')
                     table.on("resource-action", handle_resource_action)
                     table.add_slot(
+                        "no-data",
+                        """
+                        <div class="table-empty-state">
+                          <q-icon name="download_done" size="20px" />
+                          <span>{{ props.message }}</span>
+                        </div>
+                        """,
+                    )
+                    table.add_slot(
                         "body-cell-status_label",
                         """
                         <q-td :props="props">
@@ -994,28 +1307,32 @@ def build_ui() -> None:
                         """,
                     )
 
-                    with ui.element("div").classes("status-action-grid"):
-                        ui.button("预览最近", icon="visibility", on_click=preview_latest).classes(
-                            "secondary-action"
-                        ).props("outline no-caps")
-                        ui.button("打开目录", icon="folder_open", on_click=open_output_dir).classes(
-                            "secondary-action"
-                        ).props("outline no-caps")
+        with ui.element("details").classes("runtime-log-drawer"):
+            with ui.element("summary").classes("runtime-log-summary"):
+                log_summary_counts = ui.html(
+                    '<div class="log-counter-wrap">'
+                    '<span class="log-counter log-counter-error">'
+                    '<i class="material-icons log-counter-icon">cancel</i><span>0</span>'
+                    '</span>'
+                    '<span class="log-counter log-counter-warning">'
+                    '<i class="material-icons log-counter-icon">warning</i><span>0</span>'
+                    '</span>'
+                    '</div>'
+                )
+                ui.label("运行日志").classes("runtime-log-title")
+            with ui.column().classes("runtime-log-panel gap-2"):
+                with ui.row().classes("runtime-log-head w-full items-center justify-between"):
+                    ui.label("运行日志").classes("font-medium")
+                    ui.button("清空", icon="delete_sweep", on_click=app_state.clear_logs).props(
+                        "flat dense no-caps"
+                    )
+                log_label = ui.html("").classes("log-box w-full")
 
-                    with ui.column().classes("runtime-log w-full gap-2"):
-                        with ui.row().classes("runtime-log-head w-full items-center justify-between"):
-                            with ui.row().classes("items-center gap-2"):
-                                ui.icon("subject").classes("muted")
-                                ui.label("运行日志").classes("font-medium")
-                            ui.button("清空", icon="delete_sweep", on_click=app_state.clear_logs).props(
-                                "flat dense no-caps"
-                            )
-                        log_label = ui.html("").classes("log-box w-full")
-
-    with ui.dialog() as strategy_dialog, ui.card().classes("modal-card gap-4"):
+    with ui.dialog() as strategy_dialog, ui.card().classes("modal-card strategy-modal-card gap-4"):
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("采集策略").classes("section-title")
             ui.button(icon="close", on_click=strategy_dialog.close).props("flat round dense")
+
         with ui.element("div").classes("settings-grid"):
             file_type = ui.select(
                 {"PDF": "PDF", "IMG": "图片"},
@@ -1056,7 +1373,7 @@ def build_ui() -> None:
                 step=1,
                 suffix="个",
             ).classes("w-full")
-        ui.label("完整优先：10 页内保存预览图，超过 10 页直接下载 PDF 转图。").classes(
+        ui.label("10 页内保存预览图，超过 10 页保存 PDF 并转图。").classes(
             "muted text-sm"
         )
 
@@ -1067,22 +1384,121 @@ def build_ui() -> None:
                 "image_delay_seconds": float(image_delay.value or settings.image_delay_seconds),
                 "list_delay_seconds": float(list_delay.value or settings.list_delay_seconds),
                 "concurrency": int(concurrency.value or settings.concurrency),
+                "proxy_mode": str(proxy_mode.value or "off"),
+                "proxy_provider": str(proxy_provider.value or settings.proxy_provider),
+                "proxy_pool": str(proxy_pool.value or "").strip(),
+                "proxy_api_url": str(proxy_api_url.value or "").strip(),
+                "shenlong_whitelist_key": str(shenlong_whitelist_key.value or "").strip(),
+                "shenlong_whitelist_sign": str(shenlong_whitelist_sign.value or "").strip(),
             }
             preferences.set("strategy", saved)
             app_state.log("采集策略已保存")
-            ui.notify("采集策略已保存，后续任务会使用新设置", type="positive")
+            notify("采集策略已保存", type="positive")
             strategy_dialog.close()
 
         ui.button("保存", on_click=save_strategy).classes("dialog-primary").props(
             "unelevated no-caps color=primary"
         )
 
+    with ui.dialog() as proxy_dialog, ui.card().classes("modal-card strategy-modal-card gap-4"):
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("代理配置").classes("section-title")
+            ui.button(icon="close", on_click=proxy_dialog.close).props("flat round dense")
+
+        def sync_proxy_controls() -> None:
+            using_fixed = proxy_mode.value == "fixed"
+            using_api = proxy_mode.value == "api"
+            using_shenlong = using_api and proxy_provider.value == "shenlong"
+            proxy_pool_wrap.visible = using_fixed
+            proxy_provider_wrap.visible = using_api
+            proxy_api_wrap.visible = using_api
+            whitelist_wrap.visible = using_shenlong
+            bind_ip_button.visible = using_shenlong
+
+        def save_proxy_settings() -> None:
+            saved = {
+                "file_type": file_type.value or "PDF",
+                "max_pages_per_combo": int(max_pages.value) if max_pages.value else None,
+                "image_delay_seconds": float(image_delay.value or settings.image_delay_seconds),
+                "list_delay_seconds": float(list_delay.value or settings.list_delay_seconds),
+                "concurrency": int(concurrency.value or settings.concurrency),
+                "proxy_mode": str(proxy_mode.value or "off"),
+                "proxy_provider": str(proxy_provider.value or settings.proxy_provider),
+                "proxy_pool": str(proxy_pool.value or "").strip(),
+                "proxy_api_url": str(proxy_api_url.value or "").strip(),
+                "shenlong_whitelist_key": str(shenlong_whitelist_key.value or "").strip(),
+                "shenlong_whitelist_sign": str(shenlong_whitelist_sign.value or "").strip(),
+            }
+            preferences.set("strategy", saved)
+            proxy_ip_value.text = proxy_status_text(saved)
+            proxy_ip_value.update()
+            app_state.log("代理配置已保存")
+            notify("代理配置已保存", type="positive")
+            proxy_dialog.close()
+
+        with ui.element("div").classes("proxy-settings"):
+            proxy_mode = ui.toggle(
+                {"off": "不使用代理", "fixed": "固定代理", "api": "提取接口"},
+                value=normalized_proxy_mode(strategy_settings),
+                on_change=lambda _: sync_proxy_controls(),
+            ).classes("proxy-mode-toggle")
+            proxy_mode.props("flat no-caps")
+            with ui.element("div").classes("proxy-fields"):
+                with ui.element("div").classes("proxy-provider-wrap") as proxy_provider_wrap:
+                    proxy_provider = ui.select(
+                        {"generic": "通用接口", "shenlong": "神龙 HTTP"},
+                        label="服务商",
+                        value=normalized_proxy_provider(strategy_settings),
+                        on_change=lambda _: sync_proxy_controls(),
+                    ).classes("w-full compact-field")
+                with ui.element("div").classes("proxy-api-wrap") as proxy_api_wrap:
+                    proxy_api_url = ui.input(
+                        "提取接口",
+                        value=str(strategy_settings.get("proxy_api_url") or settings.proxy_api_url or ""),
+                        placeholder="http://api.shenlongip.com/ip?key=...&pattern=json&count=1&sign=...",
+                    ).classes("w-full compact-field")
+                with ui.element("div").classes("proxy-pool-wrap") as proxy_pool_wrap:
+                    proxy_pool = ui.textarea(
+                        "固定代理",
+                        value=str(strategy_settings.get("proxy_pool") or settings.proxy_pool or ""),
+                        placeholder="http://127.0.0.1:7890",
+                    ).classes("w-full compact-field proxy-pool-input")
+                with ui.element("div").classes("proxy-whitelist-wrap") as whitelist_wrap:
+                    shenlong_whitelist_key = ui.input(
+                        "白名单账号",
+                        value=str(
+                            strategy_settings.get("shenlong_whitelist_key")
+                            or settings.shenlong_whitelist_key
+                            or ""
+                        ),
+                    ).classes("w-full compact-field")
+                    shenlong_whitelist_sign = ui.input(
+                        "白名单签名",
+                        value=str(
+                            strategy_settings.get("shenlong_whitelist_sign")
+                            or settings.shenlong_whitelist_sign
+                            or ""
+                        ),
+                    ).props("type=password").classes("w-full compact-field")
+
+        with ui.row().classes("w-full items-center justify-end"):
+            bind_ip_button = ui.button(
+                "绑定本机 IP",
+                icon="link",
+                on_click=bind_current_ip,
+            )
+            bind_ip_button.props("flat no-caps")
+            ui.button("保存", on_click=save_proxy_settings).classes("dialog-primary").props(
+                "unelevated no-caps color=primary"
+            )
+        sync_proxy_controls()
+
     with ui.dialog() as account_dialog, ui.card().classes("modal-card account-modal-card gap-4"):
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("账号配置").classes("section-title")
             ui.button(icon="close", on_click=account_dialog.close).props("flat round dense")
         with ui.element("div").classes("account-modal-body"):
-            ui.label("启用账号会按顺序轮询使用。").classes("muted text-sm")
+            ui.label("已启用账号按顺序使用。").classes("muted text-sm")
             account_list()
 
             with ui.tabs().classes("account-tabs") as account_tabs:
@@ -1093,14 +1509,14 @@ def build_ui() -> None:
                     with ui.element("div").classes("account-form"):
                         with ui.row().classes("w-full items-center justify-between"):
                             ui.label("手机号登录").classes("section-title")
-                            ui.label("保存后任务会使用该手机号凭证；密码不填时默认使用手机号后六位").classes(
+                            ui.label("密码为空时使用手机号后六位").classes(
                                 "muted text-sm"
                             )
                         with ui.element("div").classes("credential-grid two-cols"):
                             account_phone = ui.input("手机号", placeholder="请输入 11 位手机号").props(
                                 "outlined"
                             ).classes("w-full")
-                            account_password = ui.input("密码", placeholder="可不填，默认手机号后六位").props(
+                            account_password = ui.input("密码", placeholder="空白则使用手机号后六位").props(
                                 "type=password outlined"
                             ).classes("w-full")
                         with ui.row().classes("account-actions w-full items-center justify-end"):
@@ -1111,29 +1527,27 @@ def build_ui() -> None:
                 with ui.tab_panel(manual_tab).classes("account-panel"):
                     with ui.element("div").classes("account-form"):
                         with ui.row().classes("w-full items-center justify-between"):
-                            ui.label("Network 请求导入").classes("section-title")
+                            ui.label("请求导入").classes("section-title")
                             account_enabled = ui.checkbox("启用", value=True).classes(
                                 "account-enabled"
                             )
-                        ui.label(
-                            "推荐从官网 Network 里复制 user/detail 或资源接口的 fetch/cURL；工具会解析真实 token、Cookie、User-Agent 和必要请求头。"
-                        ).classes("muted text-sm")
+                        with ui.expansion("导入步骤", icon="help_outline").classes("console-script-box"):
+                            ui.label(
+                                "登录 stzy.com，在浏览器开发者工具 Network 中复制 user/detail 或资源接口的 fetch/cURL。"
+                            ).classes("muted text-sm")
                         with ui.expansion(
-                            "简易 Console Token 脚本（不推荐，拿不到完整登录态时请改用 Network）",
+                            "Console Token 脚本",
                             icon="code",
                         ).classes("console-script-box"):
                             ui.textarea(value=COOKIE_TOKEN_CONSOLE_SCRIPT).props(
                                 "readonly outlined"
                             ).classes("w-full credential-input console-script")
-                        ui.label(
-                            "操作：打开 stzy.com 并确认已登录，按 F12 进入 Network，刷新页面，找到 user/detail 请求，右键 Copy as fetch 或 Copy as cURL 后粘贴到下面。"
-                        ).classes("muted text-sm")
                         account_name = ui.input(
                             "账号名称", placeholder="可选；不填会从 Token 识别"
                         ).props("outlined").classes("w-full")
                         account_auth_value = ui.textarea(
                             "fetch / cURL / Token / Cookie / JSON",
-                            placeholder="优先粘贴 Network 复制的 fetch(...) 或 curl -H ...；也兼容纯 Token、整段 Cookie、JSON。",
+                            placeholder="粘贴 fetch(...)、curl -H ...、Token、Cookie 或 JSON。",
                         ).props("outlined").classes("w-full credential-input auth-import-box")
                         with ui.row().classes("account-actions w-full items-center justify-end"):
                             ui.button("清空输入", icon="backspace", on_click=lambda: (
@@ -1148,15 +1562,28 @@ def build_ui() -> None:
 
     def refresh() -> None:
         nonlocal history_page
-        logs, records, stats, running = app_state.snapshot()
+        logs, records, stats, running, active_proxy = app_state.snapshot()
+        display_records = records
+        if active_proxy:
+            proxy_ip_value.text = first_fixed_proxy(active_proxy)
+            proxy_ip_value.update()
+        if managed_history_task and not running:
+            stats = history_task_stats(managed_history_task)
+            task_id = str(managed_history_task.get("id") or "")
+            display_records = TaskHistory(task_history_path()).resources(task_id) if task_id else []
         view = status_view(stats, running)
         stage_text = str(view["stage"])
         detail_text = str(view["detail"])
         status_class = str(view["class"])
         headline_count = str(view["count"])
         filter_brief = current_filter_summary(current_settings(), current_filters())["brief"]
-        action_context.set_text(f"当前筛选：{filter_brief}")
-        status_label.set_text(stage_text)
+        if managed_history_task:
+            managed_brief = str(managed_history_task.get("brief") or "历史任务")
+            action_context.set_text(f"管理任务：{managed_brief}")
+            managed_task_label.set_text(f"已选择：{managed_brief}")
+        else:
+            action_context.set_text(f"当前筛选：{filter_brief}")
+            managed_task_label.set_text("")
         if running:
             estimate_button.disable()
             download_button.disable()
@@ -1166,7 +1593,13 @@ def build_ui() -> None:
             estimate_button.enable()
             download_button.enable()
             pause_button.disable()
-            action_hint_label.set_text(action_hint(stats, running))
+            if managed_history_task:
+                action_hint_label.set_text("当前任务已载入。")
+            else:
+                action_hint_label.set_text(action_hint(stats, running))
+        download_button.set_text(
+            "继续下载" if managed_history_task and not running else download_action_text(stats, running)
+        )
         progress_value = build_progress_value(stats, running)
         progress.value = progress_value
         progress_text.set_text(progress_percent_text(progress_value))
@@ -1200,10 +1633,18 @@ def build_ui() -> None:
         no_data_label, result_tip = current_result_empty_copy(stats.task_mode)
         current_result_tip.set_text(result_tip)
         table.props(f'no-data-label="{no_data_label}"')
-        table_records = [] if stats.task_mode == "estimate" else records
+        table_records = [] if stats.task_mode == "estimate" else display_records
         table.rows = display_record_rows(table_records)
         table.update()
-        history_tasks = TaskHistory(task_history_path()).recent(200, mode="crawl")
+        all_tasks = TaskHistory(task_history_path()).recent(200, mode="crawl")
+        unfinished_tasks = [
+            task for task in all_tasks if str(task.get("status") or "") in unfinished_task_statuses
+        ]
+        history_tasks = [
+            task for task in all_tasks if str(task.get("status") or "") in terminal_task_statuses
+        ]
+        active_task_table.rows = display_task_rows(unfinished_tasks)
+        active_task_table.update()
         total_history = len(history_tasks)
         total_pages = max(1, (total_history + history_page_size - 1) // history_page_size)
         history_page = min(max(1, history_page), total_pages)
@@ -1212,7 +1653,10 @@ def build_ui() -> None:
         task_table.rows = display_task_rows(history_tasks[history_start:history_end])
         task_table.update()
         history_page_label.set_text(f"第 {history_page} / {total_pages} 页，共 {total_history} 条")
-        if total_history <= history_page_size:
+        has_multiple_history_pages = total_pages > 1
+        history_page_actions.visible = has_multiple_history_pages
+        history_page_actions.update()
+        if not has_multiple_history_pages:
             history_prev_button.disable()
             history_next_button.disable()
         else:
@@ -1222,8 +1666,29 @@ def build_ui() -> None:
                 history_prev_button.disable()
             if history_page >= total_pages:
                 history_next_button.disable()
-        escaped = [line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") for line in logs]
-        log_label.set_content("<br>".join(escaped[-120:]) or "等待任务启动")
+        log_label.set_content(render_log_lines(logs))
+        log_counts = log_level_counts(logs)
+        error_count = log_counts["error"]
+        warning_count = log_counts["warning"]
+        filter_count = log_counts["filter"]
+        log_summary_counts.set_content(
+            '<div class="log-counter-wrap">'
+            f'<span class="log-counter log-counter-error{" has-issues" if error_count else ""}" title="错误">'
+            f'<i class="material-icons log-counter-icon">cancel</i><span>错误 {error_count}</span>'
+            '</span>'
+            f'<span class="log-counter log-counter-warning{" has-issues" if warning_count else ""}" title="告警">'
+            f'<i class="material-icons log-counter-icon">warning</i><span>告警 {warning_count}</span>'
+            '</span>'
+            f'<span class="log-counter log-counter-filter{" has-issues" if filter_count else ""}" title="过滤">'
+            f'<i class="material-icons log-counter-icon">filter_alt</i><span>过滤 {filter_count}</span>'
+            '</span>'
+            '</div>'
+        )
 
     ui.timer(0.8, refresh)
+    ui.timer(
+        0.1,
+        lambda: background_tasks.create(load_current_ip(), name="stzy-current-ip"),
+        once=True,
+    )
     refresh_filter_options()

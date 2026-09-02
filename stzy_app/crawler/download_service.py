@@ -3,8 +3,9 @@ from __future__ import annotations
 from typing import Callable
 
 from stzy_app.config import AppSettings
-from stzy_app.crawler.account_scheduler import AccountScheduler, DownloadAttempt
+from stzy_app.crawler.account_scheduler import AccountScheduler
 from stzy_app.crawler.api import StzyCrawlerApi
+from stzy_app.crawler.artifacts import ResourceArtifacts
 from stzy_app.crawler.converters import DocumentConverter
 from stzy_app.crawler.paths import ResourcePathBuilder
 from stzy_app.http import StzyHttpClient
@@ -90,8 +91,9 @@ class DownloadService:
         if suffix and suffix != ".pdf":
             raise RuntimeError(f"原文格式 {suffix} 暂不支持 PDF 转图片")
         directory = self.paths.resource_dir(record)
-        ensure_directory(directory)
-        pdf_path = directory / "原文.pdf"
+        artifacts = ResourceArtifacts(directory)
+        artifacts.prepare_resource_dir()
+        pdf_path = artifacts.temp_pdf if artifacts.temp_pdf.exists() else artifacts.final_pdf
         if not pdf_path.exists() or pdf_path.stat().st_size <= 0:
             url_result = self.account_scheduler.download_pdf_url(record)
             if url_result.status == ResourceStatus.paid_unavailable:
@@ -107,6 +109,7 @@ class DownloadService:
             if not url_result.url:
                 raise RuntimeError(url_result.error or "未获取到 PDF 下载地址")
             pdf_url = url_result.url
+            pdf_path = artifacts.temp_pdf
         else:
             pdf_url = ""
         converted, images_added = self.converter.download_pdf_and_convert(pdf_url, pdf_path, directory)
@@ -118,9 +121,6 @@ class DownloadService:
             local_dir=str(directory),
             images_added=images_added,
         )
-
-    def scheduled_download_attempts(self, record: ResourceRecord) -> list[DownloadAttempt]:
-        return self.account_scheduler.scheduled_attempts(record)
 
     @staticmethod
     def _result_from_count(

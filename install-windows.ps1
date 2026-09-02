@@ -84,12 +84,11 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 echo [2/4] 正在启动本地 Web 控制台...
-echo       首次启动需要初始化页面资源，通常等待几秒到几十秒。
-echo [3/4] 程序会自动选择可用端口；如果 8080 被占用，会自动换到 8081、8082...
-echo [4/4] 请稍等，下面会显示实际访问地址。
+echo [3/4] 正在选择端口...
+echo [4/4] 启动完成后会显示访问地址。
 echo.
-echo 提示：浏览器未自动打开时，请复制终端里的 http://127.0.0.1:xxxx 地址到浏览器。
-echo 提示：请保持这个终端窗口打开；关闭窗口会停止本地服务。
+echo 浏览器未自动打开时，使用终端里的本地地址。
+echo 关闭此窗口会停止服务。
 echo.
 echo ---------- 应用内部日志开始 ----------
 echo.
@@ -116,12 +115,11 @@ if (-not (Test-Path -LiteralPath ".venv\Scripts\python.exe")) {
     exit 1
 }
 Write-Host "[2/4] 正在启动本地 Web 控制台..."
-Write-Host "      首次启动需要初始化页面资源，通常等待几秒到几十秒。"
-Write-Host "[3/4] 程序会自动选择可用端口；如果 8080 被占用，会自动换到 8081、8082..."
-Write-Host "[4/4] 请稍等，下面会显示实际访问地址。"
+Write-Host "[3/4] 正在选择端口..."
+Write-Host "[4/4] 启动完成后会显示访问地址。"
 Write-Host ""
-Write-Host "提示：浏览器未自动打开时，请复制终端里的 http://127.0.0.1:xxxx 地址到浏览器。"
-Write-Host "提示：请保持这个终端窗口打开；关闭窗口会停止本地服务。"
+Write-Host "浏览器未自动打开时，使用终端里的本地地址。"
+Write-Host "关闭此窗口会停止服务。"
 Write-Host ""
 Write-Host "---------- 应用内部日志开始 ----------"
 Write-Host ""

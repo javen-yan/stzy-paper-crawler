@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import platform
 import subprocess
 from pathlib import Path
@@ -19,14 +20,7 @@ def open_path(path: Path) -> bool:
                 stderr=subprocess.DEVNULL,
             )
         elif system == "Windows":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            subprocess.Popen(
-                ["cmd", "/c", "start", "", str(target)],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creationflags,
-            )
+            os.startfile(str(target))  # type: ignore[attr-defined]
         else:
             subprocess.Popen(
                 ["xdg-open", str(target)],

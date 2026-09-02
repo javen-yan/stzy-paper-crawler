@@ -76,20 +76,16 @@ def main() -> None:
     url = f"http://127.0.0.1:{port}"
     print("", flush=True)
     print("STZY Paper Crawler", flush=True)
-    print("[应用] 正在初始化本地 Web 控制台，首次启动通常需要几秒到几十秒...", flush=True)
-    print(
-        f"[应用] 已选择可用端口：{port}（默认从 8080 开始，被占用会自动顺延）",
-        flush=True,
-    )
-    print(f"[应用] 本地访问地址：{url}", flush=True)
-    print("[应用] 如果浏览器没有自动打开，请复制上面的地址到浏览器。", flush=True)
-    print("[应用] 请保持此终端窗口打开；关闭窗口会停止本地服务。", flush=True)
+    print("[应用] 正在启动本地控制台", flush=True)
+    print(f"[应用] 端口：{port}", flush=True)
+    print(f"[应用] 地址：{url}", flush=True)
+    print("[应用] 关闭此窗口会停止服务。", flush=True)
     print("", flush=True)
     open_browser_later(url)
     ui.run(
         build_ui,
         host="127.0.0.1",
-        title="STZY 试卷图片抓取",
+        title="试卷下载器",
         reload=False,
         port=port,
         show=False,

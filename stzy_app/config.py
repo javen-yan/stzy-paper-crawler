@@ -15,11 +15,11 @@ class AppSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="STZY_", extra="ignore")
 
-    output_dir: Path = Field(default=Path("output/stzy"))
+    output_dir: Path = Field(default=Path("output"))
     state_file: Path = Field(default=Path("stzy.db"))
     csv_file: Path = Field(default=Path("stzy.db"))
     task_history_file: Path = Field(default=Path("stzy.db"))
-    cookie_file: Path = Field(default=Path("output/stzy/cookies.json"))
+    cookie_file: Path = Field(default=Path("output/cookies.json"))
     account_pool_file: Path = Field(default=Path("stzy.db"))
 
     api_base_url: str = "https://qms.stzy.com/matrix"
@@ -34,6 +34,14 @@ class AppSettings(BaseSettings):
     max_retries: int = 3
     connect_timeout: float = 6.0
     read_timeout: float = 30.0
+    proxy_mode: str = "off"
+    proxy_provider: str = "generic"
+    proxy_pool: str = ""
+    proxy_api_url: str = ""
+    proxy_max_failures: int = 3
+    proxy_cooldown_seconds: float = 300.0
+    shenlong_whitelist_key: str = ""
+    shenlong_whitelist_sign: str = ""
     user_agent: str = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"

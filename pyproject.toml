@@ -1,6 +1,6 @@
 [project]
 name = "stzy-paper-crawler"
-version = "0.1.4"
+version = "0.1.5"
 description = "Local web tool for crawling STZY paper preview images."
 requires-python = ">=3.10"
 dependencies = [
@@ -12,6 +12,7 @@ dependencies = [
   "pydantic-settings>=2.3.0",
   "python-dotenv>=1.0.1",
   "requests>=2.32.0",
+  "PySocks>=1.7.1",
 ]
 
 [project.scripts]

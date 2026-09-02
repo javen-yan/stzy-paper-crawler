@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable
 
 from stzy_app.config import AppSettings
+from stzy_app.crawler.artifacts import ResourceArtifacts
 from stzy_app.http import StzyHttpClient
 from stzy_app.models import ResourceRecord
 from stzy_app.utils import ensure_directory
@@ -14,7 +15,7 @@ SleepCallback = Callable[[float], None]
 
 
 class DocumentConverter:
-    """Saves preview originals and converts SVG/image/PDF documents to PNG pages."""
+    """Converts SVG/image/PDF documents to final PNG and PDF artifacts."""
 
     def __init__(
         self,
@@ -35,29 +36,40 @@ class DocumentConverter:
         pictures: list[str],
         directory: Path,
     ) -> int:
-        original_dir = directory / "original"
-        ensure_directory(directory)
-        ensure_directory(original_dir)
+        artifacts = ResourceArtifacts(directory)
+        artifacts.prepare_resource_dir()
+        artifacts.prepare_original_dir()
         images_added = 0
+        originals: list[Path] = []
         for index, url in enumerate(pictures, start=1):
             suffix = Path(url.split("?", 1)[0]).suffix or ".svg"
-            original = original_dir / f"练习{index}{suffix}"
-            target = directory / f"练习{index}.png"
+            original = artifacts.original_dir / f"练习{index}{suffix}"
+            target = artifacts.page_png(index)
             had_target = target.exists() and target.stat().st_size > 0
             if not original.exists() or original.stat().st_size <= 0:
                 self.client.download(url, original)
             self.convert_original_to_png(original, target)
+            originals.append(original)
             if not had_target and target.exists() and target.stat().st_size > 0:
                 images_added += 1
             self.sleep(self.settings.image_delay_seconds)
+        if originals:
+            self.convert_originals_to_pdf(originals, artifacts.temp_pdf)
+            artifacts.publish_pdf(artifacts.temp_pdf)
+            artifacts.cleanup_transient_artifacts()
         return images_added
 
     def download_pdf_and_convert(self, pdf_url: str, pdf_path: Path, directory: Path) -> tuple[int, int]:
-        ensure_directory(directory)
-        if not pdf_path.exists() or pdf_path.stat().st_size <= 0:
-            self.client.download(pdf_url, pdf_path, headers={})
+        artifacts = ResourceArtifacts(directory)
+        artifacts.prepare_resource_dir()
+        source_pdf = pdf_path
+        if not source_pdf.exists() or source_pdf.stat().st_size <= 0:
+            self.client.download(pdf_url, artifacts.temp_pdf, headers={})
+            source_pdf = artifacts.temp_pdf
         existing_count = self.saved_picture_count_from_dir(directory)
-        converted = self.convert_pdf_to_pngs(pdf_path, directory)
+        converted = self.convert_pdf_to_pngs(source_pdf, directory)
+        artifacts.publish_pdf(source_pdf)
+        artifacts.cleanup_transient_artifacts()
         return converted, max(0, converted - existing_count)
 
     def convert_original_to_png(self, original: Path, target: Path) -> None:
@@ -83,9 +95,10 @@ class DocumentConverter:
         import pymupdf
 
         generated_count = 0
+        artifacts = ResourceArtifacts(directory)
         with pymupdf.open(pdf_path) as document:
             for index, page in enumerate(document, start=1):
-                target = directory / f"练习{index}.png"
+                target = artifacts.page_png(index)
                 if target.exists() and target.stat().st_size > 0:
                     target.unlink()
                 pixmap = page.get_pixmap(dpi=180, alpha=False)
@@ -109,6 +122,42 @@ class DocumentConverter:
         DocumentConverter.flatten_png_on_white(png_path)
 
     @staticmethod
+    def convert_originals_to_pdf(originals: list[Path], pdf_path: Path) -> None:
+        import pymupdf
+
+        ensure_directory(pdf_path.parent)
+        output = pymupdf.open()
+        try:
+            for original in originals:
+                if original.suffix.lower() == ".svg":
+                    content = DocumentConverter.svg_with_font_fallback(original)
+                    with pymupdf.open(
+                        stream=content.encode("utf-8"),
+                        filetype="svg",
+                    ) as svg_document:
+                        pdf_bytes = svg_document.convert_to_pdf()
+                    with pymupdf.open("pdf", pdf_bytes) as page_pdf:
+                        output.insert_pdf(page_pdf)
+                    continue
+                DocumentConverter.append_image_page(output, original)
+            if output.page_count:
+                if pdf_path.exists():
+                    pdf_path.unlink()
+                output.save(pdf_path)
+        finally:
+            output.close()
+
+    @staticmethod
+    def append_image_page(document, image_path: Path) -> None:
+        import pymupdf
+        from PIL import Image
+
+        with Image.open(image_path) as image:
+            width, height = image.size
+        page = document.new_page(width=width, height=height)
+        page.insert_image(pymupdf.Rect(0, 0, width, height), filename=str(image_path))
+
+    @staticmethod
     def svg_needs_font_fallback(svg_path: Path) -> bool:
         try:
             content = svg_path.read_text(encoding="utf-8", errors="ignore")
@@ -129,13 +178,6 @@ class DocumentConverter:
         )
 
     @staticmethod
-    def svg_size(svg_path: Path) -> tuple[int, int]:
-        content = svg_path.read_text(encoding="utf-8", errors="ignore")[:2000]
-        width = DocumentConverter.svg_dimension(content, "width") or 612
-        height = DocumentConverter.svg_dimension(content, "height") or 879
-        return max(1, width), max(1, height)
-
-    @staticmethod
     def svg_with_font_fallback(svg_path: Path) -> str:
         content = svg_path.read_text(encoding="utf-8", errors="ignore")
         fallback_css = (
@@ -148,13 +190,6 @@ class DocumentConverter:
         if "<svg" not in content:
             return content
         return re.sub(r"(<svg\b[^>]*>)", r"\1" + fallback_css, content, count=1)
-
-    @staticmethod
-    def svg_dimension(content: str, name: str) -> int | None:
-        match = re.search(rf'\b{name}=["\']([0-9.]+)', content)
-        if not match:
-            return None
-        return int(float(match.group(1)))
 
     @staticmethod
     def convert_image_to_png(image_path: Path, png_path: Path) -> None:

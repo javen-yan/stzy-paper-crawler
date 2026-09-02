@@ -9,6 +9,9 @@ from typing import Any
 from stzy_app.models import ResourceRecord
 from stzy_app.storage.db import connect, record_schema_version
 
+ARCHIVED_TASK_STATUS = "del"
+TERMINAL_TASK_STATUSES = {"completed", "partial", "failed", "auth_expired"}
+
 
 class TaskHistory:
     """Task and per-task resource history persisted in SQLite."""
@@ -132,6 +135,38 @@ class TaskHistory:
                 ),
             )
 
+    def resume(self, task_id: str, stats: dict[str, Any] | None = None) -> bool:
+        now = datetime.now().isoformat(timespec="seconds")
+        with connect(self.path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'running',
+                    stats_json = ?,
+                    updated_at = ?
+                WHERE id = ?
+                    AND status IN ('running', 'paused')
+                """,
+                (self._json(stats or {}), now, task_id),
+            )
+        return cursor.rowcount > 0
+
+    def archive(self, task_id: str) -> bool:
+        now = datetime.now().isoformat(timespec="seconds")
+        placeholders = ", ".join("?" for _ in TERMINAL_TASK_STATUSES)
+        with connect(self.path) as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE tasks
+                SET status = ?,
+                    updated_at = ?
+                WHERE id = ?
+                    AND status IN ({placeholders})
+                """,
+                (ARCHIVED_TASK_STATUS, now, task_id, *TERMINAL_TASK_STATUSES),
+            )
+        return cursor.rowcount > 0
+
     def record_resource(self, task_id: str, record: ResourceRecord) -> None:
         row = asdict(record)
         row["status"] = record.status.value
@@ -172,11 +207,12 @@ class TaskHistory:
             )
 
     def recent(self, limit: int = 20, *, mode: str | None = None) -> list[dict[str, Any]]:
-        where_sql = ""
-        params: list[Any] = []
+        where_clauses = ["tasks.status != ?"]
+        params: list[Any] = [ARCHIVED_TASK_STATUS]
         if mode:
-            where_sql = "WHERE tasks.mode = ?"
+            where_clauses.append("tasks.mode = ?")
             params.append(mode)
+        where_sql = "WHERE " + " AND ".join(where_clauses)
         params.append(limit)
         with connect(self.path) as connection:
             rows = connection.execute(
@@ -203,6 +239,38 @@ class TaskHistory:
                 params,
             ).fetchall()
         return [self._task_from_row(row) for row in rows]
+
+    def resources(self, task_id: str, limit: int = 500) -> list[dict[str, Any]]:
+        with connect(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM task_resources
+                WHERE task_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (task_id, limit),
+            ).fetchall()
+        resources = []
+        for row in rows:
+            resource = dict(row)
+            resource["raw"] = self._loads(resource.pop("raw_json", ""))
+            resources.append(resource)
+        return resources
+
+    def completed_resource_ids(self, task_id: str) -> set[str]:
+        with connect(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT resource_id
+                FROM task_resources
+                WHERE task_id = ?
+                    AND status = 'completed'
+                """,
+                (task_id,),
+            ).fetchall()
+        return {str(row["resource_id"]) for row in rows}
 
     @staticmethod
     def _json(value: Any) -> str:

@@ -8,10 +8,6 @@ from typing import Iterator
 from stzy_app.utils import ensure_directory
 
 
-def is_sqlite_path(path: Path) -> bool:
-    return path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}
-
-
 @contextmanager
 def connect(path: Path) -> Iterator[sqlite3.Connection]:
     ensure_directory(path.parent)
