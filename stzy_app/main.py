@@ -52,6 +52,12 @@ def open_existing_instance() -> None:
         return
     url = f"http://127.0.0.1:{port}"
     print(f"STZY Paper Crawler 已在运行，正在打开：{url}")
+    open_url(url)
+
+
+def open_url(url: str) -> None:
+    if os.environ.get("STZY_NO_BROWSER") == "1":
+        return
     webbrowser.open(url)
 
 
@@ -68,8 +74,17 @@ def main() -> None:
     port = find_free_port()
     PORT_FILE.write_text(str(port), encoding="utf-8")
     url = f"http://127.0.0.1:{port}"
-    print(f"STZY Paper Crawler 正在启动：{url}")
-    print("如果浏览器没有自动打开，请复制上面的地址到浏览器。")
+    print("", flush=True)
+    print("STZY Paper Crawler", flush=True)
+    print("[应用] 正在初始化本地 Web 控制台，首次启动通常需要几秒到几十秒...", flush=True)
+    print(
+        f"[应用] 已选择可用端口：{port}（默认从 8080 开始，被占用会自动顺延）",
+        flush=True,
+    )
+    print(f"[应用] 本地访问地址：{url}", flush=True)
+    print("[应用] 如果浏览器没有自动打开，请复制上面的地址到浏览器。", flush=True)
+    print("[应用] 请保持此终端窗口打开；关闭窗口会停止本地服务。", flush=True)
+    print("", flush=True)
     open_browser_later(url)
     ui.run(
         build_ui,

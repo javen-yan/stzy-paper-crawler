@@ -107,7 +107,7 @@ jobs:
           python -m PyInstaller
           --clean
           --noconfirm
-          --onefile
+          --onedir
           --name stzy-paper-crawler
           --collect-all nicegui
           --collect-all fastapi
@@ -124,8 +124,8 @@ jobs:
           VERSION="${{ steps.version.outputs.value }}"
           PACKAGE="stzy-paper-crawler-${VERSION}-${{ matrix.package_name }}"
           mkdir -p "packages/${PACKAGE}"
-          cp "dist/${{ matrix.executable_name }}" "packages/${PACKAGE}/"
-          chmod +x "packages/${PACKAGE}/${{ matrix.executable_name }}" || true
+          cp -R "dist/stzy-paper-crawler" "packages/${PACKAGE}/app"
+          chmod +x "packages/${PACKAGE}/app/${{ matrix.executable_name }}" || true
           cp README.md "packages/${PACKAGE}/"
           cp 操作手册.md "packages/${PACKAGE}/"
           if [ "${{ runner.os }}" = "macOS" ]; then
@@ -133,19 +133,96 @@ jobs:
               printf '%s\n' '#!/usr/bin/env bash'
               printf '%s\n' 'set -euo pipefail'
               printf '%s\n' 'cd "$(dirname "$0")"'
-              printf '%s\n' 'chmod +x ./stzy-paper-crawler'
-              printf '%s\n' 'echo "正在启动 STZY Paper Crawler..."'
-              printf '%s\n' 'echo "请保持这个终端窗口打开；关闭窗口会停止本地服务。"'
-              printf '%s\n' 'exec ./stzy-paper-crawler'
+              printf '%s\n' 'chmod +x ./app/stzy-paper-crawler'
+              printf '%s\n' 'export PYTHONUNBUFFERED=1'
+              printf '%s\n' 'clear 2>/dev/null || true'
+              printf '%s\n' 'echo "========================================"'
+              printf '%s\n' 'echo " STZY Paper Crawler"'
+              printf '%s\n' 'echo "========================================"'
+              printf '%s\n' 'echo ""'
+              printf '%s\n' 'echo "[1/4] 正在检查本地运行环境..."'
+              printf '%s\n' 'echo "[2/4] 正在启动本地 Web 控制台..."'
+              printf '%s\n' 'echo "      首次启动需要初始化页面资源，通常等待几秒到几十秒。"'
+              printf '%s\n' 'echo "[3/4] 程序会自动选择可用端口；如果 8080 被占用，会自动换到 8081、8082..."'
+              printf '%s\n' 'echo "[4/4] 请稍等，下面会显示实际访问地址。"'
+              printf '%s\n' 'echo ""'
+              printf '%s\n' 'echo "提示：浏览器未自动打开时，请复制终端里的 http://127.0.0.1:xxxx 地址到浏览器。"'
+              printf '%s\n' 'echo "提示：请保持这个终端窗口打开；关闭窗口会停止本地服务。"'
+              printf '%s\n' 'echo ""'
+              printf '%s\n' 'echo "---------- 应用内部日志开始 ----------"'
+              printf '%s\n' 'echo ""'
+              printf '%s\n' 'exec ./app/stzy-paper-crawler'
             } > "packages/${PACKAGE}/start-macos.command"
             chmod +x "packages/${PACKAGE}/start-macos.command"
+          elif [ "${{ runner.os }}" = "Linux" ]; then
+            {
+              printf '%s\n' '#!/usr/bin/env bash'
+              printf '%s\n' 'set -euo pipefail'
+              printf '%s\n' 'cd "$(dirname "$0")"'
+              printf '%s\n' 'chmod +x ./app/stzy-paper-crawler'
+              printf '%s\n' 'export PYTHONUNBUFFERED=1'
+              printf '%s\n' 'clear 2>/dev/null || true'
+              printf '%s\n' 'echo "========================================"'
+              printf '%s\n' 'echo " STZY Paper Crawler"'
+              printf '%s\n' 'echo "========================================"'
+              printf '%s\n' 'echo ""'
+              printf '%s\n' 'echo "[1/4] 正在检查本地运行环境..."'
+              printf '%s\n' 'echo "[2/4] 正在启动本地 Web 控制台..."'
+              printf '%s\n' 'echo "      首次启动需要初始化页面资源，通常等待几秒到几十秒。"'
+              printf '%s\n' 'echo "[3/4] 程序会自动选择可用端口；如果 8080 被占用，会自动换到 8081、8082..."'
+              printf '%s\n' 'echo "[4/4] 请稍等，下面会显示实际访问地址。"'
+              printf '%s\n' 'echo ""'
+              printf '%s\n' 'echo "提示：浏览器未自动打开时，请复制终端里的 http://127.0.0.1:xxxx 地址到浏览器。"'
+              printf '%s\n' 'echo "提示：请保持这个终端窗口打开；关闭窗口会停止本地服务。"'
+              printf '%s\n' 'echo ""'
+              printf '%s\n' 'echo "---------- 应用内部日志开始 ----------"'
+              printf '%s\n' 'echo ""'
+              printf '%s\n' 'exec ./app/stzy-paper-crawler'
+            } > "packages/${PACKAGE}/start-linux.sh"
+            chmod +x "packages/${PACKAGE}/start-linux.sh"
+          elif [ "${{ runner.os }}" = "Windows" ]; then
+            {
+              printf '%s\r\n' '@echo off'
+              printf '%s\r\n' 'chcp 65001 >nul'
+              printf '%s\r\n' 'setlocal'
+              printf '%s\r\n' 'cd /d "%~dp0"'
+              printf '%s\r\n' 'set PYTHONUNBUFFERED=1'
+              printf '%s\r\n' 'cls'
+              printf '%s\r\n' 'echo ========================================'
+              printf '%s\r\n' 'echo  STZY Paper Crawler'
+              printf '%s\r\n' 'echo ========================================'
+              printf '%s\r\n' 'echo.'
+              printf '%s\r\n' 'echo [1/4] 正在检查本地运行环境...'
+              printf '%s\r\n' 'echo [2/4] 正在启动本地 Web 控制台...'
+              printf '%s\r\n' 'echo       首次启动需要初始化页面资源，通常等待几秒到几十秒。'
+              printf '%s\r\n' 'echo [3/4] 程序会自动选择可用端口；如果 8080 被占用，会自动换到 8081、8082...'
+              printf '%s\r\n' 'echo [4/4] 请稍等，下面会显示实际访问地址。'
+              printf '%s\r\n' 'echo.'
+              printf '%s\r\n' 'echo 提示：浏览器未自动打开时，请复制终端里的 http://127.0.0.1:xxxx 地址到浏览器。'
+              printf '%s\r\n' 'echo 提示：请保持这个终端窗口打开；关闭窗口会停止本地服务。'
+              printf '%s\r\n' 'echo.'
+              printf '%s\r\n' 'echo ---------- 应用内部日志开始 ----------'
+              printf '%s\r\n' 'echo.'
+              printf '%s\r\n' 'app\stzy-paper-crawler.exe'
+              printf '%s\r\n' 'pause'
+            } > "packages/${PACKAGE}/start-windows.bat"
           fi
           {
-            printf '%s\n' 'macOS 请双击 start-macos.command。Windows 请双击 stzy-paper-crawler.exe。Linux 请运行 ./stzy-paper-crawler。'
+            printf '%s\n' '推荐使用启动脚本启动：'
+            printf '%s\n' '- macOS：双击 start-macos.command'
+            printf '%s\n' '- Windows：双击 start-windows.bat'
+            printf '%s\n' '- Linux：运行 ./start-linux.sh'
             printf '%s\n' ''
-            printf '%s\n' '启动后请保持终端窗口打开；关闭终端窗口会停止本地 Web 控制台。'
+            printf '%s\n' '启动流程：'
+            printf '%s\n' '1. 启动脚本会检查运行环境。'
+            printf '%s\n' '2. 程序会启动本地 Web 控制台，首次启动通常需要几秒到几十秒；再次启动会更快。'
+            printf '%s\n' '3. 默认从 8080 端口开始，如果端口被占用，会自动尝试 8081、8082，最多到 8099。'
+            printf '%s\n' '4. 终端会显示实际访问地址，例如 http://127.0.0.1:8080。'
             printf '%s\n' ''
-            printf '%s\n' '如果浏览器没有自动打开，请查看终端窗口中的 http://127.0.0.1 地址并手动复制到浏览器。'
+            printf '%s\n' '如果浏览器没有自动打开，请复制终端窗口中的 http://127.0.0.1:xxxx 地址到浏览器。'
+            printf '%s\n' '请保持终端窗口打开；关闭终端窗口会停止本地 Web 控制台。'
+            printf '%s\n' ''
+            printf '%s\n' '请不要删除 app 目录；启动脚本会从 app 目录加载程序和依赖。'
             printf '%s\n' ''
             printf '%s\n' '完整 PDF 转图片需要系统存在 pdftoppm：'
             printf '%s\n' '- macOS: brew install poppler'

@@ -94,7 +94,7 @@ def build_ui() -> None:
             subject_name=current_subject_options().get(subject_select.value, "不限"),
             list_delay_seconds=float(list_delay.value or 0.8),
             image_delay_seconds=float(image_delay.value or 0.3),
-            concurrency=settings.concurrency,
+            concurrency=int(concurrency.value or settings.concurrency),
             access_token=None,
             cookie_header=None,
         )
@@ -977,6 +977,14 @@ def build_ui() -> None:
                 step=0.1,
                 suffix="秒/次",
             ).classes("w-full")
+            concurrency = ui.number(
+                "试卷并发",
+                value=int(strategy_settings.get("concurrency") or settings.concurrency),
+                min=1,
+                max=8,
+                step=1,
+                suffix="个",
+            ).classes("w-full")
         ui.label("完整优先：10 页内保存预览图，超过 10 页直接下载 PDF 转图。").classes(
             "muted text-sm"
         )
@@ -987,6 +995,7 @@ def build_ui() -> None:
                 "max_pages_per_combo": int(max_pages.value) if max_pages.value else None,
                 "image_delay_seconds": float(image_delay.value or settings.image_delay_seconds),
                 "list_delay_seconds": float(list_delay.value or settings.list_delay_seconds),
+                "concurrency": int(concurrency.value or settings.concurrency),
             }
             preferences.set("strategy", saved)
             app_state.log("采集策略已保存")

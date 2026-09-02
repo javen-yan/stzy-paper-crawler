@@ -81,6 +81,28 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
 export PLAYWRIGHT_DOWNLOAD_HOST="https://npmmirror.com/mirrors/playwright"
+export PYTHONUNBUFFERED=1
+clear 2>/dev/null || true
+echo "========================================"
+echo " STZY Paper Crawler"
+echo "========================================"
+echo ""
+echo "[1/4] 正在检查本地运行环境..."
+if [ ! -x ".venv/bin/python" ]; then
+  echo "未找到 .venv/bin/python，请先运行 install-macos.command 完成安装。"
+  read -r -p "按回车退出..."
+  exit 1
+fi
+echo "[2/4] 正在启动本地 Web 控制台..."
+echo "      首次启动需要初始化页面资源，通常等待几秒到几十秒。"
+echo "[3/4] 程序会自动选择可用端口；如果 8080 被占用，会自动换到 8081、8082..."
+echo "[4/4] 请稍等，下面会显示实际访问地址。"
+echo ""
+echo "提示：浏览器未自动打开时，请复制终端里的 http://127.0.0.1:xxxx 地址到浏览器。"
+echo "提示：请保持这个终端窗口打开；关闭窗口会停止本地服务。"
+echo ""
+echo "---------- 应用内部日志开始 ----------"
+echo ""
 ".venv/bin/python" -m stzy_app.main
 EOF
 chmod +x start-macos.command
@@ -90,5 +112,5 @@ echo "以后双击 start-macos.command 即可启动 ${APP_NAME}。"
 read -r -p "是否现在启动？[Y/n] " launch
 launch="${launch:-Y}"
 if [[ "${launch}" =~ ^[Yy]$ ]]; then
-  exec "${VENV_PYTHON}" -m stzy_app.main
+  exec ./start-macos.command
 fi

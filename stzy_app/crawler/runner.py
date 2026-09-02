@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import random
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -71,6 +73,8 @@ class CrawlRunner:
         self.on_record = on_record or (lambda record: None)
         self.on_progress = on_progress or (lambda stats: None)
         self.stats = CrawlStats()
+        self._stats_lock = threading.RLock()
+        self._storage_lock = threading.Lock()
         self._stop = threading.Event()
 
     def stop(self) -> None:
@@ -87,6 +91,8 @@ class CrawlRunner:
             combos = catalog.combos(self.filters)
             self.stats.total_combos = len(combos)
             self._log(f"已生成 {len(combos)} 个筛选组合")
+            if self.download_workers > 1:
+                self._log(f"试卷并发数：{self.download_workers}，单个试卷内部按页串行处理")
             account_names = self.client.enabled_account_names()
             if account_names:
                 self._log(f"账号轮询顺序：{' -> '.join(account_names)}")
@@ -162,6 +168,7 @@ class CrawlRunner:
             items = data.get("list") or []
             if not items:
                 return
+            records = []
             for item in items:
                 if self._stop.is_set():
                     return
@@ -175,46 +182,85 @@ class CrawlRunner:
                     continue
                 record = build_record(item, combo)
                 record.subject = self.settings.subject_name
-                self._handle_resource(record)
+                records.append(record)
+            self._handle_resources(records)
+            if self._stop.is_set():
+                return
             total_page = int(data.get("totalPage") or 0)
             if page_num >= total_page:
                 return
             page_num += 1
             self._sleep(self.settings.list_delay_seconds)
 
+    @property
+    def download_workers(self) -> int:
+        return max(1, min(8, int(self.settings.concurrency or 1)))
+
+    def _handle_resources(self, records: list[ResourceRecord]) -> None:
+        if self.download_workers == 1 or len(records) <= 1:
+            for record in records:
+                if self._stop.is_set():
+                    return
+                self._handle_resource(record)
+            return
+        with ThreadPoolExecutor(max_workers=self.download_workers) as executor:
+            futures = [executor.submit(self._handle_resource, record) for record in records]
+            for future in as_completed(futures):
+                if self._stop.is_set():
+                    return
+                future.result()
+
     def _handle_resource(self, record: ResourceRecord) -> None:
-        self.stats.resources_seen += 1
-        self.stats.current_resource_name = record.resource_name
-        self._emit_progress()
+        with self._stats_lock:
+            self.stats.resources_seen += 1
+            self.stats.current_resource_name = record.resource_name
+            self._emit_progress()
         try:
-            result = self.downloader.handle_resource(record)
+            downloader = self.downloader if self.download_workers == 1 else self._build_downloader()
+            result = downloader.handle_resource(record)
             record.local_dir = result.local_dir
             record.image_count = result.saved_pages
             record.status = result.status
             record.error = result.error
-            self.stats.images_downloaded += result.images_added
-            self.stats.paid_skipped += result.paid_unavailable
+            with self._stats_lock:
+                self.stats.images_downloaded += result.images_added
+                self.stats.paid_skipped += result.paid_unavailable
             if result.status == ResourceStatus.completed:
                 self._store_record(record)
             elif result.status == ResourceStatus.paid_unavailable:
                 self._store_record(record)
             else:
-                self.stats.preview_limited += 1
+                with self._stats_lock:
+                    self.stats.preview_limited += 1
                 self._store_record(record)
         except Exception as exc:  # noqa: BLE001
             record.status = ResourceStatus.failed
             record.error = str(exc)
-            self.stats.failed += 1
+            with self._stats_lock:
+                self.stats.failed += 1
             self._store_record(record)
             self._log(f"资源失败：{record.resource_id} - {exc}")
         finally:
-            self.stats.resources_completed += 1
+            with self._stats_lock:
+                self.stats.resources_completed += 1
         self.on_record(record)
         self._emit_progress()
 
+    def _build_downloader(self) -> DownloadService:
+        client = StzyHttpClient(self.settings)
+        api = StzyCrawlerApi(client, self.settings)
+        return DownloadService(
+            self.settings,
+            client,
+            api,
+            on_log=self._log,
+            sleep=self._sleep,
+        )
+
     def _store_record(self, record: ResourceRecord) -> None:
-        self.index.append(record)
-        self.state.mark_resource(record.resource_id, record.status.value, record.error)
+        with self._storage_lock:
+            self.index.append(record)
+            self.state.mark_resource(record.resource_id, record.status.value, record.error)
 
     def _download_preview_images(self, record: ResourceRecord, pictures: list[str]) -> None:
         converter = DocumentConverter(self.settings, self.client, on_log=self._log, sleep=self._sleep)
@@ -346,4 +392,5 @@ class CrawlRunner:
         self.on_log(message)
 
     def _emit_progress(self) -> None:
-        self.on_progress(self.stats)
+        with self._stats_lock:
+            self.on_progress(self.stats)

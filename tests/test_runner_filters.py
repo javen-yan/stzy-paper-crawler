@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+import threading
 from dataclasses import dataclass
 
+from stzy_app.config import AppSettings
 from stzy_app.crawler.runner import CrawlRunner
 from stzy_app.models import CrawlCombo, ResourceRecord, ResourceStatus, TagOption
 
@@ -150,6 +152,37 @@ class RunnerFilterTest(unittest.TestCase):
         attempts = CrawlRunner._scheduled_download_attempts(runner, record)
 
         self.assertEqual([attempt[0] for attempt in attempts], ["VIP账号", "普通账号"])
+
+    def test_download_workers_are_clamped_for_paper_concurrency(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+
+        runner.settings = AppSettings(concurrency=0)
+        self.assertEqual(CrawlRunner.download_workers.fget(runner), 1)
+
+        runner.settings = AppSettings(concurrency=20)
+        self.assertEqual(CrawlRunner.download_workers.fget(runner), 8)
+
+    def test_paper_concurrency_handles_multiple_records(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.settings = AppSettings(concurrency=3)
+        runner._stop = threading.Event()
+        handled: list[str] = []
+        lock = threading.Lock()
+
+        def handle(record: ResourceRecord) -> None:
+            with lock:
+                handled.append(record.resource_id)
+
+        runner._handle_resource = handle
+        records = [
+            ResourceRecord(resource_id="paper-1", resource_name="试卷1"),
+            ResourceRecord(resource_id="paper-2", resource_name="试卷2"),
+            ResourceRecord(resource_id="paper-3", resource_name="试卷3"),
+        ]
+
+        CrawlRunner._handle_resources(runner, records)
+
+        self.assertCountEqual(handled, ["paper-1", "paper-2", "paper-3"])
 
     @staticmethod
     def _combo(province: TagOption) -> CrawlCombo:
