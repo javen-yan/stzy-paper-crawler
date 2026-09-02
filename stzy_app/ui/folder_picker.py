@@ -9,9 +9,12 @@ def choose_directory(initial_dir: Path) -> Path | None:
     """Open a native folder picker and return the selected directory."""
 
     initial_dir = initial_dir.expanduser()
-    if platform.system() == "Darwin":
-        return _choose_directory_macos(initial_dir)
-    return _choose_directory_tk(initial_dir)
+    try:
+        if platform.system() == "Darwin":
+            return _choose_directory_macos(initial_dir)
+        return _choose_directory_tk(initial_dir)
+    except Exception:
+        return None
 
 
 def _choose_directory_macos(initial_dir: Path) -> Path | None:

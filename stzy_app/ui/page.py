@@ -543,6 +543,8 @@ def build_ui() -> None:
         selected_dir = await run.io_bound(choose_directory, Path(output_dir.value))
         if selected_dir:
             set_output_dir(selected_dir)
+            return
+        ui.notify("未选择目录；如果系统选择器无法打开，可以直接编辑保存位置。", type="warning")
 
     def open_account_dialog() -> None:
         refresh_accounts()

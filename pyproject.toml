@@ -1,6 +1,6 @@
 [project]
 name = "stzy-paper-crawler"
-version = "0.1.3"
+version = "0.1.4"
 description = "Local web tool for crawling STZY paper preview images."
 requires-python = ">=3.10"
 dependencies = [
