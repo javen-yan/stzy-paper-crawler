@@ -51,6 +51,8 @@ class AppSettings(BaseSettings):
 
     list_delay_seconds: float = 0.8
     image_delay_seconds: float = 0.3
+    list_max_retries: int = 3
+    combo_failure_limit: int = 10
     concurrency: int = 1
     max_retries: int = 3
     connect_timeout: float = 6.0
@@ -61,6 +63,7 @@ class AppSettings(BaseSettings):
     proxy_api_url: str = ""
     proxy_max_failures: int = 3
     proxy_cooldown_seconds: float = 300.0
+    proxy_min_ttl_seconds: float = 30.0
     shenlong_whitelist_key: str = ""
     shenlong_whitelist_sign: str = ""
     user_agent: str = (

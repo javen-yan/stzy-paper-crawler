@@ -17,9 +17,11 @@ from stzy_app.http.client import (
     ProxyPool,
     ProxyUnavailable,
     RequestStopped,
+    StzyApiError,
     StzyHttpClient,
     display_proxy_url,
 )
+from stzy_app.proxy import ProxyEndpoint
 from stzy_app.storage import AccountCredential, AccountPool
 
 
@@ -244,7 +246,7 @@ class HttpClientAuthTest(unittest.TestCase):
                         {
                             "ip": "113.88.12.34",
                             "port": 16888,
-                            "expire": "2026-09-02 12:00:00",
+                            "expire": "2099-09-02 12:00:00",
                             "city": "广州",
                             "isp": "电信",
                         }
@@ -420,6 +422,58 @@ class HttpClientAuthTest(unittest.TestCase):
             {"http://49.85.120.175:40078", "http://60.167.20.98:40031"},
         )
         self.assertIn(failed_proxy, pool.cooldowns)
+
+    def test_proxy_api_replaces_endpoint_before_expiry(self) -> None:
+        settings = AppSettings(
+            proxy_mode="api",
+            proxy_pool="",
+            proxy_api_url="http://api.shenlongip.com/ip?count=1",
+            concurrency=1,
+            proxy_min_ttl_seconds=60,
+        )
+        pool = ProxyPool(settings)
+        stale_proxy = "http://113.88.12.34:16888"
+        fresh_proxy = "http://49.85.120.175:40078"
+        pool.api_urls = [stale_proxy]
+        pool.api_expiries[stale_proxy] = 100
+
+        with patch("stzy_app.http.client.time.time", return_value=45), patch.object(
+            pool.provider,
+            "fetch_proxies",
+            return_value=[ProxyEndpoint(fresh_proxy, expires_at="200")],
+        ) as proxy_api:
+            proxy = pool.next_proxy_url()
+
+        self.assertEqual(proxy, fresh_proxy)
+        self.assertNotIn(stale_proxy, pool.api_urls)
+        self.assertEqual(pool.api_urls, [fresh_proxy])
+        proxy_api.assert_called_once_with(count=1)
+
+    def test_proxy_http_407_marks_proxy_failed_and_refills(self) -> None:
+        settings = AppSettings(
+            proxy_mode="api",
+            proxy_pool="",
+            proxy_api_url="http://api.shenlongip.com/ip?count=1",
+            proxy_max_failures=1,
+        )
+        client = StzyHttpClient(settings)
+        client.session.get = Mock(side_effect=[FakeResponse(status_code=407), FakeResponse(payload={"code": 200, "data": {}})])
+
+        with patch(
+            "stzy_app.proxy.providers._direct_get",
+            side_effect=[
+                FakeResponse(payload={"code": 200, "data": [{"ip": "113.88.12.34", "port": 16888}]}),
+                FakeResponse(payload={"code": 200, "data": [{"ip": "49.85.120.175", "port": 40078}]}),
+            ],
+        ):
+            with self.assertRaises(StzyApiError):
+                client.get_json("/first", headers={})
+            client.get_json("/second", headers={})
+
+        self.assertEqual(
+            client.session.get.call_args_list[1].kwargs["proxies"],
+            {"http": "http://49.85.120.175:40078", "https": "http://49.85.120.175:40078"},
+        )
 
     def test_proxy_runtime_drops_stale_idle_api_proxies(self) -> None:
         stale_proxy = "http://198.51.100.10:7000"

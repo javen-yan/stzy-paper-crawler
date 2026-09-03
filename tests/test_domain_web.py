@@ -516,12 +516,20 @@ class DomainWebTest(unittest.TestCase):
         csrf = login.json()["csrf_token"]
         response = self.client.put(
             "/api/v1/settings",
-            json={"file_type": "IMAGE", "max_pages_per_combo": 2, "study_phase_code": "300"},
+            json={
+                "file_type": "IMAGE",
+                "max_pages_per_combo": 2,
+                "study_phase_code": "300",
+                "list_max_retries": 4,
+                "combo_failure_limit": 12,
+            },
             headers={"x-csrf-token": csrf},
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["file_type"], "IMAGE")
         self.assertEqual(response.json()["max_pages_per_combo"], 2)
+        self.assertEqual(response.json()["list_max_retries"], 4)
+        self.assertEqual(response.json()["combo_failure_limit"], 12)
 
         runtime_settings = self.context.tasks._runtime_settings()  # noqa: SLF001 - verifies persisted settings are consumed
         snapshot = self.context.tasks._public_settings_snapshot(runtime_settings, {})  # noqa: SLF001
@@ -529,6 +537,8 @@ class DomainWebTest(unittest.TestCase):
         self.assertEqual(snapshot["file_type"], "IMAGE")
         self.assertEqual(snapshot["max_pages_per_combo"], 2)
         self.assertEqual(snapshot["study_phase_code"], "300")
+        self.assertEqual(snapshot["list_max_retries"], 4)
+        self.assertEqual(snapshot["combo_failure_limit"], 12)
 
     def test_task_update_accepts_stats_json_without_double_suffix(self) -> None:
         self.context.store.create_task(

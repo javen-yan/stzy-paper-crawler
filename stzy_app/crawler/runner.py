@@ -11,7 +11,7 @@ from stzy_app.config import AppSettings
 from stzy_app.crawler.api import StzyCrawlerApi, build_record
 from stzy_app.crawler.download_service import DownloadService
 from stzy_app.crawler.tags import TagCatalog
-from stzy_app.http import ProxyPool, RequestStopped, StzyHttpClient
+from stzy_app.http import ProxyPool, RequestStopped, StzyApiError, StzyHttpClient
 from stzy_app.models import CrawlCombo, CrawlFilters, ResourceRecord, ResourceStatus
 from stzy_app.storage import CrawlState, CsvIndex
 
@@ -39,6 +39,8 @@ class CrawlStats:
     failed: int = 0
     running: bool = False
     paused: bool = False
+    aborted: bool = False
+    error: str = ""
 
 
 class CrawlRunner:
@@ -112,6 +114,8 @@ class CrawlRunner:
             account_names = self.client.enabled_account_names()
             if account_names:
                 self._log(f"账号轮询顺序：{' -> '.join(account_names)}")
+            consecutive_combo_failures = 0
+            combo_failure_limit = max(0, int(getattr(self.settings, "combo_failure_limit", 10) or 0))
             for combo in combos:
                 if self._stop.is_set():
                     self.stats.paused = True
@@ -120,18 +124,29 @@ class CrawlRunner:
                 if self.state.is_combo_completed(combo, self.settings.subject_code):
                     self._log("组合曾经跑过，本次继续检查新增或缺失资源")
                 combo_completed = self._crawl_combo(combo)
-                if not combo_completed:
+                if combo_completed is False:
                     self.stats.paused = True
                     self._log("任务已暂停")
                     break
-                self.state.mark_combo_completed(combo, self.settings.subject_code)
-                self.stats.completed_combos += 1
-                self._emit_progress()
+                if combo_completed is True:
+                    consecutive_combo_failures = 0
+                    self.state.mark_combo_completed(combo, self.settings.subject_code)
+                    self.stats.completed_combos += 1
+                    self._emit_progress()
+                elif combo_completed is None:
+                    consecutive_combo_failures += 1
+                    if combo_failure_limit and consecutive_combo_failures >= combo_failure_limit:
+                        self.stats.aborted = True
+                        self.stats.error = f"连续 {consecutive_combo_failures} 个筛选组合失败，已停止任务"
+                        self._log(self.stats.error)
+                        break
         finally:
             self.stats.running = False
             self.stats.phase = "finished"
             if self.stats.paused:
                 self.stats.outcome = "paused"
+            elif self.stats.aborted:
+                self.stats.outcome = "failed"
             elif self.stats.failed or self.stats.paid_skipped:
                 self.stats.outcome = "partial"
             elif self.stats.preview_limited:
@@ -180,7 +195,7 @@ class CrawlRunner:
         while not self._stop.is_set():
             if self.filters.max_pages_per_combo and page_num > self.filters.max_pages_per_combo:
                 break
-            data = self.api.list_resources(combo, self.filters, page_num)
+            data = self._list_resources_with_retry(combo, page_num)
             if page_num == 1:
                 total_reported = int(data.get("total") or 0)
                 if not combo.province.code:
@@ -203,7 +218,7 @@ class CrawlRunner:
             self._log(f"预估地区过滤：已选 {names['province']}，过滤 {filtered}/{total_reported} 份")
         return matched, filtered
 
-    def _crawl_combo(self, combo: CrawlCombo) -> bool:
+    def _crawl_combo(self, combo: CrawlCombo) -> bool | None:
         page_num = 1
         names = combo.names()
         self._log(
@@ -214,7 +229,18 @@ class CrawlRunner:
         while not self._stop.is_set():
             if self.filters.max_pages_per_combo and page_num > self.filters.max_pages_per_combo:
                 return True
-            data = self.api.list_resources(combo, self.filters, page_num)
+            try:
+                data = self._list_resources_with_retry(combo, page_num)
+            except RequestStopped:
+                return False
+            except StzyApiError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                with self._stats_lock:
+                    self.stats.failed += 1
+                    self._emit_progress()
+                self._log(f"组合列表连续失败，跳过当前组合：{names['province']} / 第 {page_num} 页 - {exc}")
+                return None
             if page_num == 1:
                 self.stats.resources_total += int(data.get("total") or 0)
                 self._emit_progress()
@@ -254,6 +280,38 @@ class CrawlRunner:
             page_num += 1
             self._sleep(self.settings.list_delay_seconds)
         return False
+
+    def _list_resources_with_retry(self, combo: CrawlCombo, page_num: int) -> dict[str, object]:
+        attempts = max(1, int(getattr(self.settings, "list_max_retries", getattr(self.settings, "max_retries", 3)) or 3))
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            if self._stop.is_set():
+                raise RequestStopped("任务已停止")
+            try:
+                return self.api.list_resources(combo, self.filters, page_num)
+            except RequestStopped:
+                raise
+            except StzyApiError as exc:
+                if exc.requires_login:
+                    raise
+                last_error = exc
+                names = combo.names()
+                self._log(
+                    "列表请求失败："
+                    f"{names['province']} / 第 {page_num} 页（{attempt}/{attempts}）- {exc.message}"
+                )
+                if attempt < attempts:
+                    self._sleep(self.settings.list_delay_seconds)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                names = combo.names()
+                self._log(
+                    "列表请求失败："
+                    f"{names['province']} / 第 {page_num} 页（{attempt}/{attempts}）- {exc}"
+                )
+                if attempt < attempts:
+                    self._sleep(self.settings.list_delay_seconds)
+        raise last_error or RuntimeError("列表请求失败")
 
     @property
     def download_workers(self) -> int:

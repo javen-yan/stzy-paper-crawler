@@ -3,11 +3,12 @@ from __future__ import annotations
 import unittest
 import threading
 from dataclasses import dataclass
+from unittest.mock import patch
 
 from stzy_app.config import AppSettings
 from stzy_app.crawler.account_scheduler import AccountScheduler
-from stzy_app.crawler.runner import CrawlRunner
-from stzy_app.http import ProxyPool, RequestStopped
+from stzy_app.crawler.runner import CrawlRunner, CrawlStats
+from stzy_app.http import ProxyPool, RequestStopped, StzyApiError
 from stzy_app.models import CrawlCombo, ResourceRecord, ResourceStatus, TagOption
 
 
@@ -414,6 +415,129 @@ class RunnerFilterTest(unittest.TestCase):
         self.assertEqual(runner.stats.filtered_skipped, 1)
         self.assertTrue(any("接口返回非目标地区，已过滤" in line for line in logs))
 
+    def test_combo_list_request_retries_before_handling_resources(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.settings = AppSettings(subject_name="数学", list_max_retries=3, list_delay_seconds=0)
+        runner.filters = type("Filters", (), {"max_pages_per_combo": None})()
+        runner.stats = type(
+            "Stats",
+            (),
+            {
+                "resources_total": 0,
+                "resources_seen": 0,
+                "resources_completed": 0,
+                "failed": 0,
+                "current_resource_name": "",
+            },
+        )()
+        runner._stats_lock = threading.RLock()
+        runner._stop = threading.Event()
+        runner.completed_resource_ids = set()
+        runner.retry_resource_ids = None
+        runner.api = FlakyListApi(
+            RuntimeError("代理抖动"),
+            RuntimeError("接口超时"),
+            [{"resourceId": "paper-1", "resourceName": "试卷", "provinceName": "安徽"}],
+        )
+        runner._sleep = lambda seconds: None
+        runner._emit_progress = lambda: None
+        logs: list[str] = []
+        runner._log = logs.append
+        handled: list[str] = []
+        runner._handle_resources = lambda records: handled.extend(record.resource_id for record in records)
+
+        result = CrawlRunner._crawl_combo(runner, self._combo(TagOption("provinceCode", "340000", "安徽")))
+
+        self.assertTrue(result)
+        self.assertEqual(handled, ["paper-1"])
+        self.assertEqual(runner.stats.failed, 0)
+        self.assertEqual(runner.api.calls, 3)
+        self.assertTrue(any("列表请求失败" in line for line in logs))
+
+    def test_combo_list_request_skips_combo_after_retry_limit(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.settings = AppSettings(subject_name="数学", list_max_retries=2, list_delay_seconds=0)
+        runner.filters = type("Filters", (), {"max_pages_per_combo": None})()
+        runner.stats = type(
+            "Stats",
+            (),
+            {
+                "resources_total": 0,
+                "resources_seen": 0,
+                "resources_completed": 0,
+                "failed": 0,
+                "current_resource_name": "",
+            },
+        )()
+        runner._stats_lock = threading.RLock()
+        runner._stop = threading.Event()
+        runner.completed_resource_ids = set()
+        runner.retry_resource_ids = None
+        runner.api = FlakyListApi(RuntimeError("代理不可用"), RuntimeError("仍然不可用"))
+        runner._sleep = lambda seconds: None
+        runner._emit_progress = lambda: None
+        logs: list[str] = []
+        runner._log = logs.append
+        runner._handle_resources = lambda records: self.fail("列表失败时不应进入资源下载")
+
+        result = CrawlRunner._crawl_combo(runner, self._combo(TagOption("provinceCode", "340000", "安徽")))
+
+        self.assertIsNone(result)
+        self.assertEqual(runner.stats.failed, 1)
+        self.assertEqual(runner.api.calls, 2)
+        self.assertTrue(any("组合列表连续失败，跳过当前组合" in line for line in logs))
+
+    def test_auth_expired_list_request_is_not_skipped_as_combo_failure(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.settings = AppSettings(subject_name="数学", list_max_retries=3, list_delay_seconds=0)
+        runner.filters = type("Filters", (), {"max_pages_per_combo": None})()
+        runner.stats = CrawlStats()
+        runner._stats_lock = threading.RLock()
+        runner._stop = threading.Event()
+        runner.api = FlakyListApi(StzyApiError("-1", "暂未登录或token已经过期"))
+        runner._emit_progress = lambda: None
+        runner._log = lambda message: None
+
+        with self.assertRaises(StzyApiError):
+            CrawlRunner._crawl_combo(runner, self._combo(TagOption("provinceCode", "340000", "安徽")))
+
+        self.assertEqual(runner.stats.failed, 0)
+        self.assertEqual(runner.api.calls, 1)
+
+    def test_run_aborts_after_consecutive_combo_failure_limit(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.settings = AppSettings(combo_failure_limit=2)
+        runner.filters = object()
+        runner.stats = CrawlStats()
+        runner._stop = threading.Event()
+        runner._emit_progress = lambda: None
+        logs: list[str] = []
+        runner._log = logs.append
+        runner.proxy_pool = type("ProxyPool", (), {"proxy_mode": "off"})()
+        runner.client = type("Client", (), {"enabled_account_names": lambda self: []})()
+        runner.state = FakeState()
+        combos = [
+            self._combo(TagOption("provinceCode", "340000", "安徽")),
+            self._combo(TagOption("provinceCode", "110000", "北京")),
+            self._combo(TagOption("provinceCode", "310000", "上海")),
+        ]
+
+        def fail_combo(combo: CrawlCombo) -> None:
+            runner.stats.failed += 1
+            return None
+
+        runner._crawl_combo = fail_combo
+
+        with patch("stzy_app.crawler.runner.TagCatalog.fetch", return_value=FakeCatalog(combos)):
+            stats = CrawlRunner.run(runner)
+
+        self.assertTrue(stats.aborted)
+        self.assertEqual(stats.outcome, "failed")
+        self.assertEqual(stats.failed, 2)
+        self.assertIn("连续 2 个筛选组合失败，已停止任务", stats.error)
+        self.assertEqual(runner.state.completed, 0)
+        self.assertTrue(any("连续 2 个筛选组合失败" in line for line in logs))
+
     def test_estimate_filters_by_selected_region_across_pages(self) -> None:
         runner = CrawlRunner.__new__(CrawlRunner)
         runner.filters = type("Filters", (), {"max_pages_per_combo": None})()
@@ -446,6 +570,7 @@ class RunnerFilterTest(unittest.TestCase):
         runner = CrawlRunner.__new__(CrawlRunner)
         runner.filters = type("Filters", (), {"max_pages_per_combo": None})()
         runner._stop = threading.Event()
+        runner.settings = AppSettings()
         runner.api = FakeListApi(
             [
                 {"resourceId": "national-1", "resourceName": "全国卷", "provinceName": "全国"},
@@ -495,6 +620,38 @@ class FakeListApi:
         pages = self.pages or [self.items]
         items = pages[page_num - 1] if 0 <= page_num - 1 < len(pages) else []
         return {"total": sum(len(page) for page in pages), "totalPage": len(pages), "list": items}
+
+
+class FakeCatalog:
+    def __init__(self, combos: list[CrawlCombo]) -> None:
+        self._combos = combos
+
+    def combos(self, filters: object) -> list[CrawlCombo]:
+        return self._combos
+
+
+class FakeState:
+    def __init__(self) -> None:
+        self.completed = 0
+
+    def is_combo_completed(self, combo: CrawlCombo, subject_code: str = "") -> bool:
+        return False
+
+    def mark_combo_completed(self, combo: CrawlCombo, subject_code: str = "") -> None:
+        self.completed += 1
+
+
+class FlakyListApi:
+    def __init__(self, *results: list[dict[str, object]] | Exception) -> None:
+        self.results = list(results)
+        self.calls = 0
+
+    def list_resources(self, combo: object, filters: object, page_num: int) -> dict[str, object]:
+        self.calls += 1
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return {"total": len(result), "totalPage": 1, "list": result}
 
 
 class FakeDownloadApi:

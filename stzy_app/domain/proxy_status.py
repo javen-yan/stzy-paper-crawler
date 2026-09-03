@@ -121,6 +121,7 @@ def effective_proxy_settings(settings: AppSettings, store: DomainStore) -> AppSe
         "proxy_api_url",
         "proxy_max_failures",
         "proxy_cooldown_seconds",
+        "proxy_min_ttl_seconds",
         "shenlong_whitelist_key",
         "shenlong_whitelist_sign",
         "connect_timeout",

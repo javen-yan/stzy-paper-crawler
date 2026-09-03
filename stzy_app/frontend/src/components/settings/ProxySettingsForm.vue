@@ -24,6 +24,7 @@ const form = reactive({
   concurrency: 1,
   proxy_max_failures: 3,
   proxy_cooldown_seconds: 300,
+  proxy_min_ttl_seconds: 30,
   shenlong_whitelist_key: '',
   shenlong_whitelist_sign: '',
   has_proxy_pool: false,
@@ -58,6 +59,7 @@ watch(
     form.concurrency = Number(settings.concurrency || 1)
     form.proxy_max_failures = Number(settings.proxy_max_failures || 3)
     form.proxy_cooldown_seconds = Number(settings.proxy_cooldown_seconds || 300)
+    form.proxy_min_ttl_seconds = Number(settings.proxy_min_ttl_seconds || 30)
     form.shenlong_whitelist_key = visibleSecret(settings.shenlong_whitelist_key)
     form.shenlong_whitelist_sign = visibleSecret(settings.shenlong_whitelist_sign)
     form.has_proxy_pool = hasSavedSecret(settings.proxy_pool)
@@ -75,6 +77,7 @@ function buildPayload() {
     concurrency: form.concurrency,
     proxy_max_failures: form.proxy_max_failures,
     proxy_cooldown_seconds: form.proxy_cooldown_seconds,
+    proxy_min_ttl_seconds: form.proxy_min_ttl_seconds,
   }
 
   if (form.proxy_mode === 'fixed' && form.proxy_pool.trim()) {
@@ -218,6 +221,10 @@ async function bindLocalIp() {
         </el-form-item>
         <el-form-item label="失败冷却秒数">
           <el-input-number v-model="form.proxy_cooldown_seconds" :min="10" :max="3600" :step="10" />
+        </el-form-item>
+        <el-form-item v-if="form.proxy_mode === 'api'" label="最小剩余有效秒数">
+          <el-input-number v-model="form.proxy_min_ttl_seconds" :min="0" :max="300" :step="10" />
+          <p class="form-helper">代理有效期不足这个值时不再下发，直接提前换新。</p>
         </el-form-item>
       </div>
 

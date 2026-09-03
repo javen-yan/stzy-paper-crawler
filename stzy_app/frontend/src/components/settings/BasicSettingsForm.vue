@@ -18,6 +18,8 @@ const form = reactive({
   list_delay_seconds: 0.8,
   image_delay_seconds: 0.3,
   max_retries: 3,
+  list_max_retries: 3,
+  combo_failure_limit: 10,
   connect_timeout: 6,
   read_timeout: 30,
 })
@@ -31,6 +33,8 @@ watch(
     form.list_delay_seconds = Number(settings.list_delay_seconds || 0.8)
     form.image_delay_seconds = Number(settings.image_delay_seconds || 0.3)
     form.max_retries = Number(settings.max_retries || 3)
+    form.list_max_retries = Number(settings.list_max_retries || 3)
+    form.combo_failure_limit = Number(settings.combo_failure_limit ?? 10)
     form.connect_timeout = Number(settings.connect_timeout || 6)
     form.read_timeout = Number(settings.read_timeout || 30)
   },
@@ -94,8 +98,17 @@ async function pickDirectory() {
             <el-form-item label="图片请求间隔秒">
               <el-input-number v-model="form.image_delay_seconds" :min="0" :max="10" :step="0.1" />
             </el-form-item>
-            <el-form-item label="失败重试次数">
+            <el-form-item label="底层 HTTP 重试次数">
               <el-input-number v-model="form.max_retries" :min="0" :max="20" />
+              <p class="form-helper">单次接口或文件请求遇到 429/5xx 等临时错误时，由 HTTP 客户端自动重试。</p>
+            </el-form-item>
+            <el-form-item label="列表页最大尝试次数">
+              <el-input-number v-model="form.list_max_retries" :min="1" :max="20" />
+              <p class="form-helper">获取某个筛选组合的试卷列表失败时，最多尝试几次；仍失败则跳过该组合。</p>
+            </el-form-item>
+            <el-form-item label="连续失败组合停止数">
+              <el-input-number v-model="form.combo_failure_limit" :min="0" :max="100" />
+              <p class="form-helper">连续多少个筛选组合都失败后停止任务；填 0 表示不按连续失败停止。</p>
             </el-form-item>
             <el-form-item label="连接超时秒">
               <el-input-number v-model="form.connect_timeout" :min="1" :max="60" />

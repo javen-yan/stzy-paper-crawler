@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -181,6 +182,7 @@ class ProxyPool:
         self.provider = create_proxy_provider(settings) if self.proxy_mode == "api" else None
         self.fixed_urls = self._load_fixed_urls()
         self.api_urls: list[str] = []
+        self.api_expiries: dict[str, float] = {}
         self.failures: dict[str, int] = {}
         self.cooldowns: dict[str, float] = {}
         self.leases: dict[str, ProxyLeaseInfo] = {}
@@ -206,6 +208,7 @@ class ProxyPool:
         now = time.time()
         with self.lock:
             if self.proxy_mode == "api":
+                self._prune_expired_api_urls(now)
                 self._refill_api_urls(now)
                 proxy = self._next_available(self.api_urls, now)
                 return proxy
@@ -227,6 +230,7 @@ class ProxyPool:
             while True:
                 now = time.time()
                 if self.proxy_mode == "api":
+                    self._prune_expired_api_urls(now)
                     self._refill_api_urls(now)
                 proxy = self._next_available_unleased(self.known_proxy_urls, now)
                 if proxy:
@@ -274,6 +278,7 @@ class ProxyPool:
                 self.failures[proxy] = 0
                 if self.proxy_mode == "api":
                     self.api_urls = [url for url in self.api_urls if url != proxy]
+                    self.api_expiries.pop(proxy, None)
                 if self.current_proxy == proxy:
                     self.current_proxy = ""
                 self._emit(f"代理不可用，已换下一个：{display_proxy_url(proxy)}")
@@ -347,8 +352,16 @@ class ProxyPool:
             return []
         return [endpoint.url for endpoint in self.provider.fetch_proxies(count=count) if endpoint.url]
 
+    def _fetch_proxy_endpoints_from_api(self, count: int | None = None):
+        if self.proxy_mode != "api" or not self.provider:
+            return []
+        return [endpoint for endpoint in self.provider.fetch_proxies(count=count) if endpoint.url]
+
     def _is_available(self, proxy: str, now: float) -> bool:
-        return bool(proxy) and self.cooldowns.get(proxy, 0) <= now
+        expires_at = self.api_expiries.get(proxy, 0)
+        return bool(proxy) and self.cooldowns.get(proxy, 0) <= now and (
+            not expires_at or expires_at > now + self._proxy_min_ttl_seconds()
+        )
 
     def _available_count(self, proxies: list[str], now: float) -> int:
         return sum(1 for proxy in proxies if self._is_available(proxy, now))
@@ -357,15 +370,26 @@ class ProxyPool:
         return max(1, min(20, int(getattr(self.settings, "concurrency", 1) or 1)))
 
     def _refill_api_urls(self, now: float) -> None:
+        self._prune_expired_api_urls(now)
         target_size = self._api_target_size()
         available_count = self._available_count(self.api_urls, now)
         missing = target_size - available_count
         if missing <= 0:
             return
         self._emit(f"提取接口补充代理：需要 {missing} 个")
-        fetched = list(dict.fromkeys(self._fetch_proxies_from_api(missing)))
+        fetched = self._fetch_proxy_endpoints_from_api(missing)
         existing = set(self.api_urls) | set(self.cooldowns)
-        new_urls = [proxy for proxy in fetched if proxy not in existing]
+        new_urls: list[str] = []
+        for endpoint in fetched:
+            proxy = endpoint.url
+            if proxy in existing or proxy in new_urls:
+                continue
+            expires_at = self._parse_proxy_expires_at(endpoint.expires_at)
+            if expires_at and expires_at <= now + self._proxy_min_ttl_seconds():
+                continue
+            new_urls.append(proxy)
+            if expires_at:
+                self.api_expiries[proxy] = expires_at
         self.api_urls.extend(new_urls)
         if new_urls:
             available_count = self._available_count(self.api_urls, time.time())
@@ -373,6 +397,53 @@ class ProxyPool:
         else:
             self._emit("提取接口暂时没有返回可用代理")
         PROXY_RUNTIME.sync_pool(self)
+
+    def _prune_expired_api_urls(self, now: float) -> None:
+        if self.proxy_mode != "api" or not self.api_expiries:
+            return
+        expired = [
+            proxy
+            for proxy in self.api_urls
+            if self.api_expiries.get(proxy, 0) and self.api_expiries[proxy] <= now + self._proxy_min_ttl_seconds()
+        ]
+        if not expired:
+            return
+        expired_set = set(expired)
+        self.api_urls = [proxy for proxy in self.api_urls if proxy not in expired_set]
+        for proxy in expired:
+            self.api_expiries.pop(proxy, None)
+            self.failures.pop(proxy, None)
+            self.cooldowns.pop(proxy, None)
+            if proxy not in self.leases:
+                PROXY_RUNTIME.release(proxy, failure_count=0, cooldown_until=0)
+        if self.current_proxy in expired_set:
+            self.current_proxy = ""
+        self._emit(f"代理已到期，主动换下：{len(expired)} 个")
+
+    def _proxy_min_ttl_seconds(self) -> float:
+        return max(0.0, float(getattr(self.settings, "proxy_min_ttl_seconds", 60) or 0))
+
+    @staticmethod
+    def _parse_proxy_expires_at(value: object) -> float:
+        text = str(value or "").strip()
+        if not text:
+            return 0
+        if text.isdigit():
+            numeric = float(text)
+            return numeric / 1000 if numeric > 10_000_000_000 else numeric
+        normalized = text.replace("/", "-")
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+        try:
+            return datetime.fromisoformat(normalized).timestamp()
+        except ValueError:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(normalized, fmt).timestamp()
+            except ValueError:
+                continue
+        return 0
 
     def _next_available(self, proxies: list[str], now: float) -> str:
         if not proxies:
@@ -795,7 +866,7 @@ class StzyHttpClient:
         setattr(response, "_stzy_proxy", proxy)
         setattr(response, "_stzy_proxy_released", False)
         status_code = int(getattr(response, "status_code", 200) or 200)
-        if status_code in {403, 429, 500, 502, 503, 504}:
+        if status_code in {403, 407, 429, 500, 502, 503, 504}:
             self._record_proxy_failure(proxy)
             setattr(response, "_stzy_proxy_released", True)
         elif mark_proxy_success:

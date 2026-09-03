@@ -295,9 +295,12 @@ class TaskService:
                         "max_pages_per_combo",
                         "list_delay_seconds",
                         "image_delay_seconds",
+                        "list_max_retries",
+                        "combo_failure_limit",
                         "concurrency",
                         "proxy_mode",
                         "proxy_provider",
+                        "proxy_min_ttl_seconds",
                     }
                 }
             )
@@ -328,6 +331,8 @@ class TaskService:
                 self._runners[task_id] = runner
                 result = runner.estimate() if mode == "estimate" else runner.run()
                 aggregate = self._merge_stats(aggregate, result)
+                if result.aborted:
+                    break
                 if result.paused:
                     break
             status = self._final_status(task_id, aggregate)
@@ -336,7 +341,7 @@ class TaskService:
                 task_id,
                 status=status,
                 ended_at=datetime.now().isoformat(timespec="seconds"),
-                error="",
+                error=aggregate.error if status == "failed" else "",
                 stats_json={**asdict(aggregate), "duration_seconds": duration},
             )
         except StzyApiError as exc:
@@ -418,6 +423,8 @@ class TaskService:
             "max_pages_per_combo",
             "list_delay_seconds",
             "image_delay_seconds",
+            "list_max_retries",
+            "combo_failure_limit",
             "concurrency",
             "max_retries",
             "connect_timeout",
@@ -428,6 +435,7 @@ class TaskService:
             "proxy_api_url",
             "proxy_max_failures",
             "proxy_cooldown_seconds",
+            "proxy_min_ttl_seconds",
             "shenlong_whitelist_key",
             "shenlong_whitelist_sign",
             "max_active_tasks",
@@ -473,9 +481,12 @@ class TaskService:
             "max_pages_per_combo",
             "list_delay_seconds",
             "image_delay_seconds",
+            "list_max_retries",
+            "combo_failure_limit",
             "concurrency",
             "proxy_mode",
             "proxy_provider",
+            "proxy_min_ttl_seconds",
         }
         updates = {key: value for key, value in overrides.items() if key in allowed}
         return settings.model_copy(update=updates) if updates else settings
@@ -489,9 +500,12 @@ class TaskService:
             "max_pages_per_combo",
             "list_delay_seconds",
             "image_delay_seconds",
+            "list_max_retries",
+            "combo_failure_limit",
             "concurrency",
             "proxy_mode",
             "proxy_provider",
+            "proxy_min_ttl_seconds",
             "max_pages_per_combo",
         }
         snapshot = {key: getattr(settings, key) for key in allowed if hasattr(settings, key)}
@@ -568,6 +582,8 @@ class TaskService:
         base.preview_limited += result.preview_limited
         base.failed += result.failed
         base.paused = base.paused or result.paused
+        base.aborted = base.aborted or result.aborted
+        base.error = result.error or base.error
         base.outcome = result.outcome
         base.phase = result.phase
         base.running = False
@@ -577,6 +593,8 @@ class TaskService:
         task = self.store.task(task_id)
         if task and task["status"] == "cancelled":
             return "cancelled"
+        if stats.aborted:
+            return "failed"
         if stats.paused:
             return "paused"
         if stats.failed or stats.paid_skipped or stats.preview_limited:
