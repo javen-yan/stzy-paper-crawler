@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -16,7 +17,7 @@ from urllib3.util.retry import Retry
 
 from stzy_app.config import AppSettings
 from stzy_app.proxy import create_proxy_provider, normalize_proxy_url
-from stzy_app.storage.accounts import AccountCredential, AccountPool
+from stzy_app.storage.accounts import AccountCredential, get_shared_account_pool
 
 
 class StzyApiError(RuntimeError):
@@ -40,14 +41,122 @@ class InvalidDownloadContent(RuntimeError):
     """Raised when a successful response is not the expected document content."""
 
 
+class ProxyUnavailable(RuntimeError):
+    """Raised when proxy mode is enabled but no proxy lease is available."""
+
+
 def display_proxy_url(proxy: str) -> str:
     """Return a log-safe proxy label without credentials."""
     parsed = urlparse(proxy)
     if not parsed.scheme or not parsed.hostname:
         return proxy
     host = parsed.hostname
-    port = f":{parsed.port}" if parsed.port else ""
+    try:
+        parsed_port = parsed.port
+    except ValueError:
+        return f"{parsed.scheme}://{host}"
+    port = f":{parsed_port}" if parsed_port else ""
     return f"{parsed.scheme}://{host}{port}"
+
+
+@dataclass
+class ProxyLeaseInfo:
+    task_id: str = ""
+    resource_name: str = ""
+    leased_at: float = 0
+
+
+class ProxyRuntimeRegistry:
+    """Best-effort in-process view of proxy pool and leases for diagnostics."""
+
+    def __init__(self) -> None:
+        self._items: dict[str, dict[str, Any]] = {}
+        self._lock = threading.Lock()
+
+    def sync_pool(self, pool: "ProxyPool") -> None:
+        if pool.proxy_mode == "off":
+            return
+        now = time.time()
+        source = pool.proxy_source_label
+        with self._lock:
+            for proxy in pool.known_proxy_urls:
+                item = self._items.setdefault(
+                    proxy,
+                    {
+                        "proxy": proxy,
+                        "address": display_proxy_url(proxy),
+                        "source": source,
+                        "status": "空闲",
+                        "lease_task_id": "",
+                        "lease_resource_name": "",
+                        "leased_at": 0,
+                        "cooldown_until": 0,
+                        "failure_count": 0,
+                    },
+                )
+                item["source"] = source
+                item["failure_count"] = int(pool.failures.get(proxy, 0) or 0)
+                item["cooldown_until"] = float(pool.cooldowns.get(proxy, 0) or 0)
+                if proxy in pool.leases:
+                    lease = pool.leases[proxy]
+                    item["status"] = "使用中"
+                    item["lease_task_id"] = lease.task_id
+                    item["lease_resource_name"] = lease.resource_name
+                    item["leased_at"] = lease.leased_at
+                elif item["cooldown_until"] > now:
+                    item["status"] = "冷却中"
+                    item["lease_task_id"] = ""
+                    item["lease_resource_name"] = ""
+                    item["leased_at"] = 0
+                else:
+                    item["status"] = "空闲"
+                    item["lease_task_id"] = ""
+                    item["lease_resource_name"] = ""
+                    item["leased_at"] = 0
+
+    def lease(self, proxy: str, source: str, lease: ProxyLeaseInfo) -> None:
+        if not proxy:
+            return
+        with self._lock:
+            item = self._items.setdefault(
+                proxy,
+                {
+                    "proxy": proxy,
+                    "address": display_proxy_url(proxy),
+                    "source": source,
+                    "failure_count": 0,
+                    "cooldown_until": 0,
+                },
+            )
+            item.update(
+                {
+                    "status": "使用中",
+                    "lease_task_id": lease.task_id,
+                    "lease_resource_name": lease.resource_name,
+                    "leased_at": lease.leased_at,
+                }
+            )
+
+    def release(self, proxy: str, *, failure_count: int = 0, cooldown_until: float = 0) -> None:
+        if not proxy:
+            return
+        with self._lock:
+            item = self._items.get(proxy)
+            if not item:
+                return
+            item["failure_count"] = int(failure_count or 0)
+            item["cooldown_until"] = float(cooldown_until or 0)
+            item["lease_task_id"] = ""
+            item["lease_resource_name"] = ""
+            item["leased_at"] = 0
+            item["status"] = "冷却中" if item["cooldown_until"] > time.time() else "空闲"
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(item) for item in self._items.values()]
+
+
+PROXY_RUNTIME = ProxyRuntimeRegistry()
 
 
 class ProxyPool:
@@ -66,13 +175,17 @@ class ProxyPool:
         self.api_urls: list[str] = []
         self.failures: dict[str, int] = {}
         self.cooldowns: dict[str, float] = {}
+        self.leases: dict[str, ProxyLeaseInfo] = {}
         self.current_proxy = ""
         self._cursor = 0
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+        self.condition = threading.Condition(self.lock)
+        self._local = threading.local()
         if self.proxy_mode == "fixed" and self.fixed_urls:
             self._emit(f"固定代理池：{len(self.fixed_urls)} 个")
         elif self.proxy_mode == "api" and self.provider:
             self._emit(f"代理服务商：{self.provider.display_name}")
+        PROXY_RUNTIME.sync_pool(self)
 
     @property
     def proxy_mode(self) -> str:
@@ -93,6 +206,36 @@ class ProxyPool:
                 return proxy
             return ""
 
+    def set_lease_context(self, *, task_id: str = "", resource_name: str = "") -> None:
+        self._local.task_id = task_id
+        self._local.resource_name = resource_name
+
+    def acquire_proxy(self, *, timeout: float | None = None) -> str:
+        if self.proxy_mode == "off":
+            return ""
+        timeout = self._lease_timeout() if timeout is None else max(0.1, float(timeout))
+        deadline = time.time() + timeout
+        with self.condition:
+            while True:
+                now = time.time()
+                if self.proxy_mode == "api":
+                    self._refill_api_urls(now)
+                proxy = self._next_available_unleased(self.known_proxy_urls, now)
+                if proxy:
+                    lease = ProxyLeaseInfo(
+                        task_id=str(getattr(self.settings, "task_scope", "") or getattr(self._local, "task_id", "") or ""),
+                        resource_name=str(getattr(self._local, "resource_name", "") or ""),
+                        leased_at=now,
+                    )
+                    self.leases[proxy] = lease
+                    self._activate_proxy(proxy)
+                    PROXY_RUNTIME.lease(proxy, self.proxy_source_label, lease)
+                    return proxy
+                remaining = deadline - now
+                if remaining <= 0:
+                    raise ProxyUnavailable("代理池可用 IP 不足，请增加代理数量或降低下载并发")
+                self.condition.wait(min(0.25, remaining))
+
     def record_success(self, proxy: str) -> None:
         if not proxy:
             return
@@ -103,7 +246,10 @@ class ProxyPool:
             had_failure = proxy in self.failures
             self.failures.pop(proxy, None)
             self.cooldowns.pop(proxy, None)
+            self.leases.pop(proxy, None)
             self.current_proxy = proxy
+            PROXY_RUNTIME.release(proxy, failure_count=0, cooldown_until=0)
+            self.condition.notify_all()
             if had_failure:
                 self._emit(f"代理恢复：{display_proxy_url(proxy)}")
 
@@ -125,12 +271,53 @@ class ProxyPool:
                 self._emit(f"代理不可用，已换下一个：{display_proxy_url(proxy)}")
                 if self.proxy_mode == "api":
                     self._refill_api_urls(time.time())
+            self.leases.pop(proxy, None)
+            PROXY_RUNTIME.release(
+                proxy,
+                failure_count=self.failures.get(proxy, 0),
+                cooldown_until=self.cooldowns.get(proxy, 0),
+            )
+            self.condition.notify_all()
 
     def request_proxies(self) -> dict[str, str] | None:
-        proxy = self.next_proxy_url()
+        proxy = self.acquire_proxy()
         if not proxy:
             return None
         return {"http": proxy, "https": proxy}
+
+    @property
+    def proxy_source_label(self) -> str:
+        if self.proxy_mode == "fixed":
+            return "固定代理池"
+        if self.proxy_mode == "api" and self.provider:
+            return self.provider.display_name
+        if self.proxy_mode == "api":
+            return "API 提取"
+        return "直连"
+
+    @property
+    def known_proxy_urls(self) -> list[str]:
+        return self.api_urls if self.proxy_mode == "api" else self.fixed_urls
+
+    def target_size(self) -> int:
+        if self.proxy_mode == "api":
+            return self._api_target_size()
+        if self.proxy_mode == "fixed":
+            return len(self.fixed_urls)
+        return 0
+
+    def available_capacity(self) -> int:
+        if self.proxy_mode == "off":
+            return max(1, int(getattr(self.settings, "max_download_workers", 1) or 1))
+        now = time.time()
+        with self.lock:
+            if self.proxy_mode == "api":
+                self._refill_api_urls(now)
+            return sum(
+                1
+                for proxy in self.known_proxy_urls
+                if self._is_available(proxy, now) and proxy not in self.leases
+            )
 
     def _load_fixed_urls(self) -> list[str]:
         if self.proxy_mode != "fixed":
@@ -177,6 +364,7 @@ class ProxyPool:
             self._emit(f"提取接口返回代理：{len(new_urls)} 个，可用 {available_count}/{target_size}")
         else:
             self._emit("提取接口暂时没有返回可用代理")
+        PROXY_RUNTIME.sync_pool(self)
 
     def _next_available(self, proxies: list[str], now: float) -> str:
         if not proxies:
@@ -191,6 +379,22 @@ class ProxyPool:
                 self._activate_proxy(proxy)
                 return proxy
         return ""
+
+    def _next_available_unleased(self, proxies: list[str], now: float) -> str:
+        if not proxies:
+            return ""
+        size = len(proxies)
+        start = self._cursor % size
+        for offset in range(size):
+            index = (start + offset) % size
+            proxy = proxies[index]
+            if self._is_available(proxy, now) and proxy not in self.leases:
+                self._cursor = (index + 1) % size
+                return proxy
+        return ""
+
+    def _lease_timeout(self) -> float:
+        return max(1.0, min(60.0, float(getattr(self.settings, "read_timeout", 30) or 30)))
 
     def _activate_proxy(self, proxy: str) -> None:
         self.current_proxy = proxy
@@ -214,7 +418,7 @@ class StzyHttpClient:
         self.settings = settings
         self.on_proxy = on_proxy or (lambda _proxy: None)
         self.should_stop = should_stop or (lambda: False)
-        self.account_pool = AccountPool(settings.account_pool_file)
+        self.account_pool = get_shared_account_pool(settings.account_pool_file)
         self.proxy_pool = proxy_pool or ProxyPool(settings, on_event=on_proxy_event)
         self.session = self._build_session()
 
@@ -336,42 +540,43 @@ class StzyHttpClient:
         ]
 
     def account_is_valid(self, account) -> bool:
-        if account.access_token or self._token_from_cookie_header(account.cookie):
-            try:
-                self.probe_auth(
-                    cookie_header=account.cookie,
-                    access_token=account.access_token,
-                    user_agent=account.user_agent,
-                    request_headers=account.request_headers,
-                )
+        with self.account_pool.auth_lock(account.name):
+            if account.access_token or self._token_from_cookie_header(account.cookie):
+                try:
+                    self.probe_auth(
+                        cookie_header=account.cookie,
+                        access_token=account.access_token,
+                        user_agent=account.user_agent,
+                        request_headers=account.request_headers,
+                    )
+                    return True
+                except Exception:  # noqa: BLE001
+                    pass
+            if self.refresh_account_from_cookie(account):
                 return True
-            except Exception:  # noqa: BLE001
-                pass
-        if self.refresh_account_from_cookie(account):
-            return True
-        if not account.login_phone:
-            return False
-        try:
-            from stzy_app.auth import login_with_phone_password
+            if not account.login_phone:
+                return False
+            try:
+                from stzy_app.auth import login_with_phone_password
 
-            refreshed = login_with_phone_password(
-                self.settings,
-                account.login_phone,
-                account.login_password,
-            )
-        except Exception:  # noqa: BLE001
-            return False
-        refreshed.name = account.name
-        refreshed.enabled = account.enabled
-        self.account_pool.upsert(refreshed)
-        account.cookie = refreshed.cookie
-        account.access_token = refreshed.access_token
-        account.user_agent = refreshed.user_agent
-        account.request_headers_json = refreshed.request_headers_json
-        account.import_method = refreshed.import_method
-        account.login_phone = refreshed.login_phone
-        account.login_password = refreshed.login_password
-        return True
+                refreshed = login_with_phone_password(
+                    self.settings,
+                    account.login_phone,
+                    account.login_password,
+                )
+            except Exception:  # noqa: BLE001
+                return False
+            refreshed.name = account.name
+            refreshed.enabled = account.enabled
+            self.account_pool.upsert(refreshed)
+            account.cookie = refreshed.cookie
+            account.access_token = refreshed.access_token
+            account.user_agent = refreshed.user_agent
+            account.request_headers_json = refreshed.request_headers_json
+            account.import_method = refreshed.import_method
+            account.login_phone = refreshed.login_phone
+            account.login_password = refreshed.login_password
+            return True
 
     def refresh_account_from_cookie(self, account: AccountCredential, *, persist: bool = True) -> bool:
         if not account.cookie:
@@ -551,7 +756,7 @@ class StzyHttpClient:
         return self.proxy_pool._fetch_proxies_from_api(count)
 
     def _next_proxy_url(self) -> str:
-        return self.proxy_pool.next_proxy_url()
+        return self.proxy_pool.acquire_proxy()
 
     def _request_proxies(self) -> dict[str, str] | None:
         return self.proxy_pool.request_proxies()
@@ -580,12 +785,15 @@ class StzyHttpClient:
             self._record_proxy_failure(proxy)
             raise
         setattr(response, "_stzy_proxy", proxy)
+        setattr(response, "_stzy_proxy_released", False)
         status_code = int(getattr(response, "status_code", 200) or 200)
         if status_code in {403, 429, 500, 502, 503, 504}:
             self._record_proxy_failure(proxy)
+            setattr(response, "_stzy_proxy_released", True)
         elif mark_proxy_success:
             self._record_proxy_success(proxy)
             self.on_proxy(proxy)
+            setattr(response, "_stzy_proxy_released", True)
         return response
 
     def post_json(
@@ -631,29 +839,36 @@ class StzyHttpClient:
                 mark_proxy_success=False,
             )
             proxy = str(getattr(response, "_stzy_proxy", "") or "")
+            proxy_released = bool(getattr(response, "_stzy_proxy_released", False))
             try:
                 with response:
                     response.raise_for_status()
                     written = 0
                     with partial.open("wb") as file:
                         for chunk in response.iter_content(chunk_size=64 * 1024):
+                            if self.should_stop():
+                                raise RequestStopped("任务已停止")
                             if chunk:
                                 file.write(chunk)
                                 written += len(chunk)
                 self._validate_download_content(partial, target, url, response)
             except InvalidDownloadContent as exc:
-                self._record_proxy_failure(proxy)
+                if not proxy_released:
+                    self._record_proxy_failure(proxy)
                 last_error = exc
                 if partial.exists():
                     partial.unlink()
                 continue
             except Exception:
+                if not proxy_released:
+                    self._record_proxy_failure(proxy)
                 if partial.exists():
                     partial.unlink()
                 raise
             os.replace(partial, target)
-            self._record_proxy_success(proxy)
-            self.on_proxy(proxy)
+            if not proxy_released:
+                self._record_proxy_success(proxy)
+                self.on_proxy(proxy)
             return written
         raise last_error or InvalidDownloadContent("下载内容异常")
 

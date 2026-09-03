@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -8,6 +9,10 @@ from pathlib import Path
 from typing import Callable, Any
 
 from stzy_app.storage.db import connect, record_schema_version
+from stzy_app.storage.vault import CredentialVault
+
+_POOLS: dict[str, "AccountPool"] = {}
+_POOLS_LOCK = threading.Lock()
 
 
 @dataclass
@@ -82,7 +87,9 @@ class AccountPool:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        self.vault = CredentialVault(path.with_name(".stzy-credentials.key"), env_key=os.environ.get("STZY_SECRET_KEY", ""))
         self._lock = threading.Lock()
+        self._auth_locks: dict[str, threading.Lock] = {}
         self._next_index = 0
         self._init_db()
         self.accounts = self._load()
@@ -156,13 +163,13 @@ class AccountPool:
         return [
             AccountCredential(
                 name=str(row["name"]),
-                cookie=str(row["cookie"] or ""),
-                access_token=str(row["access_token"] or ""),
+                cookie=self.vault.decrypt(str(row["cookie"] or "")),
+                access_token=self.vault.decrypt(str(row["access_token"] or "")),
                 user_agent=str(row["user_agent"] or ""),
-                request_headers_json=str(row["request_headers_json"] or ""),
+                request_headers_json=self.vault.decrypt(str(row["request_headers_json"] or "")),
                 import_method=str(row["import_method"] or ""),
                 login_phone=str(row["login_phone"] or ""),
-                login_password=str(row["login_password"] or ""),
+                login_password=self.vault.decrypt(str(row["login_password"] or "")),
                 enabled=bool(row["enabled"]),
                 user_type=row["user_type"],
                 rank=row["rank"],
@@ -209,13 +216,13 @@ class AccountPool:
                     """,
                     (
                         account.name,
-                        account.cookie,
-                        account.access_token,
+                        self.vault.encrypt(account.cookie),
+                        self.vault.encrypt(account.access_token),
                         account.user_agent,
-                        account.request_headers_json,
+                        self.vault.encrypt(account.request_headers_json),
                         account.import_method,
                         account.login_phone,
-                        account.login_password,
+                        self.vault.encrypt(account.login_password),
                         1 if account.enabled else 0,
                         account.user_type,
                         account.rank,
@@ -245,7 +252,8 @@ class AccountPool:
                 connection.execute("DELETE FROM accounts WHERE name = ?", (name,))
 
     def enabled_accounts(self) -> list[AccountCredential]:
-        return [account for account in self.accounts if account.usable]
+        with self._lock:
+            return [account for account in self.accounts if account.usable]
 
     def schedulable_accounts(self) -> list[AccountCredential]:
         return [
@@ -266,6 +274,14 @@ class AccountPool:
             account = enabled[self._next_index % len(enabled)]
             self._next_index += 1
             return account
+
+    def auth_lock(self, name: str) -> threading.Lock:
+        with self._lock:
+            lock = self._auth_locks.get(name)
+            if lock is None:
+                lock = threading.Lock()
+                self._auth_locks[name] = lock
+            return lock
 
     def update_download_profile(self, name: str, info: dict[str, object]) -> None:
         now = datetime.now().isoformat(timespec="seconds")
@@ -348,3 +364,13 @@ class AccountPool:
             cooldown_until="" if credentials_changed else incoming.cooldown_until or current.cooldown_until,
             last_checked_at=incoming.last_checked_at or current.last_checked_at,
         )
+
+
+def get_shared_account_pool(path: Path) -> AccountPool:
+    key = str(path.resolve())
+    with _POOLS_LOCK:
+        pool = _POOLS.get(key)
+        if pool is None:
+            pool = AccountPool(path)
+            _POOLS[key] = pool
+        return pool

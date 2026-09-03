@@ -1,0 +1,38 @@
+import { api, jsonBody } from './client'
+import type { LogLine, Task, TaskCreateRequest, TaskEstimateResult, TaskResource } from '../types/tasks'
+
+export function listTasks(params: { archived?: boolean; limit?: number; offset?: number } = {}) {
+  const query = new URLSearchParams()
+  if (params.archived) query.set('archived', 'true')
+  if (params.limit) query.set('limit', String(params.limit))
+  if (params.offset) query.set('offset', String(params.offset))
+  return api<{ items: Task[] }>(`/api/v1/tasks${query.size ? `?${query}` : ''}`)
+}
+
+export function createTask(payload: TaskCreateRequest) {
+  return api<Task>('/api/v1/tasks', { method: 'POST', ...jsonBody(payload) })
+}
+
+export function estimateTaskPreview(payload: TaskCreateRequest) {
+  return api<TaskEstimateResult>('/api/v1/tasks/estimate', { method: 'POST', ...jsonBody(payload) })
+}
+
+export function fetchTask(taskId: string) {
+  return api<Task>(`/api/v1/tasks/${encodeURIComponent(taskId)}`)
+}
+
+export function taskAction(taskId: string, action: 'pause' | 'resume' | 'cancel' | 'archive') {
+  return api<Task>(`/api/v1/tasks/${encodeURIComponent(taskId)}/${action}`, { method: 'POST' })
+}
+
+export function fetchTaskLogs(taskId: string, after = 0, limit = 300) {
+  return api<{ items: LogLine[]; next_cursor: number }>(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/logs?after=${after}&limit=${limit}`,
+  )
+}
+
+export function fetchTaskResources(taskId: string, limit = 100, offset = 0) {
+  return api<{ items: TaskResource[] }>(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/resources?limit=${limit}&offset=${offset}`,
+  )
+}

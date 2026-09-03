@@ -34,6 +34,7 @@ class CrawlStats:
     current_resource_name: str = ""
     images_downloaded: int = 0
     paid_skipped: int = 0
+    filtered_skipped: int = 0
     preview_limited: int = 0
     failed: int = 0
     running: bool = False
@@ -54,6 +55,7 @@ class CrawlRunner:
         on_proxy: ProxyCallback | None = None,
         completed_resource_ids: set[str] | None = None,
         retry_resource_ids: set[str] | None = None,
+        download_semaphore: threading.Semaphore | None = None,
     ) -> None:
         self.settings = settings
         self.filters = filters
@@ -71,7 +73,7 @@ class CrawlRunner:
         )
         self.api = StzyCrawlerApi(self.client, settings)
         self.index = CsvIndex(settings.csv_file)
-        self.state = CrawlState(settings.state_file)
+        self.state = CrawlState(settings.state_file, scope=getattr(settings, "task_scope", "") or "")
         self.downloader = DownloadService(
             settings,
             self.client,
@@ -84,6 +86,7 @@ class CrawlRunner:
         self._storage_lock = threading.Lock()
         self.completed_resource_ids = completed_resource_ids or set()
         self.retry_resource_ids = retry_resource_ids
+        self.download_semaphore = download_semaphore
 
     def stop(self) -> None:
         self._stop.set()
@@ -101,6 +104,11 @@ class CrawlRunner:
             self._log(f"已生成 {len(combos)} 个筛选组合")
             if self.download_workers > 1:
                 self._log(f"试卷并发数：{self.download_workers}，单个试卷内部按页串行处理")
+            if self.proxy_pool.proxy_mode != "off":
+                self._log(
+                    f"代理严格租约：一个 IP 同时只处理一条下载链路；"
+                    f"代理可用 {self.proxy_pool.available_capacity()} 个，本轮下载并发上限 {self.download_workers}"
+                )
             account_names = self.client.enabled_account_names()
             if account_names:
                 self._log(f"账号轮询顺序：{' -> '.join(account_names)}")
@@ -148,8 +156,10 @@ class CrawlRunner:
                 stats.paused = True
                 break
             try:
-                data = self.api.list_resources(combo, self.filters, 1)
-                stats.resources_seen += int(data.get("total") or 0)
+                total, filtered = self._estimate_combo_resources(combo)
+                stats.resources_seen += total
+                stats.resources_total += total
+                stats.filtered_skipped += filtered
             except Exception as exc:  # noqa: BLE001
                 stats.failed += 1
                 self._log(f"预估失败：{combo.names()} - {exc}")
@@ -161,6 +171,37 @@ class CrawlRunner:
         stats.outcome = "paused" if stats.paused else "estimated"
         self.on_progress(stats)
         return stats
+
+    def _estimate_combo_resources(self, combo: CrawlCombo) -> tuple[int, int]:
+        page_num = 1
+        matched = 0
+        filtered = 0
+        total_reported = 0
+        while not self._stop.is_set():
+            if self.filters.max_pages_per_combo and page_num > self.filters.max_pages_per_combo:
+                break
+            data = self.api.list_resources(combo, self.filters, page_num)
+            if page_num == 1:
+                total_reported = int(data.get("total") or 0)
+                if not combo.province.code:
+                    return total_reported, 0
+            items = data.get("list") or []
+            if not items:
+                break
+            for item in items:
+                if self._matches_selected_province(item, combo):
+                    matched += 1
+                else:
+                    filtered += 1
+            total_page = int(data.get("totalPage") or 0)
+            if page_num >= total_page:
+                break
+            page_num += 1
+            self._sleep(self.settings.list_delay_seconds)
+        if filtered:
+            names = combo.names()
+            self._log(f"预估地区过滤：已选 {names['province']}，过滤 {filtered}/{total_reported} 份")
+        return matched, filtered
 
     def _crawl_combo(self, combo: CrawlCombo) -> bool:
         page_num = 1
@@ -191,6 +232,7 @@ class CrawlRunner:
                         "接口返回非目标地区，已过滤："
                         f"已选 {names['province']}，返回 {actual_province} - {resource_name}"
                     )
+                    self._skip_filtered_resource(resource_name)
                     continue
                 record = build_record(item, combo)
                 record.subject = self.settings.subject_name
@@ -215,7 +257,12 @@ class CrawlRunner:
 
     @property
     def download_workers(self) -> int:
-        return max(1, min(8, int(self.settings.concurrency or 1)))
+        configured = max(1, min(32, int(getattr(self.settings, "max_download_workers", 1) or 1)))
+        proxy_pool = getattr(self, "proxy_pool", None)
+        if not proxy_pool or proxy_pool.proxy_mode == "off":
+            return configured
+        capacity = proxy_pool.available_capacity()
+        return max(1, min(configured, capacity or proxy_pool.target_size() or 1))
 
     def _handle_resources(self, records: list[ResourceRecord]) -> None:
         if not records:
@@ -249,6 +296,14 @@ class CrawlRunner:
             self._emit_progress()
         self._log(f"续跑跳过已完成资源：{record.resource_id} - {record.resource_name}")
 
+    def _skip_filtered_resource(self, resource_name: str) -> None:
+        with self._stats_lock:
+            self.stats.resources_seen += 1
+            self.stats.resources_completed += 1
+            self.stats.filtered_skipped = getattr(self.stats, "filtered_skipped", 0) + 1
+            self.stats.current_resource_name = resource_name
+            self._emit_progress()
+
     def _handle_resource(self, record: ResourceRecord) -> None:
         if self._stop.is_set():
             return
@@ -259,9 +314,22 @@ class CrawlRunner:
         record.status = ResourceStatus.downloading
         self.on_record(record)
         self._log(f"开始下载：{record.resource_id} - {record.resource_name}")
+        proxy_pool = getattr(self, "proxy_pool", None)
         try:
             downloader = self.downloader if self.download_workers == 1 else self._build_downloader()
-            result = downloader.handle_resource(record)
+            if proxy_pool:
+                proxy_pool.set_lease_context(
+                    task_id=str(getattr(self.settings, "task_scope", "") or ""),
+                    resource_name=record.resource_name,
+                )
+            download_semaphore = getattr(self, "download_semaphore", None)
+            if download_semaphore:
+                with download_semaphore:
+                    if self._stop.is_set():
+                        raise RequestStopped("任务已停止")
+                    result = downloader.handle_resource(record)
+            else:
+                result = downloader.handle_resource(record)
             record.local_dir = result.local_dir
             record.image_count = result.saved_pages
             record.status = result.status
@@ -289,6 +357,8 @@ class CrawlRunner:
             self._store_record(record)
             self._log(f"资源失败：{record.resource_id} - {exc}")
         finally:
+            if proxy_pool:
+                proxy_pool.set_lease_context()
             with self._stats_lock:
                 self.stats.resources_completed += 1
         self.on_record(record)

@@ -4,7 +4,8 @@ version = "0.1.6"
 description = "Local web tool for crawling STZY paper preview images."
 requires-python = ">=3.10"
 dependencies = [
-  "nicegui>=2.0.0",
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
   "pillow>=10.0.0",
   "pymupdf>=1.24.0",
   "pycryptodome>=3.20.0",
@@ -17,6 +18,9 @@ dependencies = [
 
 [project.scripts]
 stzy-crawler = "stzy_app.main:main"
+
+[tool.setuptools.package-data]
+stzy_app = ["frontend/dist/**/*"]
 
 [tool.ruff]
 line-length = 100

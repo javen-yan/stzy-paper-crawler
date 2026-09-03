@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from stzy_app.config import AppSettings
 from stzy_app.crawler.account_scheduler import AccountScheduler
 from stzy_app.crawler.runner import CrawlRunner
-from stzy_app.http import RequestStopped
+from stzy_app.http import ProxyPool, RequestStopped
 from stzy_app.models import CrawlCombo, ResourceRecord, ResourceStatus, TagOption
 
 
@@ -170,15 +170,26 @@ class RunnerFilterTest(unittest.TestCase):
     def test_download_workers_are_clamped_for_paper_concurrency(self) -> None:
         runner = CrawlRunner.__new__(CrawlRunner)
 
-        runner.settings = AppSettings(concurrency=0)
+        runner.settings = AppSettings(max_download_workers=0)
         self.assertEqual(CrawlRunner.download_workers.fget(runner), 1)
 
-        runner.settings = AppSettings(concurrency=20)
-        self.assertEqual(CrawlRunner.download_workers.fget(runner), 8)
+        runner.settings = AppSettings(max_download_workers=64)
+        self.assertEqual(CrawlRunner.download_workers.fget(runner), 32)
+
+    def test_proxy_capacity_caps_effective_download_workers(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.settings = AppSettings(
+            proxy_mode="fixed",
+            proxy_pool="proxy-a.test:7000\nproxy-b.test:7001",
+            max_download_workers=8,
+        )
+        runner.proxy_pool = ProxyPool(runner.settings)
+
+        self.assertEqual(CrawlRunner.download_workers.fget(runner), 2)
 
     def test_paper_concurrency_handles_multiple_records(self) -> None:
         runner = CrawlRunner.__new__(CrawlRunner)
-        runner.settings = AppSettings(concurrency=3)
+        runner.settings = AppSettings(max_download_workers=3)
         runner._stop = threading.Event()
         logs: list[str] = []
         runner.on_log = logs.append
@@ -203,7 +214,7 @@ class RunnerFilterTest(unittest.TestCase):
 
     def test_stopped_resource_is_not_marked_failed(self) -> None:
         runner = CrawlRunner.__new__(CrawlRunner)
-        runner.settings = AppSettings(concurrency=1)
+        runner.settings = AppSettings(max_download_workers=1)
         runner._stop = threading.Event()
         runner.stats = type(
             "Stats",
@@ -240,7 +251,7 @@ class RunnerFilterTest(unittest.TestCase):
 
     def test_resource_is_reported_as_downloading_before_completion(self) -> None:
         runner = CrawlRunner.__new__(CrawlRunner)
-        runner.settings = AppSettings(concurrency=1)
+        runner.settings = AppSettings(max_download_workers=1)
         runner._stop = threading.Event()
         runner.stats = type(
             "Stats",
@@ -361,6 +372,96 @@ class RunnerFilterTest(unittest.TestCase):
         self.assertEqual(runner.stats.resources_seen, 0)
         self.assertEqual(runner.stats.resources_completed, 0)
 
+    def test_selected_region_filters_national_results_but_counts_them_processed(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.settings = AppSettings(subject_name="数学")
+        runner.filters = type("Filters", (), {"max_pages_per_combo": None})()
+        runner.stats = type(
+            "Stats",
+            (),
+            {
+                "resources_total": 0,
+                "resources_seen": 0,
+                "resources_completed": 0,
+                "filtered_skipped": 0,
+                "current_resource_name": "",
+            },
+        )()
+        runner._stats_lock = threading.RLock()
+        runner._stop = threading.Event()
+        runner.completed_resource_ids = set()
+        runner.retry_resource_ids = None
+        runner.api = FakeListApi(
+            [
+                {"resourceId": "national-1", "resourceName": "全国卷", "provinceName": "全国"},
+                {"resourceId": "anhui-1", "resourceName": "安徽卷", "provinceName": "安徽"},
+            ]
+        )
+        logs: list[str] = []
+        runner._log = logs.append
+        runner._emit_progress = lambda: None
+        handled: list[str] = []
+        runner._handle_resources = lambda records: handled.extend(
+            record.resource_id for record in records
+        )
+
+        CrawlRunner._crawl_combo(runner, self._combo(TagOption("provinceCode", "340000", "安徽")))
+
+        self.assertEqual(handled, ["anhui-1"])
+        self.assertEqual(runner.stats.resources_total, 2)
+        self.assertEqual(runner.stats.resources_seen, 1)
+        self.assertEqual(runner.stats.resources_completed, 1)
+        self.assertEqual(runner.stats.filtered_skipped, 1)
+        self.assertTrue(any("接口返回非目标地区，已过滤" in line for line in logs))
+
+    def test_estimate_filters_by_selected_region_across_pages(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.filters = type("Filters", (), {"max_pages_per_combo": None})()
+        runner._stop = threading.Event()
+        runner.settings = AppSettings(list_delay_seconds=0)
+        runner._sleep = lambda seconds: None
+        logs: list[str] = []
+        runner._log = logs.append
+        runner.api = FakeListApi(
+            [
+                {"resourceId": "national-1", "resourceName": "全国卷", "provinceName": "全国"},
+                {"resourceId": "anhui-1", "resourceName": "安徽卷1", "provinceName": "安徽"},
+            ],
+            [
+                {"resourceId": "unknown-1", "resourceName": "未知卷", "provinceName": ""},
+                {"resourceId": "anhui-2", "resourceName": "安徽卷2", "provinceName": "安徽"},
+            ],
+        )
+
+        matched, filtered = CrawlRunner._estimate_combo_resources(
+            runner,
+            self._combo(TagOption("provinceCode", "340000", "安徽")),
+        )
+
+        self.assertEqual(matched, 2)
+        self.assertEqual(filtered, 2)
+        self.assertTrue(any("预估地区过滤：已选 安徽，过滤 2/4 份" in line for line in logs))
+
+    def test_estimate_without_region_uses_remote_total(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.filters = type("Filters", (), {"max_pages_per_combo": None})()
+        runner._stop = threading.Event()
+        runner.api = FakeListApi(
+            [
+                {"resourceId": "national-1", "resourceName": "全国卷", "provinceName": "全国"},
+                {"resourceId": "anhui-1", "resourceName": "安徽卷1", "provinceName": "安徽"},
+            ],
+            [{"resourceId": "other-1", "resourceName": "其他卷", "provinceName": "北京"}],
+        )
+
+        matched, filtered = CrawlRunner._estimate_combo_resources(
+            runner,
+            self._combo(TagOption("provinceCode", "", "不限")),
+        )
+
+        self.assertEqual(matched, 3)
+        self.assertEqual(filtered, 0)
+
     @staticmethod
     def _combo(province: TagOption) -> CrawlCombo:
         return CrawlCombo(
@@ -386,11 +487,14 @@ class FakeClient:
 
 
 class FakeListApi:
-    def __init__(self, items: list[dict[str, object]]) -> None:
-        self.items = items
+    def __init__(self, *pages: list[dict[str, object]]) -> None:
+        self.pages = list(pages)
+        self.items = pages[0] if pages else []
 
     def list_resources(self, combo: object, filters: object, page_num: int) -> dict[str, object]:
-        return {"total": len(self.items), "totalPage": 1, "list": self.items}
+        pages = self.pages or [self.items]
+        items = pages[page_num - 1] if 0 <= page_num - 1 < len(pages) else []
+        return {"total": sum(len(page) for page in pages), "totalPage": len(pages), "list": items}
 
 
 class FakeDownloadApi:

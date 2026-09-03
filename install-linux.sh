@@ -6,6 +6,8 @@ cd "$(dirname "$0")"
 APP_NAME="STZY Paper Crawler"
 VENV_DIR=".venv"
 PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
+FRONTEND_DIR="stzy_app/frontend"
+DIST_INDEX="${FRONTEND_DIR}/dist/index.html"
 
 export PIP_INDEX_URL
 
@@ -48,6 +50,24 @@ say_step "升级 pip"
 
 say_step "安装 Python 依赖"
 "${VENV_PYTHON}" -m pip install -i "${PIP_INDEX_URL}" -r requirements.txt
+
+if [ ! -f "${DIST_INDEX}" ]; then
+  say_step "构建 Vue 前端"
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "未找到 npm。源码运行需要先构建 Vue 前端，请安装 Node.js 后重新运行安装脚本。"
+    echo "如果你使用的是发布包，请直接运行发布包里的 ./start-linux.sh。"
+    exit 1
+  fi
+  (
+    cd "${FRONTEND_DIR}"
+    if [ -f package-lock.json ]; then
+      npm ci
+    else
+      npm install
+    fi
+    npm run build
+  )
+fi
 
 say_step "生成启动脚本"
 cat > start-linux.sh <<'EOF'

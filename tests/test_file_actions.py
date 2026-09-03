@@ -5,8 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from stzy_app.ui.file_actions import open_path
-from stzy_app.ui.folder_picker import choose_directory
+from stzy_app.local import choose_directory, open_path
 
 
 class FileActionTest(unittest.TestCase):
@@ -14,8 +13,8 @@ class FileActionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir)
             with (
-                patch("stzy_app.ui.file_actions.platform.system", return_value="Windows"),
-                patch("stzy_app.ui.file_actions.os.startfile", create=True) as startfile,
+                patch("stzy_app.local.platform.system", return_value="Windows"),
+                patch("stzy_app.local.os.startfile", create=True) as startfile,
             ):
                 self.assertTrue(open_path(target))
 
@@ -24,16 +23,16 @@ class FileActionTest(unittest.TestCase):
     def test_open_path_returns_false_when_system_open_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             with (
-                patch("stzy_app.ui.file_actions.platform.system", return_value="Windows"),
-                patch("stzy_app.ui.file_actions.os.startfile", side_effect=OSError, create=True),
+                patch("stzy_app.local.platform.system", return_value="Windows"),
+                patch("stzy_app.local.os.startfile", side_effect=OSError, create=True),
             ):
                 self.assertFalse(open_path(Path(tmpdir)))
 
     def test_macos_folder_picker_escapes_quotes_in_initial_path(self) -> None:
         with (
-            patch("stzy_app.ui.folder_picker.platform.system", return_value="Darwin"),
-            patch("stzy_app.ui.folder_picker.Path.home", return_value=Path('/tmp/a "quoted" dir')),
-            patch("stzy_app.ui.folder_picker.subprocess.run") as run,
+            patch("stzy_app.local.platform.system", return_value="Darwin"),
+            patch("stzy_app.local.Path.home", return_value=Path('/tmp/a "quoted" dir')),
+            patch("stzy_app.local.subprocess.run") as run,
         ):
             run.return_value.returncode = 1
             run.return_value.stdout = ""
@@ -45,20 +44,20 @@ class FileActionTest(unittest.TestCase):
 
     def test_folder_picker_failure_returns_none(self) -> None:
         with (
-            patch("stzy_app.ui.folder_picker.platform.system", return_value="Windows"),
-            patch("stzy_app.ui.folder_picker._choose_directory_tk", side_effect=RuntimeError),
+            patch("stzy_app.local.platform.system", return_value="Windows"),
+            patch("stzy_app.local._choose_directory_tk", side_effect=RuntimeError),
         ):
             self.assertIsNone(choose_directory(Path("C:/downloads")))
 
     def test_linux_folder_picker_without_display_returns_none(self) -> None:
         with (
-            patch("stzy_app.ui.folder_picker.platform.system", return_value="Linux"),
+            patch("stzy_app.local.platform.system", return_value="Linux"),
             patch.dict(
-                "stzy_app.ui.folder_picker.os.environ",
+                "stzy_app.local.os.environ",
                 {"DISPLAY": "", "WAYLAND_DISPLAY": ""},
                 clear=True,
             ),
-            patch("stzy_app.ui.folder_picker._choose_directory_tk") as tk_picker,
+            patch("stzy_app.local._choose_directory_tk") as tk_picker,
         ):
             self.assertIsNone(choose_directory(Path("/tmp/downloads")))
 

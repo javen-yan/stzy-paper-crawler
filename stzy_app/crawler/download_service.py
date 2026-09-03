@@ -59,7 +59,7 @@ class DownloadService:
                 f"已保存 {saved_count}/{record.page_count} 页，尝试下载 PDF 补全"
             )
             try:
-                pdf_result = self.download_full_pdf(record, source="preview_fallback_pdf")
+                pdf_result = self.download_full_pdf(record, source="preview_fallback_pdf", force=True)
             except Exception as exc:  # noqa: BLE001
                 return DownloadResult(
                     status=ResourceStatus.partial,
@@ -92,13 +92,19 @@ class DownloadService:
             images_added=images_added,
         )
 
-    def download_full_pdf(self, record: ResourceRecord, *, source: str = "pdf") -> DownloadResult:
+    def download_full_pdf(self, record: ResourceRecord, *, source: str = "pdf", force: bool = False) -> DownloadResult:
         suffix = str(record.raw.get("resourceSuffix") or "").lower()
         if suffix and suffix != ".pdf":
             raise RuntimeError(f"原文格式 {suffix} 暂不支持 PDF 转图片")
         directory = self.paths.resource_dir(record)
         artifacts = ResourceArtifacts(directory)
         artifacts.prepare_resource_dir()
+        if force:
+            # 预览拼版 PDF 不完整，强制重新获取真实原文 PDF（覆盖掉预览版 PDF）
+            if artifacts.temp_pdf.exists():
+                artifacts.temp_pdf.unlink()
+            if artifacts.final_pdf.exists():
+                artifacts.final_pdf.unlink()
         pdf_path = artifacts.temp_pdf if artifacts.temp_pdf.exists() else artifacts.final_pdf
         if pdf_path.exists() and not self.converter.pdf_file_looks_valid(pdf_path):
             pdf_path.unlink()

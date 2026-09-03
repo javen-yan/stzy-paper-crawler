@@ -6,6 +6,7 @@ from typing import Callable
 
 from stzy_app.config import AppSettings
 from stzy_app.crawler.artifacts import ResourceArtifacts
+from stzy_app.crawler.conversion_pool import run_conversion
 from stzy_app.http import StzyHttpClient
 from stzy_app.models import ResourceRecord
 from stzy_app.utils import ensure_directory
@@ -66,7 +67,12 @@ class DocumentConverter:
             self.sleep(self.settings.image_delay_seconds)
         if originals:
             self.on_log(f"资源进度：{record.resource_id} - 生成 PDF")
-            self.convert_originals_to_pdf(originals, artifacts.temp_pdf)
+            run_conversion(
+                "originals_to_pdf",
+                originals,
+                artifacts.temp_pdf,
+                timeout=self.settings.preview_timeout_seconds,
+            )
             artifacts.publish_pdf(artifacts.temp_pdf)
             artifacts.cleanup_transient_artifacts()
         return images_added
@@ -102,17 +108,34 @@ class DocumentConverter:
                     progress = f" - {page_index}/{page_total}" if page_index and page_total else ""
                     prefix = f"{resource_id}{progress}，" if resource_id else ""
                     self.on_log(f"使用内置转换器处理复杂 SVG：{prefix}{original.name}")
-                self.convert_svg_to_png(original, target)
+                run_conversion(
+                    "svg_to_png",
+                    original,
+                    target,
+                    timeout=self.settings.preview_timeout_seconds,
+                )
             return
         if not target.exists() or target.stat().st_size <= 0:
-            self.convert_image_to_png(original, target)
+            run_conversion(
+                "image_to_png",
+                original,
+                target,
+                timeout=self.settings.preview_timeout_seconds,
+            )
 
     def convert_pdf_to_pngs(self, pdf_path: Path, directory: Path) -> int:
         if not pdf_path:
             return 0
         if not pdf_path.exists() or pdf_path.stat().st_size <= 0:
             return 0
-        return self.convert_pdf_to_pngs_with_pymupdf(pdf_path, directory)
+        return int(
+            run_conversion(
+                "pdf_to_pngs",
+                pdf_path,
+                directory,
+                timeout=self.settings.preview_timeout_seconds,
+            )
+        )
 
     @classmethod
     def original_file_looks_valid(cls, path: Path, url: str) -> bool:
@@ -141,10 +164,12 @@ class DocumentConverter:
         with pymupdf.open(pdf_path) as document:
             for index, page in enumerate(document, start=1):
                 target = artifacts.page_png(index)
-                if target.exists() and target.stat().st_size > 0:
-                    target.unlink()
+                tmp_target = target.with_suffix(target.suffix + ".tmp")
+                if tmp_target.exists():
+                    tmp_target.unlink()
                 pixmap = page.get_pixmap(dpi=180, alpha=False)
-                pixmap.save(target)
+                pixmap.save(tmp_target, output="png")
+                tmp_target.replace(target)
                 generated_count += 1
         return generated_count
 
@@ -160,7 +185,9 @@ class DocumentConverter:
         with pymupdf.open(stream=content.encode("utf-8"), filetype="svg") as document:
             page = document[0]
             pixmap = page.get_pixmap(dpi=180, alpha=False)
-            pixmap.save(png_path)
+            tmp_path = png_path.with_suffix(png_path.suffix + ".tmp")
+            pixmap.save(tmp_path, output="png")
+            tmp_path.replace(png_path)
         DocumentConverter.flatten_png_on_white(png_path)
 
     @staticmethod
@@ -183,9 +210,11 @@ class DocumentConverter:
                     continue
                 DocumentConverter.append_image_page(output, original)
             if output.page_count:
-                if pdf_path.exists():
-                    pdf_path.unlink()
-                output.save(pdf_path)
+                tmp_path = pdf_path.with_suffix(pdf_path.suffix + ".tmp")
+                if tmp_path.exists():
+                    tmp_path.unlink()
+                output.save(tmp_path)
+                tmp_path.replace(pdf_path)
         finally:
             output.close()
 
@@ -238,14 +267,18 @@ class DocumentConverter:
         from PIL import Image
 
         with Image.open(image_path) as image:
-            DocumentConverter.save_image_on_white(image, png_path)
+            tmp_path = png_path.with_suffix(png_path.suffix + ".tmp")
+            DocumentConverter.save_image_on_white(image, tmp_path)
+            tmp_path.replace(png_path)
 
     @staticmethod
     def flatten_png_on_white(png_path: Path) -> None:
         from PIL import Image
 
         with Image.open(png_path) as image:
-            DocumentConverter.save_image_on_white(image, png_path)
+            tmp_path = png_path.with_suffix(png_path.suffix + ".tmp")
+            DocumentConverter.save_image_on_white(image, tmp_path)
+            tmp_path.replace(png_path)
 
     @staticmethod
     def save_image_on_white(image, png_path: Path) -> None:

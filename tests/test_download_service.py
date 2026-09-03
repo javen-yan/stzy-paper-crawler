@@ -6,6 +6,7 @@ from pathlib import Path
 
 from stzy_app.config import AppSettings
 from stzy_app.crawler.download_service import DownloadService
+from stzy_app.crawler.paths import ResourcePathBuilder
 from stzy_app.models import ResourceRecord, ResourceStatus
 
 
@@ -71,6 +72,23 @@ class DownloadServiceTest(unittest.TestCase):
         self.assertEqual(result.source, "pdf")
         self.assertEqual(service.api.picture_calls, 0)
 
+    def test_task_scoped_resource_dir_uses_original_remote_name(self) -> None:
+        settings = AppSettings(output_dir=self.output_dir, task_scope="task-1")
+        record = ResourceRecord(
+            resource_id="733284653911044096",
+            resource_name="安徽六安市2025-2026学年高一下学期期末考试数学",
+            subject="数学",
+            grade="高一",
+            term="高一下",
+            province="安徽",
+            scene="期末",
+        )
+
+        directory = ResourcePathBuilder(settings).resource_dir(record)
+
+        self.assertEqual(directory.name, "安徽六安市2025-2026学年高一下学期期末考试数学")
+        self.assertNotIn("733284653911044096", str(directory))
+
     def test_bad_existing_sibling_pdf_requests_download_url_again(self) -> None:
         service = self._service(
             pictures=[],
@@ -99,6 +117,24 @@ class DownloadServiceTest(unittest.TestCase):
         self.assertEqual(result.status, ResourceStatus.paid_unavailable)
         self.assertEqual(result.paid_unavailable, 1)
         self.assertIn("额度不足", result.error)
+
+    def test_preview_incomplete_force_refetches_real_pdf(self) -> None:
+        """预览拼版 PDF 已存在时，补全仍须强制重新获取真实原文 PDF（回归测试）。"""
+        logs: list[str] = []
+        service = self._service(
+            pictures=["https://cdn.test/1.svg", "https://cdn.test/2.svg"],
+            converter=FakeConverter(saved_count=2, preview_added=2, pdf_count=4, pdf_added=2),
+            scheduler=FakeScheduler(url="https://cdn.test/file.pdf"),
+            logs=logs,
+        )
+        record = ResourceRecord(resource_id="r1", resource_name="试卷", page_count=4)
+        stale_pdf = self.output_dir / "试卷.pdf"
+        stale_pdf.write_bytes(b"%PDF-1.4 stale preview pdf")
+
+        result = service.handle_resource(record)
+
+        self.assertEqual(result.status, ResourceStatus.completed)
+        self.assertEqual(service.account_scheduler.download_calls, 1)
 
     def _service(
         self,

@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 import requests
 
 from stzy_app.config import AppSettings
-from stzy_app.http.client import ProxyPool, RequestStopped, StzyHttpClient, display_proxy_url
+from stzy_app.http.client import ProxyPool, ProxyUnavailable, RequestStopped, StzyHttpClient, display_proxy_url
 from stzy_app.storage import AccountCredential, AccountPool
 
 
@@ -118,6 +118,26 @@ class HttpClientAuthTest(unittest.TestCase):
         self.assertIn("代理不可用，已换下一个：http://proxy-a.test:7000", log_text)
         self.assertNotIn("代理切换", log_text)
         self.assertNotIn("secret", log_text)
+
+    def test_proxy_lease_allows_one_active_chain_per_ip(self) -> None:
+        pool = ProxyPool(
+            AppSettings(
+                proxy_mode="fixed",
+                proxy_pool="proxy-a.test:7000",
+                proxy_api_url="",
+                read_timeout=1,
+            )
+        )
+
+        first = pool.acquire_proxy(timeout=0.1)
+        with self.assertRaises(ProxyUnavailable):
+            pool.acquire_proxy(timeout=0.01)
+        pool.record_success(first)
+        second = pool.acquire_proxy(timeout=0.1)
+
+        self.assertEqual(first, "http://proxy-a.test:7000")
+        self.assertEqual(second, first)
+        pool.record_success(second)
 
     def test_display_proxy_url_hides_credentials(self) -> None:
         self.assertEqual(

@@ -6,6 +6,9 @@ __pycache__/
 output/
 .env
 stzy.db
+.stzy-credentials.key
+*.db.domain-v1
+*.db.backup-*
 .DS_Store
 .playwright-cli/
 start-macos.command
@@ -14,3 +17,4 @@ start-windows.bat
 start-windows.ps1
 build/
 dist/
+node_modules/

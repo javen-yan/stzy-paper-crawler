@@ -4,6 +4,8 @@ Set-Location -LiteralPath $PSScriptRoot
 $AppName = "STZY Paper Crawler"
 $VenvDir = ".venv"
 $PipIndexUrl = "https://pypi.tuna.tsinghua.edu.cn/simple"
+$FrontendDir = Join-Path $PSScriptRoot "stzy_app\frontend"
+$DistIndex = Join-Path $FrontendDir "dist\index.html"
 
 $env:PIP_INDEX_URL = $PipIndexUrl
 
@@ -63,6 +65,30 @@ Write-Step "升级 pip"
 
 Write-Step "安装 Python 依赖"
 & $VenvPython -m pip install -i $PipIndexUrl -r requirements.txt
+
+if (-not (Test-Path -LiteralPath $DistIndex)) {
+    Write-Step "构建 Vue 前端"
+    $NpmCommand = Get-Command npm -ErrorAction SilentlyContinue
+    if (-not $NpmCommand) {
+        Write-Host "未找到 npm。源码运行需要先构建 Vue 前端，请安装 Node.js 后重新运行安装脚本。"
+        Write-Host "如果你使用的是发布包，请直接双击发布包里的 start-windows.bat。"
+        Read-Host "按回车退出"
+        exit 1
+    }
+    Push-Location $FrontendDir
+    try {
+        if (Test-Path -LiteralPath "package-lock.json") {
+            & npm ci
+        }
+        else {
+            & npm install
+        }
+        & npm run build
+    }
+    finally {
+        Pop-Location
+    }
+}
 
 Write-Step "生成启动脚本"
 $StartWindowsBat = @"

@@ -1,5 +1,6 @@
 from stzy_app.http.client import (
     ProxyPool,
+    ProxyUnavailable,
     RequestStopped,
     StzyApiError,
     StzyHttpClient,
@@ -8,6 +9,7 @@ from stzy_app.http.client import (
 
 __all__ = [
     "ProxyPool",
+    "ProxyUnavailable",
     "RequestStopped",
     "StzyApiError",
     "StzyHttpClient",

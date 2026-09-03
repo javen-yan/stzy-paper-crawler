@@ -72,7 +72,44 @@ class TagCatalog:
         wanted = set(codes)
         return [option for option in options if option.code in wanted]
 
+    def invalid_filter_codes(self, filters: CrawlFilters) -> dict[str, list[str]]:
+        mapping = {
+            "sceneCode": filters.scenes,
+            "yearCode": filters.years,
+            "rank": filters.ranks,
+            "provinceCode": filters.provinces,
+            "gradeCode": filters.grades,
+            "termCode": filters.terms,
+        }
+        invalid: dict[str, list[str]] = {}
+        for field, codes in mapping.items():
+            if not codes:
+                continue
+            available = {option.code for option in self.tags.get(field, [])}
+            missing = [str(code) for code in codes if str(code) not in available]
+            if missing:
+                invalid[field] = missing
+        return invalid
+
+    def validate_filters(self, filters: CrawlFilters) -> None:
+        invalid = self.invalid_filter_codes(filters)
+        if not invalid:
+            return
+        labels = {
+            "sceneCode": "场景",
+            "yearCode": "年份",
+            "rank": "试卷等级",
+            "provinceCode": "地区",
+            "gradeCode": "年级",
+            "termCode": "学期",
+        }
+        details = "；".join(
+            f"{labels.get(field, field)} {', '.join(codes)}" for field, codes in invalid.items()
+        )
+        raise ValueError(f"筛选条件不在当前分类缓存中：{details}。请刷新分类后重新选择。")
+
     def combos(self, filters: CrawlFilters) -> list[CrawlCombo]:
+        self.validate_filters(filters)
         dimensions = [
             self.selected("sceneCode", filters.scenes),
             self.selected("yearCode", filters.years),
