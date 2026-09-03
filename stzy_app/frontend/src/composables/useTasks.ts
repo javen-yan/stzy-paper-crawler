@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { createTask, estimateTaskPreview, fetchTask as fetchTaskApi, fetchTaskLogs, fetchTaskResources, listTasks, taskAction } from '../api/tasks'
 import type { LogLine, Task, TaskCreateForm, TaskCreateRequest, TaskResource } from '../types/tasks'
+import { createClientId } from '../utils/id'
 
 export const statusText: Record<string, string> = {
   queued: '等待',
@@ -116,7 +117,7 @@ export function useTasks() {
       filter_labels: (spec.filter_labels || {}) as Record<string, unknown>,
       subjects: (spec.subjects || []) as Array<Record<string, string>>,
       settings: (spec.settings || {}) as Record<string, unknown>,
-      idempotency_key: crypto.randomUUID(),
+      idempotency_key: createClientId('task'),
     })
     await refreshTasks()
     await selectTask(created.id)
@@ -164,6 +165,6 @@ function taskFormToRequest(form: TaskCreateForm): TaskCreateRequest {
     filter_labels: form.filterLabels || {},
     subjects: form.subjects.map((code) => ({ code, name: form.subjectLabels?.[code] || '' })),
     settings: { study_phase_code: form.studyPhase, file_type: form.fileType, max_pages_per_combo: form.maxPagesPerCombo },
-    idempotency_key: crypto.randomUUID(),
+    idempotency_key: createClientId('task'),
   }
 }

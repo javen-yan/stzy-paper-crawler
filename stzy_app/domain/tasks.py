@@ -336,6 +336,7 @@ class TaskService:
                 task_id,
                 status=status,
                 ended_at=datetime.now().isoformat(timespec="seconds"),
+                error="",
                 stats_json={**asdict(aggregate), "duration_seconds": duration},
             )
         except StzyApiError as exc:

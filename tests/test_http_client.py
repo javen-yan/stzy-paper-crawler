@@ -12,7 +12,14 @@ from unittest.mock import Mock, patch
 import requests
 
 from stzy_app.config import AppSettings
-from stzy_app.http.client import ProxyPool, ProxyUnavailable, RequestStopped, StzyHttpClient, display_proxy_url
+from stzy_app.http.client import (
+    PROXY_RUNTIME,
+    ProxyPool,
+    ProxyUnavailable,
+    RequestStopped,
+    StzyHttpClient,
+    display_proxy_url,
+)
 from stzy_app.storage import AccountCredential, AccountPool
 
 
@@ -413,6 +420,28 @@ class HttpClientAuthTest(unittest.TestCase):
             {"http://49.85.120.175:40078", "http://60.167.20.98:40031"},
         )
         self.assertIn(failed_proxy, pool.cooldowns)
+
+    def test_proxy_runtime_drops_stale_idle_api_proxies(self) -> None:
+        stale_proxy = "http://198.51.100.10:7000"
+        fresh_proxy = "http://198.51.100.11:7000"
+        settings = AppSettings(
+            proxy_mode="api",
+            proxy_pool="",
+            proxy_api_url="http://api.example.test/ip?count=1",
+            concurrency=1,
+        )
+
+        stale_pool = ProxyPool(settings)
+        stale_pool.api_urls = [stale_proxy]
+        PROXY_RUNTIME.sync_pool(stale_pool)
+
+        fresh_pool = ProxyPool(settings)
+        fresh_pool.api_urls = [fresh_proxy]
+        PROXY_RUNTIME.sync_pool(fresh_pool)
+        proxies = {item["proxy"] for item in PROXY_RUNTIME.snapshot()}
+
+        self.assertIn(fresh_proxy, proxies)
+        self.assertNotIn(stale_proxy, proxies)
 
     def test_invalid_download_content_retries_with_next_proxy(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

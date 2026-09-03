@@ -548,6 +548,32 @@ class DomainWebTest(unittest.TestCase):
 
         self.assertEqual(task["stats"]["resources_seen"], 5)
 
+    def test_completed_task_clears_stale_error_after_resume(self) -> None:
+        self.context.store.create_task(
+            task_id="task-clear-error",
+            mode="crawl",
+            spec={"title": "清理错误", "mode": "crawl", "filters": {}, "subjects": [{"code": "math", "name": "数学"}]},
+            output_dir=self.root / "tasks" / "task-clear-error",
+        )
+        self.context.store.set_task_status("task-clear-error", "failed", error="旧代理错误")
+
+        with patch("stzy_app.domain.tasks.CrawlRunner.run", autospec=True) as run_mock:
+            run_mock.return_value = CrawlStats(
+                task_mode="crawl",
+                phase="completed",
+                outcome="completed",
+                total_combos=1,
+                completed_combos=1,
+                resources_seen=1,
+                resources_completed=1,
+            )
+            self.context.tasks._run_task("task-clear-error")  # noqa: SLF001 - verifies resume cleanup
+
+        task = self.context.store.task("task-clear-error")
+
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["error"], "")
+
     def test_estimate_endpoint_does_not_create_task_record(self) -> None:
         login = self.client.post("/api/v1/auth/login", json={"password": "secret"})
         csrf = login.json()["csrf_token"]

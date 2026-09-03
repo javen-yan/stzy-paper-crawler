@@ -83,12 +83,18 @@ const configSnapshot = computed(() => ({
   settings: selectedTask.value?.spec?.settings || {},
 }))
 
+const taskError = computed(() => {
+  const task = selectedTask.value
+  if (!task?.error) return ''
+  return ['failed', 'auth_expired', 'interrupted'].includes(task.status || '') ? task.error : ''
+})
+
 const issues = computed<TaskIssue[]>(() => {
   const result: TaskIssue[] = []
   const task = selectedTask.value
   if (!task) return result
-  if (task.error) {
-    result.push({ type: 'task', title: '任务错误', detail: task.error, recovery: '查看日志定位原因，修复后可尝试恢复任务。' })
+  if (taskError.value) {
+    result.push({ type: 'task', title: '任务错误', detail: taskError.value, recovery: '查看日志定位原因，修复后可尝试恢复任务。' })
   }
   if (task.status === 'auth_expired') {
     result.push({ type: 'account', title: '账号登录失效', detail: '任务运行时检测到账号不可用。', recovery: '进入账号池验证或更新账号后，在本页点击恢复。' })
@@ -316,7 +322,7 @@ watch(
           </el-descriptions>
         </el-card>
       </section>
-      <el-alert v-if="selectedTask.error" :title="selectedTask.error" type="error" show-icon :closable="false" />
+      <el-alert v-if="taskError" :title="taskError" type="error" show-icon :closable="false" />
 
       <el-tabs v-model="activeTab" class="detail-tabs">
         <el-tab-pane label="概览" name="overview">

@@ -78,7 +78,15 @@ class ProxyRuntimeRegistry:
             return
         now = time.time()
         source = pool.proxy_source_label
+        known_proxies = set(pool.known_proxy_urls)
         with self._lock:
+            for proxy, item in list(self._items.items()):
+                if str(item.get("source") or "") != source or proxy in known_proxies:
+                    continue
+                cooldown_until = float(item.get("cooldown_until") or 0)
+                is_leased = str(item.get("lease_task_id") or "") or float(item.get("leased_at") or 0)
+                if not is_leased and cooldown_until <= now:
+                    self._items.pop(proxy, None)
             for proxy in pool.known_proxy_urls:
                 item = self._items.setdefault(
                     proxy,
