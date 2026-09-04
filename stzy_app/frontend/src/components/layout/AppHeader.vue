@@ -44,15 +44,18 @@ async function handleLogout() {
       </div>
 
       <div class="header-tools">
-        <el-tag round class="runtime-pill">{{ runtimeLabel }}</el-tag>
-        <ProxyStatusPopover />
-        <span class="header-tool-divider" aria-hidden="true" />
-        <el-tooltip content="刷新当前页面" placement="bottom">
-          <el-button class="icon-tool-button" :icon="RefreshCw" circle aria-label="刷新当前页面" @click="$router.go(0)" />
-        </el-tooltip>
-        <el-tooltip v-if="showLogout" content="退出登录" placement="bottom">
-          <el-button class="icon-tool-button" :icon="LogOut" circle aria-label="退出登录" @click="handleLogout" />
-        </el-tooltip>
+        <div class="header-runtime-group">
+          <el-tag round class="runtime-pill">{{ runtimeLabel }}</el-tag>
+          <ProxyStatusPopover />
+        </div>
+        <div class="header-action-group">
+          <el-tooltip content="刷新当前页面" placement="bottom">
+            <el-button class="icon-tool-button" :icon="RefreshCw" circle aria-label="刷新当前页面" @click="$router.go(0)" />
+          </el-tooltip>
+          <el-tooltip v-if="showLogout" content="退出登录" placement="bottom">
+            <el-button class="icon-tool-button" :icon="LogOut" circle aria-label="退出登录" @click="handleLogout" />
+          </el-tooltip>
+        </div>
       </div>
     </div>
 

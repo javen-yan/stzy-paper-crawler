@@ -169,6 +169,22 @@ small {
   min-width: 0;
 }
 
+.header-runtime-group,
+.header-action-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.header-runtime-group {
+  flex: 0 1 auto;
+}
+
+.header-action-group {
+  flex: 0 0 auto;
+}
+
 .mobile-bottom-nav {
   display: none;
 }
@@ -1518,6 +1534,60 @@ small {
   }
 }
 
+@media (min-width: 1281px) and (max-width: 1680px) {
+  .app-header {
+    grid-template-columns: 250px minmax(0, 1fr);
+    grid-template-areas:
+      "brand nav"
+      "brand tools";
+    align-items: center;
+    gap: 8px 18px;
+    min-height: 96px;
+    padding: 12px 18px;
+  }
+
+  .header-top-row {
+    display: contents;
+  }
+
+  .header-brand {
+    align-self: center;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .header-nav {
+    width: 100%;
+    justify-content: flex-start;
+    overflow: visible;
+  }
+
+  .header-nav-item {
+    min-height: 38px;
+    padding: 7px 10px;
+  }
+
+  .header-tools {
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px;
+    overflow: visible;
+  }
+
+  .header-runtime-group {
+    flex-wrap: wrap;
+  }
+
+  .runtime-pill {
+    max-width: 230px;
+  }
+
+  .header-tool-divider {
+    display: none;
+  }
+}
+
 @media (max-width: 1280px) {
   .app-header {
     display: grid;
@@ -1555,7 +1625,7 @@ small {
   .header-tools {
     width: 100%;
     min-height: 36px;
-    justify-content: flex-end;
+    justify-content: space-between;
     flex-wrap: nowrap;
     overflow-x: auto;
     overflow-y: hidden;
@@ -1579,6 +1649,11 @@ small {
 
   .icon-tool-button.el-button {
     flex: 0 0 34px;
+  }
+
+  .header-runtime-group,
+  .header-action-group {
+    flex: 0 0 auto;
   }
 }
 
@@ -1660,7 +1735,8 @@ small {
   }
 
   .header-tools .runtime-pill,
-  .header-tools .header-status-strip {
+  .header-tools .header-status-strip,
+  .header-runtime-group {
     display: none;
   }
 
