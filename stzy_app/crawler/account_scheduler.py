@@ -179,8 +179,8 @@ class AccountScheduler:
         compact = AccountScheduler.user_facing_error(last_error)
         if compact == "登录态已失效":
             return "登录态已失效，请重新登录或换一个可用账号"
-        if compact in {"账号额度不足", "账号无下载权限"}:
-            return f"付费资源暂不可下载：{compact}"
+        if "账号额度不足" in compact or "账号无下载权限" in compact:
+            return f"无账号支持，请补充 VIP 账号后恢复任务（{compact}）"
         return f"所有账号均不可用或额度不足：{compact}"
 
     def _mark_success(self, account: object | None) -> None:

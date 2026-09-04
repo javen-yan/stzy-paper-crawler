@@ -434,6 +434,7 @@ class DomainStore:
             ResourceStatus.pending.value,
             ResourceStatus.downloading.value,
             ResourceStatus.partial.value,
+            ResourceStatus.paid_unavailable.value,
             ResourceStatus.failed.value,
         ]
         placeholders = ",".join("?" for _ in retry_statuses)

@@ -116,7 +116,7 @@ class DownloadServiceTest(unittest.TestCase):
 
         self.assertEqual(result.status, ResourceStatus.paid_unavailable)
         self.assertEqual(result.paid_unavailable, 1)
-        self.assertIn("额度不足", result.error)
+        self.assertIn("无账号支持，请补充 VIP 账号", result.error)
 
     def test_preview_incomplete_force_refetches_real_pdf(self) -> None:
         """预览拼版 PDF 已存在时，补全仍须强制重新获取真实原文 PDF（回归测试）。"""

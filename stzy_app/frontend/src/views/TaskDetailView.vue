@@ -163,7 +163,7 @@ async function refreshResourcePage() {
 }
 
 async function refreshIssueResources() {
-  const statuses = ['failed', 'partial', 'downloading', 'pending']
+  const statuses = ['failed', 'paid_unavailable', 'partial', 'downloading', 'pending']
   const payloads = await Promise.all(
     statuses.map((status) => fetchTaskResources(props.id, 20, 0, status)),
   )
@@ -193,6 +193,7 @@ function shouldRefreshIssues() {
 function issueResourceDetail(resource: TaskResource) {
   if (resource.error) return String(resource.error)
   const status = String(resource.status || '')
+  if (status === 'paid_unavailable') return '当前账号池没有可下载该付费资源的账号，请补充 VIP 账号后恢复任务。'
   if (status === 'partial') return '资源只完成了部分文件，恢复任务时会补下载。'
   if (status === 'downloading') return '资源停留在下载中状态，可能是任务中断留下的未完成记录。'
   if (status === 'pending') return '资源尚未开始下载，恢复任务时会继续处理。'

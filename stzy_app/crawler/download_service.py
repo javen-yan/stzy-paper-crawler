@@ -112,13 +112,16 @@ class DownloadService:
             self.on_log(f"资源进度：{record.resource_id} - 获取 PDF 地址")
             url_result = self.account_scheduler.download_pdf_url(record)
             if url_result.status == ResourceStatus.paid_unavailable:
+                error = url_result.error or "无账号支持，请补充 VIP 账号后恢复任务"
+                if "无账号支持，请补充 VIP 账号" not in error:
+                    error = f"无账号支持，请补充 VIP 账号后恢复任务（{error}）"
                 return DownloadResult(
                     status=ResourceStatus.paid_unavailable,
                     saved_pages=0,
                     expected_pages=record.page_count or 0,
                     source=source,
                     local_dir=str(directory),
-                    error=url_result.error,
+                    error=error,
                     paid_unavailable=url_result.paid_unavailable,
                 )
             if not url_result.url:

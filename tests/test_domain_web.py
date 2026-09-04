@@ -687,7 +687,6 @@ class DomainWebTest(unittest.TestCase):
         for status in (
             ResourceStatus.completed,
             ResourceStatus.skipped_paid,
-            ResourceStatus.paid_unavailable,
         ):
             self.context.store.record_resource(
                 "task-incomplete-records",
@@ -701,6 +700,7 @@ class DomainWebTest(unittest.TestCase):
             ResourceStatus.pending,
             ResourceStatus.downloading,
             ResourceStatus.partial,
+            ResourceStatus.paid_unavailable,
             ResourceStatus.failed,
         ):
             self.context.store.record_resource(
@@ -717,7 +717,7 @@ class DomainWebTest(unittest.TestCase):
 
         self.assertCountEqual(
             [record.resource_id for record in records],
-            ["pending-1", "downloading-1", "partial-1", "failed-1"],
+            ["pending-1", "downloading-1", "partial-1", "paid_unavailable-1", "failed-1"],
         )
         self.assertTrue(all(record.raw == {"resourceSuffix": "pdf"} for record in records))
 
@@ -746,6 +746,15 @@ class DomainWebTest(unittest.TestCase):
         self.context.store.record_resource(
             task_id,
             ResourceRecord(resource_id="partial-1", resource_name="部分", status=ResourceStatus.partial),
+        )
+        self.context.store.record_resource(
+            task_id,
+            ResourceRecord(
+                resource_id="paid-1",
+                resource_name="付费",
+                status=ResourceStatus.paid_unavailable,
+                error="无账号支持，请补充 VIP 账号",
+            ),
         )
 
         handled: list[str] = []
@@ -778,8 +787,8 @@ class DomainWebTest(unittest.TestCase):
         task = self.context.store.task(task_id)
         counts = self.context.store.resource_status_counts(task_id)
 
-        self.assertCountEqual(handled, ["failed-1", "partial-1"])
-        self.assertEqual(counts, {"completed": 3})
+        self.assertCountEqual(handled, ["failed-1", "partial-1", "paid-1"])
+        self.assertEqual(counts, {"completed": 4})
         self.assertEqual(task["status"], "completed")
         self.assertEqual(task["error"], "")
 

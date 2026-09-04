@@ -119,6 +119,7 @@ class RunnerFilterTest(unittest.TestCase):
         self.assertEqual(result.url, "")
         self.assertEqual(result.status, ResourceStatus.paid_unavailable)
         self.assertEqual(result.paid_unavailable, 1)
+        self.assertIn("无账号支持，请补充 VIP 账号", result.error)
 
     def test_paid_resource_auth_error_is_compact(self) -> None:
         client = FakeClient([FakeAccount("过期账号")])
