@@ -236,18 +236,11 @@ onUnmounted(() => {
   }
 }
 
-@media (max-width: 980px) {
+@media (max-width: 1100px) {
   .header-status-strip {
-    order: 3;
-    width: 100%;
-    justify-content: flex-end;
-  }
-}
-
-@media (max-width: 760px) {
-  .header-status-strip {
+    flex: 0 0 auto;
+    width: auto;
     justify-content: flex-start;
-    overflow-x: auto;
   }
 
   .status-chip {
