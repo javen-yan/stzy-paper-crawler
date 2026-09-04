@@ -34,11 +34,25 @@ async function handleLogout() {
 
 <template>
   <header class="app-header">
-    <div class="header-brand">
+    <div class="header-top-row">
+      <div class="header-brand">
       <TerminalSquare :size="24" class="brand-icon" />
       <div>
         <h1>试卷下载器</h1>
         <span>stzy · worker console</span>
+      </div>
+      </div>
+
+      <div class="header-tools">
+        <el-tag round class="runtime-pill">{{ runtimeLabel }}</el-tag>
+        <ProxyStatusPopover />
+        <span class="header-tool-divider" aria-hidden="true" />
+        <el-tooltip content="刷新当前页面" placement="bottom">
+          <el-button class="icon-tool-button" :icon="RefreshCw" circle aria-label="刷新当前页面" @click="$router.go(0)" />
+        </el-tooltip>
+        <el-tooltip v-if="showLogout" content="退出登录" placement="bottom">
+          <el-button class="icon-tool-button" :icon="LogOut" circle aria-label="退出登录" @click="handleLogout" />
+        </el-tooltip>
       </div>
     </div>
 
@@ -54,19 +68,20 @@ async function handleLogout() {
         <span>{{ item.label }}</span>
       </button>
     </nav>
-
-    <div class="header-tools">
-      <el-tag round class="runtime-pill">{{ runtimeLabel }}</el-tag>
-      <ProxyStatusPopover />
-      <span class="header-tool-divider" aria-hidden="true" />
-      <el-tooltip content="刷新当前页面" placement="bottom">
-        <el-button class="icon-tool-button" :icon="RefreshCw" circle aria-label="刷新当前页面" @click="$router.go(0)" />
-      </el-tooltip>
-      <el-tooltip v-if="showLogout" content="退出登录" placement="bottom">
-        <el-button class="icon-tool-button" :icon="LogOut" circle aria-label="退出登录" @click="handleLogout" />
-      </el-tooltip>
-    </div>
   </header>
+
+  <nav class="mobile-bottom-nav" aria-label="手机主导航">
+    <button
+      v-for="item in navItems"
+      :key="item.path"
+      class="mobile-bottom-nav-item"
+      :class="{ active: route.path.startsWith(item.path) }"
+      @click="router.push(item.path)"
+    >
+      <component :is="item.icon" :size="18" />
+      <span>{{ item.label }}</span>
+    </button>
+  </nav>
 </template>
 
 <style scoped>
