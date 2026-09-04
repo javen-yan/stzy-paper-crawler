@@ -48,7 +48,7 @@ const tone = computed(() => {
     </div>
     <div class="progress-meta">
       <span class="progress-count" v-if="total">
-        {{ done }}/{{ total }}
+        已处理 {{ done }}/{{ total }}
         <small v-if="completed || failed || filtered">完成 {{ completed }}，失败 {{ failed }}，地区过滤 {{ filtered }}</small>
       </span>
       <span class="progress-pct">{{ percentage }}%</span>

@@ -246,6 +246,7 @@ class DomainStore:
         fields: dict[str, Any] = {"status": status}
         if status == "running":
             fields["started_at"] = datetime.now().isoformat(timespec="seconds")
+            fields["error"] = ""
         if status in TASK_TERMINAL or status == "paused":
             fields["ended_at"] = datetime.now().isoformat(timespec="seconds")
         if error:

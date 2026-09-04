@@ -281,7 +281,7 @@ class TaskService:
 
     def _run_task(self, task_id: str) -> None:
         task = self.store.task(task_id)
-        if not task or task["status"] in {"cancelled", "completed"}:
+        if not task or task["status"] in {"cancelled", "completed", "paused", "pausing"}:
             return
         self.store.set_task_status(task_id, "running")
         spec = task.get("spec") or {}

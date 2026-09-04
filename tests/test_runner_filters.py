@@ -292,11 +292,12 @@ class RunnerFilterTest(unittest.TestCase):
                 )()
 
         runner.downloader = DoneDownloader()
-        record = ResourceRecord(resource_id="paper-1", resource_name="试卷1")
+        record = ResourceRecord(resource_id="paper-1", resource_name="试卷1", error="旧失败")
 
         CrawlRunner._handle_resource(runner, record)
 
         self.assertEqual(seen_statuses, [ResourceStatus.downloading, ResourceStatus.completed])
+        self.assertEqual(record.error, "")
 
     def test_resume_skips_completed_resources_and_retries_remaining(self) -> None:
         runner = CrawlRunner.__new__(CrawlRunner)

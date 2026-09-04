@@ -585,6 +585,26 @@ class DomainWebTest(unittest.TestCase):
         self.assertEqual(task["status"], "completed")
         self.assertEqual(task["error"], "")
 
+    def test_paused_queued_task_is_not_started_by_late_worker(self) -> None:
+        self.context.store.create_task(
+            task_id="task-paused-before-run",
+            mode="crawl",
+            spec={"title": "已暂停队列", "mode": "crawl", "filters": {}, "subjects": [{"code": "bio", "name": "生物"}]},
+            output_dir=self.root / "tasks" / "task-paused-before-run",
+        )
+        self.context.store.set_task_status("task-paused-before-run", "paused")
+
+        with patch(
+            "stzy_app.domain.tasks.CrawlRunner.run",
+            autospec=True,
+            side_effect=AssertionError("已暂停任务不应启动 runner"),
+        ):
+            self.context.tasks._run_task("task-paused-before-run")  # noqa: SLF001 - verifies late queued worker guard
+
+        task = self.context.store.task("task-paused-before-run")
+
+        self.assertEqual(task["status"], "paused")
+
     def test_final_stats_use_resource_status_counts_for_success_count(self) -> None:
         self.context.store.create_task(
             task_id="task-final-counts",

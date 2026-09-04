@@ -398,6 +398,7 @@ class CrawlRunner:
             self.stats.current_resource_name = record.resource_name
             self._emit_progress()
         record.status = ResourceStatus.downloading
+        record.error = ""
         self.on_record(record)
         self._log(f"开始下载：{record.resource_id} - {record.resource_name}")
         proxy_pool = getattr(self, "proxy_pool", None)
