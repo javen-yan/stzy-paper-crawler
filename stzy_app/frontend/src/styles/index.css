@@ -1658,6 +1658,14 @@ small {
 }
 
 @media (max-width: 760px) {
+  html,
+  body,
+  #app {
+    width: 100%;
+    min-width: 0;
+    overflow-x: hidden;
+  }
+
   .app-header {
     display: grid;
     min-height: 0;
@@ -1796,6 +1804,21 @@ small {
     gap: 12px;
   }
 
+  .page-hero h2 {
+    font-size: 28px;
+    line-height: 1.16;
+  }
+
+  .page-hero p {
+    line-height: 1.45;
+  }
+
+  .page-hero .el-tag {
+    width: auto;
+    max-width: 100%;
+    justify-self: start;
+  }
+
   .hero-actions {
     justify-content: flex-start;
     min-width: 0;
@@ -1824,7 +1847,7 @@ small {
 
   .settings-tabs .el-tabs__header {
     padding: 0 12px;
-    overflow-x: auto;
+    overflow: visible;
   }
 
   .settings-tabs .el-tabs__content {
@@ -1832,11 +1855,43 @@ small {
   }
 
   .settings-tabs .el-tabs__nav-wrap {
-    overflow-x: auto;
+    overflow: visible;
+  }
+
+  .settings-tabs .el-tabs__nav-wrap::after,
+  .settings-tabs .el-tabs__active-bar,
+  .settings-tabs .el-tabs__nav-prev,
+  .settings-tabs .el-tabs__nav-next {
+    display: none;
   }
 
   .settings-tabs .el-tabs__nav-scroll {
     overflow: visible;
+  }
+
+  .settings-tabs .el-tabs__nav {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    padding: 10px 0;
+    transform: none !important;
+  }
+
+  .settings-tabs .el-tabs__item {
+    min-width: 0;
+    height: 40px;
+    justify-content: center;
+    padding: 0 10px !important;
+    border: 1px solid var(--app-border);
+    border-radius: 8px;
+    color: var(--app-muted);
+  }
+
+  .settings-tabs .el-tabs__item.is-active {
+    border-color: rgba(97, 175, 239, 0.45);
+    background: var(--app-primary-soft);
+    color: var(--app-primary);
   }
 
   .tab-label {
@@ -1999,6 +2054,14 @@ small {
   .account-dialog .el-dialog__body {
     max-height: 66vh;
   }
+
+  .el-input__inner,
+  .el-textarea__inner,
+  .el-select__placeholder,
+  .el-select__selected-item,
+  .el-input-number .el-input__inner {
+    font-size: 16px;
+  }
 }
 
 @media (max-width: 480px) {
@@ -2037,7 +2100,7 @@ small {
   }
 
   .page-hero h2 {
-    font-size: 22px;
+    font-size: 26px;
   }
 
   .summary-card .el-card__body {

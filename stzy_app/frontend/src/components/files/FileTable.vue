@@ -175,6 +175,20 @@ function openPreview(row: ArtifactBrowserEntry) {
   previewVisible.value = true
 }
 
+function isSelected(row: ArtifactBrowserEntry) {
+  return selectedRows.value.some((item) => item.relative_path === row.relative_path)
+}
+
+function toggleMobileSelection(row: ArtifactBrowserEntry, value: boolean) {
+  if (row.item_type !== 'file') return
+  if (value) {
+    if (!isSelected(row)) selectedRows.value = [...selectedRows.value, row]
+  } else {
+    selectedRows.value = selectedRows.value.filter((item) => item.relative_path !== row.relative_path)
+  }
+  emitSelection()
+}
+
 function handleSelectionChange(rows: ArtifactBrowserEntry[]) {
   selectedRows.value = rows.filter((row) => row.item_type === 'file')
   emitSelection()
@@ -243,8 +257,41 @@ onMounted(() => {
           </button>
         </div>
 
+        <div v-loading="loading" class="artifact-mobile-list">
+          <button
+            v-for="row in visibleFiles"
+            :key="row.relative_path"
+            class="artifact-mobile-card"
+            type="button"
+            @click="openRow(row)"
+          >
+            <span class="artifact-mobile-main">
+              <component :is="iconFor(row)" :size="19" />
+              <span>
+                <strong>{{ row.name }}</strong>
+                <small>{{ displayType(row) }} · {{ row.item_type === 'folder' ? '目录' : formatSize(row.size_bytes) }}</small>
+              </span>
+            </span>
+            <span class="artifact-mobile-actions" @click.stop>
+              <el-checkbox
+                v-if="row.item_type === 'file'"
+                :model-value="isSelected(row)"
+                aria-label="选择文件"
+                @change="toggleMobileSelection(row, Boolean($event))"
+              />
+              <el-button v-if="row.item_type === 'folder'" size="small" :icon="Folder" @click="openRow(row)">打开</el-button>
+              <template v-else>
+                <el-button size="small" :icon="Eye" @click="openPreview(row)">预览</el-button>
+                <el-button size="small" :icon="Download" tag="a" :href="artifactDownloadUrl(row.relative_path, taskId)">下载</el-button>
+              </template>
+            </span>
+          </button>
+          <el-empty v-if="!loading && !visibleFiles.length" description="暂无文件" />
+        </div>
+
         <el-table
           v-loading="loading"
+          class="artifact-desktop-table"
           :data="visibleFiles"
           row-key="relative_path"
           height="520"
@@ -377,6 +424,10 @@ onMounted(() => {
   min-width: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
+}
+
+.artifact-mobile-list {
+  display: none;
 }
 
 .artifact-breadcrumb {
@@ -520,6 +571,77 @@ onMounted(() => {
 
   .artifact-content-panel :deep(.el-table) {
     height: 420px !important;
+  }
+
+  .artifact-desktop-table {
+    display: none;
+  }
+
+  .artifact-mobile-list {
+    min-height: 240px;
+    max-height: 48dvh;
+    display: grid;
+    align-content: start;
+    gap: 8px;
+    overflow: auto;
+    padding: 8px;
+  }
+
+  .artifact-mobile-card {
+    width: 100%;
+    display: grid;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid var(--app-border);
+    border-radius: 8px;
+    background: var(--app-bg-2);
+    color: var(--app-text);
+    text-align: left;
+  }
+
+  .artifact-mobile-main {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 9px;
+    align-items: start;
+  }
+
+  .artifact-mobile-main svg {
+    margin-top: 2px;
+    color: var(--app-primary);
+  }
+
+  .artifact-mobile-main strong,
+  .artifact-mobile-main small {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .artifact-mobile-main strong {
+    font-size: 14px;
+    line-height: 1.35;
+  }
+
+  .artifact-mobile-main small {
+    margin-top: 2px;
+    color: var(--app-muted);
+    font-size: 12px;
+  }
+
+  .artifact-mobile-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .artifact-mobile-actions :deep(.el-button) {
+    margin-left: 0;
   }
 
   .artifact-preview-frame {

@@ -34,7 +34,32 @@ function statusFor(account: Account) {
 </script>
 
 <template>
-  <el-table :data="accounts" empty-text="暂无账号" row-key="name">
+  <div class="account-mobile-list">
+    <article v-for="account in accounts" :key="account.name" class="account-mobile-card">
+      <div class="account-mobile-head">
+        <div class="account-cell">
+          <strong>{{ account.name }}</strong>
+          <small v-if="account.login_phone">{{ account.login_phone }}</small>
+          <small v-else>高级凭据导入</small>
+        </div>
+        <StatusTag :status="statusFor(account).status" :label="statusFor(account).label" />
+      </div>
+      <div class="account-mobile-meta">
+        <span>类型：{{ account.account_type_label || '-' }}</span>
+        <span>导入：{{ methodLabel(account) }}</span>
+        <span>额度：{{ account.surplus_num ?? '-' }}</span>
+        <span>验证：{{ account.last_checked_at || account.last_verified_at || '-' }}</span>
+      </div>
+      <p v-if="account.last_error || account.error" class="account-mobile-error">{{ account.last_error || account.error }}</p>
+      <div class="account-mobile-actions">
+        <span class="account-mobile-switch">启用 <el-switch :model-value="account.enabled" @change="$emit('enabled', account, Boolean($event))" /></span>
+        <el-button :icon="CircleCheck" @click="$emit('verify', account)">验证</el-button>
+        <el-button :icon="Delete" type="danger" plain @click="$emit('delete', account)">删除</el-button>
+      </div>
+    </article>
+  </div>
+
+  <el-table class="account-desktop-table" :data="accounts" empty-text="暂无账号" row-key="name">
     <el-table-column label="账号" min-width="190">
       <template #default="{ row }">
         <div class="account-cell">
@@ -95,3 +120,108 @@ function statusFor(account: Account) {
     </el-table-column>
   </el-table>
 </template>
+
+<style scoped>
+.account-mobile-list {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .account-desktop-table {
+    display: none;
+  }
+
+  .account-mobile-list {
+    display: grid;
+    gap: 10px;
+  }
+
+  .account-mobile-card {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--app-border);
+    border-radius: 8px;
+    background: var(--app-bg-2);
+  }
+
+  .account-mobile-head {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: start;
+  }
+
+  .account-cell {
+    min-width: 0;
+  }
+
+  .account-cell strong,
+  .account-cell small {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .account-cell small {
+    margin-top: 3px;
+    color: var(--app-muted);
+  }
+
+  .account-mobile-meta {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px 10px;
+    color: var(--app-muted);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .account-mobile-meta span,
+  .account-mobile-error {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .account-mobile-error {
+    margin: 0;
+    color: var(--app-danger);
+    font-size: 12px;
+  }
+
+  .account-mobile-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .account-mobile-actions :deep(.el-button) {
+    margin-left: 0;
+  }
+
+  .account-mobile-switch {
+    min-height: 36px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--app-muted);
+    font-size: 13px;
+  }
+}
+
+@media (max-width: 380px) {
+  .account-mobile-actions {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .account-mobile-switch {
+    grid-column: 1 / -1;
+  }
+}
+</style>
