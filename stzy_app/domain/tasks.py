@@ -262,7 +262,7 @@ class TaskService:
             "status_counts": self.store.resource_status_counts(task_id),
         }
 
-    def logs(self, task_id: str, *, after: int = 0, limit: int = 300, tail: bool = False) -> list[dict[str, Any]]:
+    def logs(self, task_id: str, *, after: int = 0, limit: int = 100, tail: bool = False) -> list[dict[str, Any]]:
         return self.store.logs(task_id, after=after, limit=limit, tail=tail)
 
     def _enqueue_existing(self, task: dict[str, Any]) -> None:

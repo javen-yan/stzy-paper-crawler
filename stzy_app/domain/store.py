@@ -310,8 +310,8 @@ class DomainStore:
                 (task_id, level, message),
             )
 
-    def logs(self, task_id: str, *, after: int = 0, limit: int = 300, tail: bool = False) -> list[dict[str, Any]]:
-        limit = max(1, min(1000, int(limit or 300)))
+    def logs(self, task_id: str, *, after: int = 0, limit: int = 100, tail: bool = False) -> list[dict[str, Any]]:
+        limit = max(1, min(500, int(limit or 100)))
         with self.transaction() as connection:
             if tail and after <= 0:
                 rows = connection.execute(

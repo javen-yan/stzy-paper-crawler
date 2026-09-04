@@ -32,7 +32,7 @@ onMounted(scrollToBottom)
     <template #header>
       <div class="card-header">
         <span>运行日志</span>
-        <span class="log-count mono">{{ logs.length }} 条</span>
+        <span class="log-count mono">最近 {{ logs.length }} 条</span>
         <el-button size="small" @click="refreshAndFollow">刷新</el-button>
       </div>
     </template>

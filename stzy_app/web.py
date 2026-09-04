@@ -288,7 +288,7 @@ def create_app(context: AppContext) -> FastAPI:
         return context.tasks.archive_task(task_id)
 
     @app.get("/api/v1/tasks/{task_id}/logs")
-    def task_logs(task_id: str, after: int = 0, limit: int = 300, tail: bool = False) -> dict[str, Any]:
+    def task_logs(task_id: str, after: int = 0, limit: int = 100, tail: bool = False) -> dict[str, Any]:
         items = context.tasks.logs(task_id, after=after, limit=limit, tail=tail)
         next_cursor = items[-1]["id"] if items else after
         return {"items": items, "next_cursor": next_cursor}
