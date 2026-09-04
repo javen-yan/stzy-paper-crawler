@@ -677,6 +677,112 @@ class DomainWebTest(unittest.TestCase):
         self.assertEqual(payload["status_counts"], {"completed": 2, "failed": 1})
         self.assertEqual([item["resource_id"] for item in payload["items"]], ["failed-1"])
 
+    def test_incomplete_resource_records_exclude_finished_results(self) -> None:
+        self.context.store.create_task(
+            task_id="task-incomplete-records",
+            mode="crawl",
+            spec={"title": "续跑资源"},
+            output_dir=self.root / "tasks" / "task-incomplete-records",
+        )
+        for status in (
+            ResourceStatus.completed,
+            ResourceStatus.skipped_paid,
+            ResourceStatus.paid_unavailable,
+        ):
+            self.context.store.record_resource(
+                "task-incomplete-records",
+                ResourceRecord(
+                    resource_id=f"{status.value}-1",
+                    resource_name=status.value,
+                    status=status,
+                ),
+            )
+        for status in (
+            ResourceStatus.pending,
+            ResourceStatus.downloading,
+            ResourceStatus.partial,
+            ResourceStatus.failed,
+        ):
+            self.context.store.record_resource(
+                "task-incomplete-records",
+                ResourceRecord(
+                    resource_id=f"{status.value}-1",
+                    resource_name=status.value,
+                    status=status,
+                    raw={"resourceSuffix": "pdf"},
+                ),
+            )
+
+        records = self.context.store.incomplete_resource_records("task-incomplete-records")
+
+        self.assertCountEqual(
+            [record.resource_id for record in records],
+            ["pending-1", "downloading-1", "partial-1", "failed-1"],
+        )
+        self.assertTrue(all(record.raw == {"resourceSuffix": "pdf"} for record in records))
+
+    def test_task_resume_uses_incomplete_resource_records_without_rescanning(self) -> None:
+        task_id = "task-resource-resume"
+        self.context.store.create_task(
+            task_id=task_id,
+            mode="crawl",
+            spec={
+                "title": "续跑任务",
+                "mode": "crawl",
+                "filters": {},
+                "subjects": [{"code": "bio", "name": "生物"}],
+            },
+            output_dir=self.root / "tasks" / task_id,
+        )
+        self.context.store.set_task_status(task_id, "failed", error="旧错误")
+        self.context.store.record_resource(
+            task_id,
+            ResourceRecord(resource_id="done-1", resource_name="完成", status=ResourceStatus.completed),
+        )
+        self.context.store.record_resource(
+            task_id,
+            ResourceRecord(resource_id="failed-1", resource_name="失败", status=ResourceStatus.failed),
+        )
+        self.context.store.record_resource(
+            task_id,
+            ResourceRecord(resource_id="partial-1", resource_name="部分", status=ResourceStatus.partial),
+        )
+
+        handled: list[str] = []
+
+        def run_records_stub(runner, records):
+            handled.extend(record.resource_id for record in records)
+            for record in records:
+                record.status = ResourceStatus.completed
+                runner.on_record(record)
+            return CrawlStats(
+                task_mode="crawl",
+                phase="finished",
+                outcome="completed",
+                resources_total=len(records),
+                resources_seen=len(records),
+                resources_completed=len(records),
+            )
+
+        with patch(
+            "stzy_app.domain.tasks.CrawlRunner.run",
+            autospec=True,
+            side_effect=AssertionError("不应重新扫描资源列表"),
+        ), patch(
+            "stzy_app.domain.tasks.CrawlRunner.run_records",
+            autospec=True,
+            side_effect=run_records_stub,
+        ):
+            self.context.tasks._run_task(task_id)  # noqa: SLF001 - runs synchronously for this contract
+
+        task = self.context.store.task(task_id)
+        counts = self.context.store.resource_status_counts(task_id)
+
+        self.assertCountEqual(handled, ["failed-1", "partial-1"])
+        self.assertEqual(counts, {"completed": 3})
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["error"], "")
+
     def test_estimate_endpoint_does_not_create_task_record(self) -> None:
         login = self.client.post("/api/v1/auth/login", json={"password": "secret"})
         csrf = login.json()["csrf_token"]

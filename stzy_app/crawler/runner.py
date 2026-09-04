@@ -156,6 +156,34 @@ class CrawlRunner:
             self._emit_progress()
         return self.stats
 
+    def run_records(self, records: list[ResourceRecord]) -> CrawlStats:
+        self.stats = CrawlStats(
+            task_mode="crawl",
+            phase="running",
+            resources_total=len(records),
+            running=True,
+        )
+        self._emit_progress()
+        try:
+            self._log(f"继续下载：仅处理未完成资源 {len(records)} 份，不重新扫描已完成资源")
+            if self.download_workers > 1:
+                self._log(f"试卷并发数：{self.download_workers}，单个试卷内部按页串行处理")
+            self._handle_resources(records)
+            if self._stop.is_set():
+                self.stats.paused = True
+                self._log("任务已暂停")
+        finally:
+            self.stats.running = False
+            self.stats.phase = "finished"
+            if self.stats.paused:
+                self.stats.outcome = "paused"
+            elif self.stats.failed or self.stats.paid_skipped or self.stats.preview_limited:
+                self.stats.outcome = "partial"
+            else:
+                self.stats.outcome = "completed"
+            self._emit_progress()
+        return self.stats
+
     def estimate(self) -> CrawlStats:
         catalog = TagCatalog.fetch(self.client, self.settings)
         combos = catalog.combos(self.filters)

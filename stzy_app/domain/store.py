@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-from stzy_app.models import ResourceRecord
+from stzy_app.models import ResourceRecord, ResourceStatus
 from stzy_app.storage.db import connect, record_schema_version
 
 TASK_ACTIVE = {"queued", "running", "pausing", "paused"}
@@ -429,6 +429,26 @@ class DomainStore:
             ).fetchall()
         return {str(row["resource_id"]) for row in rows}
 
+    def incomplete_resource_records(self, task_id: str) -> list[ResourceRecord]:
+        retry_statuses = [
+            ResourceStatus.pending.value,
+            ResourceStatus.downloading.value,
+            ResourceStatus.partial.value,
+            ResourceStatus.failed.value,
+        ]
+        placeholders = ",".join("?" for _ in retry_statuses)
+        with self.transaction() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM domain_task_resources
+                WHERE task_id = ? AND status IN ({placeholders})
+                ORDER BY updated_at ASC, id ASC
+                """,
+                [task_id, *retry_statuses],
+            ).fetchall()
+        return [self._resource_record_from_row(row) for row in rows]
+
     def resource_status_counts(self, task_id: str) -> dict[str, int]:
         with self.transaction() as connection:
             rows = connection.execute(
@@ -441,6 +461,31 @@ class DomainStore:
                 (task_id,),
             ).fetchall()
         return {str(row["status"]): int(row["count"] or 0) for row in rows}
+
+    def _resource_record_from_row(self, row: sqlite3.Row) -> ResourceRecord:
+        status_value = str(row["status"] or ResourceStatus.pending.value)
+        try:
+            status = ResourceStatus(status_value)
+        except ValueError:
+            status = ResourceStatus.pending
+        return ResourceRecord(
+            resource_id=str(row["resource_id"] or ""),
+            resource_name=str(row["resource_name"] or row["resource_id"] or ""),
+            subject=str(row["subject"] or ""),
+            year=str(row["year"] or ""),
+            scene=str(row["scene"] or ""),
+            rank=str(row["rank"] or ""),
+            province=str(row["province"] or ""),
+            grade=str(row["grade"] or ""),
+            term=str(row["term"] or ""),
+            price=float(row["price"] or 0),
+            page_count=int(row["page_count"] or 0),
+            image_count=int(row["image_count"] or 0),
+            status=status,
+            error=str(row["error"] or ""),
+            local_dir=str(row["local_dir"] or ""),
+            raw=_loads(row["raw_json"] or ""),
+        )
 
     def upsert_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
         with self.transaction() as connection:

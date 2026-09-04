@@ -373,6 +373,30 @@ class RunnerFilterTest(unittest.TestCase):
         self.assertEqual(runner.stats.resources_seen, 0)
         self.assertEqual(runner.stats.resources_completed, 0)
 
+    def test_run_records_retries_local_records_without_listing(self) -> None:
+        runner = CrawlRunner.__new__(CrawlRunner)
+        runner.settings = AppSettings(max_download_workers=1)
+        runner._stop = threading.Event()
+        runner._stats_lock = threading.RLock()
+        runner.proxy_pool = type("ProxyPool", (), {"proxy_mode": "off"})()
+        runner._emit_progress = lambda: None
+        logs: list[str] = []
+        runner._log = logs.append
+        handled: list[str] = []
+        runner._handle_resources = lambda records: handled.extend(record.resource_id for record in records)
+        runner.api = None
+        records = [
+            ResourceRecord(resource_id="failed-1", resource_name="失败"),
+            ResourceRecord(resource_id="partial-1", resource_name="部分完成"),
+        ]
+
+        stats = CrawlRunner.run_records(runner, records)
+
+        self.assertEqual(handled, ["failed-1", "partial-1"])
+        self.assertEqual(stats.resources_total, 2)
+        self.assertEqual(stats.outcome, "completed")
+        self.assertTrue(any("不重新扫描已完成资源" in line for line in logs))
+
     def test_selected_region_filters_national_results_but_counts_them_processed(self) -> None:
         runner = CrawlRunner.__new__(CrawlRunner)
         runner.settings = AppSettings(subject_name="数学")

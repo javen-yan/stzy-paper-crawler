@@ -205,6 +205,12 @@ class TaskService:
             raise FileNotFoundError("Task not found")
         if task["status"] not in TASK_RESUMABLE:
             raise TaskConflict(f"当前状态 {task['status']} 不可恢复")
+        incomplete_records = self.store.incomplete_resource_records(task_id)
+        if incomplete_records:
+            self.store.append_log(
+                task_id,
+                f"继续下载：将仅重试未完成资源 {len(incomplete_records)} 份，已完成资源不再重新扫描",
+            )
         self.store.set_task_status(task_id, "queued")
         refreshed = self.store.task(task_id)
         if refreshed:
@@ -280,6 +286,8 @@ class TaskService:
         self.store.set_task_status(task_id, "running")
         spec = task.get("spec") or {}
         mode = str(spec.get("mode") or task.get("mode") or "crawl")
+        retry_records = self.store.incomplete_resource_records(task_id) if mode == "crawl" else []
+        resource_only_resume = bool(retry_records)
         started_at = datetime.now()
         aggregate = CrawlStats(task_mode=mode, phase="running", running=True)
         try:
@@ -309,7 +317,31 @@ class TaskService:
                 }
             )
             subjects = spec.get("subjects") or [{"code": runtime_settings.subject_code, "name": runtime_settings.subject_name}]
+            if resource_only_resume:
+                subject = subjects[0] if subjects else {}
+                subject_code = str(subject.get("code") or "")
+                subject_name = str(subject.get("name") or subject_code or "不限")
+                task_settings = self._task_settings(
+                    task_id,
+                    subject_code=subject_code,
+                    subject_name=subject_name,
+                    base_settings=runtime_settings,
+                )
+                runner = CrawlRunner(
+                    task_settings,
+                    filters,
+                    on_log=lambda message, tid=task_id: self.store.append_log(tid, message),
+                    on_record=lambda record, tid=task_id: self._record(tid, record),
+                    on_progress=lambda stats, tid=task_id: self._progress(tid, stats),
+                    on_proxy=lambda proxy, tid=task_id: self.store.update_task(tid, active_proxy=proxy or ""),
+                    completed_resource_ids=self.store.completed_resource_ids(task_id),
+                    download_semaphore=self.download_semaphore,
+                )
+                self._runners[task_id] = runner
+                aggregate = self._merge_stats(aggregate, runner.run_records(retry_records))
             for subject in subjects:
+                if resource_only_resume:
+                    break
                 latest = self.store.task(task_id)
                 if latest and latest["status"] in {"cancelled", "pausing", "paused"}:
                     aggregate.paused = True
