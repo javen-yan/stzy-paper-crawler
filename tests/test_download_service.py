@@ -72,6 +72,21 @@ class DownloadServiceTest(unittest.TestCase):
         self.assertEqual(result.source, "pdf")
         self.assertEqual(service.api.picture_calls, 0)
 
+    def test_existing_complete_files_are_marked_completed_without_pdf_download(self) -> None:
+        service = self._service(
+            pictures=[],
+            converter=FakeConverter(saved_count=14),
+            scheduler=FakeScheduler(url="https://cdn.test/file.pdf"),
+        )
+        record = ResourceRecord(resource_id="r1", resource_name="试卷", page_count=14)
+
+        result = service.handle_resource(record)
+
+        self.assertEqual(result.status, ResourceStatus.completed)
+        self.assertEqual(result.saved_pages, 14)
+        self.assertEqual(result.source, "existing")
+        self.assertEqual(service.account_scheduler.download_calls, 0)
+
     def test_task_scoped_resource_dir_uses_original_remote_name(self) -> None:
         settings = AppSettings(output_dir=self.output_dir, task_scope="task-1")
         record = ResourceRecord(
@@ -103,6 +118,19 @@ class DownloadServiceTest(unittest.TestCase):
 
         self.assertEqual(result.status, ResourceStatus.completed)
         self.assertEqual(service.account_scheduler.download_calls, 1)
+
+    def test_pdf_conversion_error_with_complete_files_is_marked_completed(self) -> None:
+        service = self._service(
+            pictures=[],
+            converter=FakeConverter(saved_count=14, pdf_exception=RuntimeError()),
+            scheduler=FakeScheduler(url="https://cdn.test/file.pdf"),
+        )
+        record = ResourceRecord(resource_id="r1", resource_name="试卷", page_count=14)
+
+        result = service.download_full_pdf(record)
+
+        self.assertEqual(result.status, ResourceStatus.completed)
+        self.assertEqual(result.saved_pages, 14)
 
     def test_all_accounts_failed_returns_paid_unavailable(self) -> None:
         service = self._service(
@@ -176,12 +204,14 @@ class FakeConverter:
         pdf_count: int = 0,
         pdf_added: int = 0,
         pdf_valid: bool = True,
+        pdf_exception: Exception | None = None,
     ) -> None:
         self.saved_count = saved_count
         self.preview_added = preview_added
         self.pdf_count = pdf_count
         self.pdf_added = pdf_added
         self.pdf_valid = pdf_valid
+        self.pdf_exception = pdf_exception
 
     def download_preview_images(
         self,
@@ -195,6 +225,8 @@ class FakeConverter:
         return self.saved_count
 
     def download_pdf_and_convert(self, pdf_url: str, pdf_path: Path, directory: Path) -> tuple[int, int]:
+        if self.pdf_exception:
+            raise self.pdf_exception
         return self.pdf_count, self.pdf_added
 
     def pdf_file_looks_valid(self, path: Path) -> bool:

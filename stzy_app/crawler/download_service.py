@@ -42,6 +42,16 @@ class DownloadService:
         ensure_directory(directory)
         expected_pages = record.page_count or 0
         if record.page_count > 10:
+            saved_count = self.converter.saved_picture_count_from_dir(directory)
+            if expected_pages and saved_count >= expected_pages:
+                self.on_log(f"资源进度：{record.resource_id} - 已有完整文件 {saved_count}/{expected_pages}，标记完成")
+                return DownloadResult(
+                    status=ResourceStatus.completed,
+                    saved_pages=saved_count,
+                    expected_pages=expected_pages,
+                    source="existing",
+                    local_dir=str(directory),
+                )
             self.on_log(f"资源进度：{record.resource_id} - 页数 {record.page_count}，下载 PDF")
             return self.download_full_pdf(record)
 
@@ -131,7 +141,24 @@ class DownloadService:
         else:
             pdf_url = ""
         self.on_log(f"资源进度：{record.resource_id} - PDF 转图片")
-        converted, images_added = self.converter.download_pdf_and_convert(pdf_url, pdf_path, directory)
+        try:
+            converted, images_added = self.converter.download_pdf_and_convert(pdf_url, pdf_path, directory)
+        except Exception as exc:  # noqa: BLE001
+            saved_count = self.converter.saved_picture_count_from_dir(directory)
+            expected_pages = record.page_count or 0
+            if expected_pages and saved_count >= expected_pages:
+                self.on_log(
+                    f"PDF 转图片异常但文件已完整：{record.resource_id} - "
+                    f"已保存 {saved_count}/{expected_pages} 页，标记完成"
+                )
+                return DownloadResult(
+                    status=ResourceStatus.completed,
+                    saved_pages=saved_count,
+                    expected_pages=expected_pages,
+                    source=source,
+                    local_dir=str(directory),
+                )
+            raise RuntimeError(str(exc) or exc.__class__.__name__) from exc
         self.on_log(f"完成：{record.resource_id} - 已保存 {converted} 页")
         return self._result_from_count(
             saved_count=converted,
