@@ -310,7 +310,7 @@ onMounted(async () => {
 watch(
   () => activeTab.value,
   async (tab) => {
-    if (tab === 'logs') await refreshLogs()
+    if (tab === 'logs') await refreshLogs(true)
     if (tab === 'resources') await refreshResourcePage()
     if (tab === 'issues') await refreshIssueResources()
   },

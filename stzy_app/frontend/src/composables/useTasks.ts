@@ -29,6 +29,7 @@ const logs = ref<LogLine[]>([])
 const resources = ref<TaskResource[]>([])
 const logCursor = ref(0)
 const LOG_FETCH_LIMIT = 80
+const LOG_TAIL_LIMIT = 200
 const LOG_BUFFER_LIMIT = 200
 let logRefreshing = false
 
@@ -81,7 +82,13 @@ export function useTasks() {
       logCursor.value = 0
     }
     try {
-      const payload = await fetchTaskLogs(selectedTaskId.value, logCursor.value, LOG_FETCH_LIMIT, reset)
+      const shouldTail = reset || (!logs.value.length && logCursor.value <= 0)
+      const payload = await fetchTaskLogs(
+        selectedTaskId.value,
+        shouldTail ? 0 : logCursor.value,
+        shouldTail ? LOG_TAIL_LIMIT : LOG_FETCH_LIMIT,
+        shouldTail,
+      )
       const knownIds = new Set(logs.value.map((line) => line.id))
       logs.value.push(...payload.items.filter((line) => !knownIds.has(line.id)))
       if (logs.value.length > LOG_BUFFER_LIMIT) {

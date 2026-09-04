@@ -5,6 +5,11 @@ import type { LogLine } from '../../types/tasks'
 const props = defineProps<{ logs: LogLine[] }>()
 const emit = defineEmits<{ refresh: [] }>()
 const logBox = ref<HTMLElement | null>(null)
+const shouldFollow = ref(true)
+
+function isNearBottom(element: HTMLElement) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight < 48
+}
 
 function scrollToBottom() {
   nextTick(() => {
@@ -14,13 +19,21 @@ function scrollToBottom() {
 }
 
 function refreshAndFollow() {
+  shouldFollow.value = true
   emit('refresh')
   scrollToBottom()
 }
 
+function handleScroll() {
+  if (!logBox.value) return
+  shouldFollow.value = isNearBottom(logBox.value)
+}
+
 watch(
   () => props.logs.length,
-  () => scrollToBottom(),
+  () => {
+    if (shouldFollow.value) scrollToBottom()
+  },
   { flush: 'post', immediate: true },
 )
 
@@ -36,7 +49,7 @@ onMounted(scrollToBottom)
         <el-button size="small" @click="refreshAndFollow">刷新</el-button>
       </div>
     </template>
-    <div v-if="logs.length" ref="logBox" class="log-box task-log-box" aria-live="polite">
+    <div v-if="logs.length" ref="logBox" class="log-box task-log-box" aria-live="polite" @scroll="handleScroll">
       <p v-for="line in logs" :key="line.id" :class="`log ${line.level}`">
         <time>{{ line.created_at }}</time>
         <strong class="mono">[{{ line.level || 'info' }}]</strong>
