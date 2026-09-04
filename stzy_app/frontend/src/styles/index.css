@@ -331,7 +331,6 @@ small {
   transform: translateY(-2px);
 }
 
-.summary-card :deep(.el-card__body),
 .summary-card .el-card__body {
   display: flex;
   align-items: center;
@@ -353,6 +352,7 @@ small {
 .summary-content {
   display: grid;
   gap: 2px;
+  min-width: 0;
 }
 
 .summary-content span {
@@ -793,7 +793,6 @@ small {
   color: var(--app-muted);
 }
 
-.clickable-table :deep(.el-table__row),
 .clickable-table .el-table__row {
   cursor: pointer;
 }
@@ -1496,6 +1495,27 @@ small {
   .content-grid {
     grid-template-columns: 1fr 1fr;
   }
+
+  .settings-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .quick-filter-fields {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .quick-filter-button {
+    min-height: 38px;
+  }
+
+  .task-context {
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .footer-log-line {
+    grid-template-columns: 150px 64px minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 1280px) {
@@ -1564,25 +1584,20 @@ small {
 
 @media (max-width: 760px) {
   .app-header {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
+    display: grid;
     min-height: 0;
     height: auto;
-    gap: 8px;
+    gap: 0;
     padding: 12px;
     overflow: visible;
   }
 
   .header-top-row {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "brand"
-      "tools";
-    gap: 8px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "brand tools";
+    align-items: center;
+    gap: 10px;
   }
 
   .header-nav {
@@ -1637,7 +1652,16 @@ small {
   }
 
   .header-tools {
-    justify-content: flex-start;
+    width: auto;
+    min-height: 34px;
+    justify-content: flex-end;
+    overflow: visible;
+    padding-bottom: 0;
+  }
+
+  .header-tools .runtime-pill,
+  .header-tools .header-status-strip {
+    display: none;
   }
 
   .header-brand h1 {
@@ -1657,6 +1681,31 @@ small {
     max-width: 180px;
   }
 
+  .summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .summary-card .el-card__body {
+    gap: 9px;
+    min-height: 76px;
+    padding: 12px;
+  }
+
+  .summary-icon {
+    width: 34px;
+    height: 34px;
+  }
+
+  .summary-card strong {
+    font-size: 21px;
+    text-shadow: none;
+  }
+
+  .summary-content span {
+    font-size: 12px;
+  }
+
   .simple-pager {
     align-items: stretch;
     flex-direction: column;
@@ -1668,6 +1717,7 @@ small {
 
   .page-hero {
     display: grid;
+    gap: 12px;
   }
 
   .hero-actions {
@@ -1679,13 +1729,125 @@ small {
     min-width: 0;
   }
 
-  .summary-grid,
   .content-grid,
   .shenlong-grid,
   .settings-grid,
+  .settings-grid.two-columns,
   .quick-filter-grid,
   .quick-grade-term {
     grid-template-columns: 1fr;
+  }
+
+  .el-card > .el-card__header {
+    padding: 12px 14px;
+  }
+
+  .el-card > .el-card__body {
+    padding: 14px;
+  }
+
+  .settings-tabs .el-tabs__header {
+    padding: 0 12px;
+    overflow-x: auto;
+  }
+
+  .settings-tabs .el-tabs__content {
+    padding: 14px;
+  }
+
+  .settings-tabs .el-tabs__nav-wrap {
+    overflow-x: auto;
+  }
+
+  .settings-tabs .el-tabs__nav-scroll {
+    overflow: visible;
+  }
+
+  .tab-label {
+    min-height: 40px;
+    font-size: 13px;
+  }
+
+  .task-create-drawer {
+    width: 100vw !important;
+  }
+
+  .task-create-drawer .el-drawer__header {
+    margin-bottom: 0;
+    padding: 14px;
+  }
+
+  .task-create-drawer .el-drawer__body {
+    padding: 10px 12px 0;
+  }
+
+  .task-create-drawer .el-drawer__footer {
+    padding: 10px 12px;
+  }
+
+  .compact-steps {
+    max-width: none;
+  }
+
+  .compact-steps .el-step__title {
+    font-size: 12px;
+  }
+
+  .task-form-section {
+    padding: 12px;
+  }
+
+  .section-title {
+    display: grid;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+
+  .section-title-actions {
+    justify-content: flex-start;
+  }
+
+  .quick-filter {
+    padding: 12px;
+  }
+
+  .quick-filter-fields {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .filter-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .filter-row-label {
+    min-height: 0;
+  }
+
+  .filter-toggle .el-radio-button__inner {
+    min-height: 32px;
+    padding: 7px 9px;
+    font-size: 12px;
+  }
+
+  .action-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .drawer-footer {
+    align-items: stretch;
+    display: grid;
+    gap: 8px;
+  }
+
+  .drawer-footer-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .drawer-footer-actions .el-button {
+    margin-left: 0;
   }
 
   .quick-filter-grid {
@@ -1703,7 +1865,7 @@ small {
   }
 
   .workspace {
-    padding: 16px;
+    padding: 16px 16px calc(86px + env(safe-area-inset-bottom));
   }
 
   .detail-actions {
@@ -1738,8 +1900,113 @@ small {
     grid-template-columns: 1fr;
   }
 
+  .bind-ip-panel {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .account-list-header {
+    align-items: stretch;
+    display: grid;
+    gap: 10px;
+  }
+
+  .account-list-header .el-button {
+    width: 100%;
+  }
+
+  .account-dialog .el-dialog {
+    width: calc(100vw - 20px) !important;
+    max-height: 88dvh;
+  }
+
   .account-dialog .el-dialog__body {
     max-height: 66vh;
+  }
+}
+
+@media (max-width: 480px) {
+  .app-header {
+    padding: 10px 12px;
+  }
+
+  .header-top-row {
+    gap: 8px;
+  }
+
+  .header-brand {
+    gap: 8px;
+  }
+
+  .header-brand span {
+    display: none;
+  }
+
+  .header-brand h1 {
+    font-size: 15px;
+  }
+
+  .icon-tool-button.el-button {
+    width: 32px;
+    height: 32px;
+    min-height: 32px;
+  }
+
+  .workspace {
+    padding: 12px 10px calc(86px + env(safe-area-inset-bottom));
+  }
+
+  .page-hero {
+    gap: 10px;
+  }
+
+  .page-hero h2 {
+    font-size: 22px;
+  }
+
+  .summary-card .el-card__body {
+    align-items: flex-start;
+    min-height: 68px;
+    padding: 10px;
+  }
+
+  .summary-icon {
+    width: 30px;
+    height: 30px;
+  }
+
+  .summary-card strong {
+    font-size: 20px;
+  }
+
+  .summary-content span {
+    font-size: 11px;
+  }
+
+  .simple-pager {
+    padding: 8px;
+  }
+
+  .simple-pager-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 8px;
+  }
+
+  .simple-pager-size-label {
+    display: none;
+  }
+
+  .simple-pager-size {
+    width: 88px;
+  }
+
+  .empty-state {
+    padding: 20px 12px;
+  }
+
+  .footer-log-panel {
+    display: none;
   }
 }
 

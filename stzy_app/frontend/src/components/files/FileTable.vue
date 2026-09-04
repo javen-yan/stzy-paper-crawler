@@ -496,9 +496,34 @@ onMounted(() => {
   }
 }
 
-@media (max-width: 520px) {
+@media (max-width: 760px) {
+  .artifact-browser-layout {
+    min-height: 0;
+  }
+
+  .artifact-tree-panel {
+    max-height: 156px;
+  }
+
+  .artifact-breadcrumb {
+    min-height: 36px;
+    padding: 6px 8px;
+  }
+
   .artifact-browser-actions {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .artifact-search {
+    grid-column: 1 / -1;
+  }
+
+  .artifact-content-panel :deep(.el-table) {
+    height: 420px !important;
+  }
+
+  .artifact-preview-frame {
+    height: 68dvh;
   }
 }
 </style>

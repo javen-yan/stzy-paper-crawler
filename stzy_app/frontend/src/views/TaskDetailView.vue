@@ -298,9 +298,9 @@ watch(
           </div>
           <div class="detail-header-actions">
             <el-button v-if="canStartDownload" :icon="Download" type="primary" :loading="actionLoading" @click="startDownloadFromEstimate">开始下载</el-button>
-            <el-button :icon="CirclePause" :disabled="!canPause" :loading="actionLoading" @click="handleAction('pause')">暂停</el-button>
-            <el-button :icon="CirclePlay" :disabled="!canResume" :loading="actionLoading" @click="handleAction('resume')">恢复</el-button>
-            <el-button :icon="XCircle" type="danger" plain :loading="actionLoading" @click="handleAction('cancel')">取消</el-button>
+            <el-button v-if="canPause" :icon="CirclePause" :loading="actionLoading" @click="handleAction('pause')">暂停</el-button>
+            <el-button v-if="canResume" :icon="CirclePlay" :loading="actionLoading" @click="handleAction('resume')">恢复</el-button>
+            <el-button v-if="isTaskActive" :icon="XCircle" type="danger" plain :loading="actionLoading" @click="handleAction('cancel')">取消</el-button>
             <el-button :icon="Archive" :loading="actionLoading" @click="handleAction('archive')">归档</el-button>
             <el-button :icon="Download" type="primary" plain :loading="zipLoading" :disabled="!canCreateZip" @click="createZip">下载 ZIP</el-button>
           </div>
@@ -571,6 +571,115 @@ watch(
 
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .task-detail-header-card :deep(.el-card__body) {
+    padding: 12px;
+  }
+
+  .detail-header {
+    display: grid;
+    gap: 12px;
+  }
+
+  .detail-header-left {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+    gap: 8px 10px;
+  }
+
+  .detail-header-left :deep(.status-tag) {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .detail-title h2 {
+    font-size: 17px;
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  .detail-header-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .detail-header-actions :deep(.el-button) {
+    min-height: 38px;
+    margin-left: 0;
+    padding: 8px 10px;
+    white-space: nowrap;
+  }
+
+  .detail-desc {
+    gap: 12px;
+  }
+
+  .detail-stats-row {
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .detail-stat {
+    min-height: 82px;
+    padding: 10px 12px;
+  }
+
+  .detail-stat-label {
+    font-size: 12px;
+  }
+
+  .detail-stat strong {
+    font-size: 24px;
+  }
+}
+
+@media (max-width: 480px) {
+  .detail-header {
+    gap: 10px;
+  }
+
+  .detail-header-left {
+    grid-template-columns: 54px minmax(0, 1fr);
+  }
+
+  .detail-header-left :deep(.el-button) {
+    justify-self: start;
+    padding: 6px 0;
+  }
+
+  .detail-title h2 {
+    font-size: 16px;
+  }
+
+  .detail-title small {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .detail-header-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .detail-header-actions :deep(.el-button) {
+    min-height: 36px;
+    padding: 7px 8px;
+  }
+
+  .detail-stat {
+    min-height: 72px;
+  }
+
+  .detail-stat strong {
+    font-size: 22px;
   }
 }
 </style>
