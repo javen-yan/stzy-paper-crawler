@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { FolderOpen } from 'lucide-vue-next'
 import StatusTag from '../common/StatusTag.vue'
 import type { TaskResource } from '../../types/tasks'
 
-const props = defineProps<{ resources: TaskResource[]; localActions?: boolean }>()
-defineEmits<{ openLocation: [resource: TaskResource] }>()
-const statusFilter = ref('')
-const filteredResources = computed(() => props.resources.filter((resource) => !statusFilter.value || resource.status === statusFilter.value))
-const statusOptions = computed(() => Array.from(new Set(props.resources.map((resource) => resource.status).filter(Boolean))) as string[])
+const props = defineProps<{
+  resources: TaskResource[]
+  localActions?: boolean
+  statusFilter?: string
+  statusCounts?: Record<string, number>
+}>()
+const emit = defineEmits<{ openLocation: [resource: TaskResource]; statusChange: [status: string] }>()
+const statusOptions = computed(() => Object.entries(props.statusCounts || {}).filter(([, count]) => Number(count) > 0))
 </script>
 
 <template>
@@ -16,12 +19,12 @@ const statusOptions = computed(() => Array.from(new Set(props.resources.map((res
     <template #header>
       <div class="card-header">
         <span>资源记录</span>
-        <el-select v-model="statusFilter" clearable placeholder="按状态筛选" class="resource-filter">
-          <el-option v-for="status in statusOptions" :key="status" :label="status" :value="status" />
+        <el-select :model-value="statusFilter" clearable placeholder="按状态筛选" class="resource-filter" @change="emit('statusChange', String($event || ''))">
+          <el-option v-for="[status, count] in statusOptions" :key="status" :label="`${status} (${count})`" :value="status" />
         </el-select>
       </div>
     </template>
-    <el-table :data="filteredResources" empty-text="暂无资源记录" row-key="id">
+    <el-table :data="resources" empty-text="暂无资源记录" row-key="id">
       <el-table-column label="资源" min-width="220">
         <template #default="{ row }">{{ row.resource_name || row.name || row.title || row.resource_id || row.id || '-' }}</template>
       </el-table-column>

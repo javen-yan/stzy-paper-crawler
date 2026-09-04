@@ -13,7 +13,7 @@ import FileTable from '../components/files/FileTable.vue'
 
     <el-card shadow="never">
       <template #header>
-        <div class="card-header">
+        <div class="card-header file-library-header">
           <span>文件列表</span>
           <small class="block-muted">按任务筛选名称与实际保存路径浏览。</small>
         </div>
@@ -22,3 +22,20 @@ import FileTable from '../components/files/FileTable.vue'
     </el-card>
   </div>
 </template>
+
+<style scoped>
+.file-library-header {
+  align-items: flex-start;
+}
+
+.file-library-header small {
+  min-width: 0;
+}
+
+@media (max-width: 760px) {
+  .file-library-header {
+    display: grid;
+    gap: 4px;
+  }
+}
+</style>

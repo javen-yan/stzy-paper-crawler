@@ -255,8 +255,12 @@ class TaskService:
         self._attach_task_display(task)
         return task
 
-    def resources(self, task_id: str, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
-        return self.store.resources(task_id, limit=limit, offset=offset)
+    def resources(self, task_id: str, *, limit: int = 100, offset: int = 0, status: str = "") -> dict[str, Any]:
+        return {
+            "items": self.store.resources(task_id, limit=limit, offset=offset, status=status),
+            "total": self.store.resource_count(task_id, status=status),
+            "status_counts": self.store.resource_status_counts(task_id),
+        }
 
     def logs(self, task_id: str, *, after: int = 0, limit: int = 300, tail: bool = False) -> list[dict[str, Any]]:
         return self.store.logs(task_id, after=after, limit=limit, tail=tail)

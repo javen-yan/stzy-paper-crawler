@@ -294,8 +294,8 @@ def create_app(context: AppContext) -> FastAPI:
         return {"items": items, "next_cursor": next_cursor}
 
     @app.get("/api/v1/tasks/{task_id}/resources")
-    def task_resources(task_id: str, limit: int = 100, offset: int = 0) -> dict[str, Any]:
-        return {"items": context.tasks.resources(task_id, limit=limit, offset=offset)}
+    def task_resources(task_id: str, limit: int = 100, offset: int = 0, status: str = "") -> dict[str, Any]:
+        return context.tasks.resources(task_id, limit=limit, offset=offset, status=status)
 
     @app.get("/api/v1/artifacts/browser/list")
     def artifact_browser_list(path: str | None = None, task_id: str | None = None) -> dict[str, Any]:

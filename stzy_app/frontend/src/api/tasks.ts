@@ -33,8 +33,10 @@ export function fetchTaskLogs(taskId: string, after = 0, limit = 300, tail = fal
   )
 }
 
-export function fetchTaskResources(taskId: string, limit = 100, offset = 0) {
-  return api<{ items: TaskResource[] }>(
-    `/api/v1/tasks/${encodeURIComponent(taskId)}/resources?limit=${limit}&offset=${offset}`,
+export function fetchTaskResources(taskId: string, limit = 100, offset = 0, status = '') {
+  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  if (status) query.set('status', status)
+  return api<{ items: TaskResource[]; total: number; status_counts: Record<string, number> }>(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/resources?${query}`,
   )
 }

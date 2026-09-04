@@ -248,11 +248,24 @@ small {
   width: 96px;
 }
 
+.simple-pager-single {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--app-faint);
+  font-size: 12px;
+}
+
 .page-hero {
   display: flex;
   justify-content: space-between;
   gap: 18px;
   align-items: flex-start;
+  min-width: 0;
+}
+
+.page-hero > * {
+  min-width: 0;
 }
 
 .page-hero h2 {
@@ -1497,6 +1510,11 @@ small {
 
   .hero-actions {
     justify-content: flex-start;
+    min-width: 0;
+  }
+
+  .card-header {
+    min-width: 0;
   }
 
   .summary-grid,

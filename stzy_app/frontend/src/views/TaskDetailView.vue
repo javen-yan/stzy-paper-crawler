@@ -40,6 +40,9 @@ const selectedFilePaths = ref<string[]>([])
 const resourcePage = ref(1)
 const resourcePageSize = ref(50)
 const resourceHasNextPage = ref(false)
+const resourceTotal = ref(0)
+const resourceStatusCounts = ref<Record<string, number>>({})
+const resourceStatusFilter = ref('')
 const fileManagerKey = ref(0)
 const resourceRefreshAt = ref(0)
 const visibleResources = computed(() => resources.value.slice(0, resourcePageSize.value))
@@ -53,11 +56,16 @@ const polling = usePolling(async () => {
 
 const overviewStats = computed<TaskOverviewStats>(() => {
   const stats = selectedTask.value?.stats || {}
+  const total = numberStat(stats.resources_total || stats.resources_seen)
+  const processed = numberStat(stats.resources_processed || stats.resources_completed || stats.success)
+  const skipped = numberStat(stats.paid_skipped) + numberStat(stats.preview_limited) + numberStat(stats.filtered_skipped)
   return {
-    total: numberStat(stats.resources_total || stats.resources_seen),
+    total,
+    processed,
     completed: numberStat(stats.resources_success || stats.resources_completed || stats.success),
     failed: numberStat(stats.failed),
-    skipped: numberStat(stats.paid_skipped) + numberStat(stats.preview_limited) + numberStat(stats.filtered_skipped),
+    pending: Math.max(0, total - processed),
+    skipped,
   }
 })
 
@@ -67,6 +75,7 @@ const summaryMetrics = computed(() => {
   const filtered = numberStat(stats.filtered_skipped)
   return [
     { label: '远端返回', value: numberStat(stats.resources_total || stats.resources_seen) },
+    { label: '已处理', value: processed },
     { label: '实际下载', value: Math.max(0, processed - filtered) },
     { label: '地区过滤', value: filtered },
     { label: '已下载图片', value: numberStat(stats.images_downloaded) },
@@ -140,8 +149,14 @@ async function refreshAll() {
 }
 
 async function refreshResourcePage() {
-  const payload = await refreshResources({ limit: resourcePageSize.value + 1, offset: (resourcePage.value - 1) * resourcePageSize.value })
+  const payload = await refreshResources({
+    limit: resourcePageSize.value + 1,
+    offset: (resourcePage.value - 1) * resourcePageSize.value,
+    status: resourceStatusFilter.value,
+  })
   resourceHasNextPage.value = Boolean(payload && payload.items.length > resourcePageSize.value)
+  resourceTotal.value = Number(payload?.total || 0)
+  resourceStatusCounts.value = payload?.status_counts || {}
   resourceRefreshAt.value = Date.now()
 }
 
@@ -157,6 +172,12 @@ function refreshFileManager() {
 
 async function changeResourcePageSize(value: number) {
   resourcePageSize.value = value
+  resourcePage.value = 1
+  await refreshResourcePage()
+}
+
+async function changeResourceStatusFilter(status: string) {
+  resourceStatusFilter.value = status
   resourcePage.value = 1
   await refreshResourcePage()
 }
@@ -295,6 +316,10 @@ watch(
               <span class="detail-stat-label">远端返回</span>
               <strong>{{ overviewStats.total }}</strong>
             </div>
+            <div class="detail-stat" data-tone="idle">
+              <span class="detail-stat-label">已处理</span>
+              <strong>{{ overviewStats.processed }}</strong>
+            </div>
             <div class="detail-stat" data-tone="success">
               <span class="detail-stat-label">已完成</span>
               <strong>{{ overviewStats.completed }}</strong>
@@ -306,6 +331,10 @@ watch(
             <div class="detail-stat" data-tone="warning">
               <span class="detail-stat-label">跳过/受限</span>
               <strong>{{ overviewStats.skipped }}</strong>
+            </div>
+            <div class="detail-stat" data-tone="idle">
+              <span class="detail-stat-label">未处理</span>
+              <strong>{{ overviewStats.pending }}</strong>
             </div>
           </div>
         </el-card>
@@ -362,14 +391,21 @@ watch(
         </el-tab-pane>
 
         <el-tab-pane label="资源列表" name="resources">
-          <TaskResourcesTable :resources="visibleResources" :local-actions="canUseLocal" @open-location="openResourceDir" />
+          <TaskResourcesTable
+            :resources="visibleResources"
+            :local-actions="canUseLocal"
+            :status-filter="resourceStatusFilter"
+            :status-counts="resourceStatusCounts"
+            @open-location="openResourceDir"
+            @status-change="changeResourceStatusFilter"
+          />
           <SimplePager
             class="list-pager"
             :page="resourcePage"
             :page-size="resourcePageSize"
             :item-count="visibleResources.length"
             :has-next="resourceHasNextPage"
-            label="资源"
+            :label="resourceStatusFilter ? `${resourceStatusFilter} 资源，共 ${resourceTotal}` : `资源，共 ${resourceTotal}`"
             @prev="prevResourcePage"
             @next="nextResourcePage"
             @refresh="refreshResourcePage"

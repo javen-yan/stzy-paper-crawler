@@ -88,9 +88,9 @@ export function useTasks() {
     }
   }
 
-  async function refreshResources(params: { limit?: number; offset?: number } = {}) {
+  async function refreshResources(params: { limit?: number; offset?: number; status?: string } = {}) {
     if (!selectedTaskId.value) return
-    const payload = await fetchTaskResources(selectedTaskId.value, params.limit, params.offset)
+    const payload = await fetchTaskResources(selectedTaskId.value, params.limit, params.offset, params.status)
     resources.value = payload.items
     return payload
   }

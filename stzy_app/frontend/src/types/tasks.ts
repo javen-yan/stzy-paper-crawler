@@ -113,8 +113,10 @@ export type TaskDetailTabKey = 'overview' | 'logs' | 'config' | 'resources' | 'f
 
 export interface TaskOverviewStats {
   total: number
+  processed: number
   completed: number
   failed: number
+  pending: number
   skipped: number
 }
 

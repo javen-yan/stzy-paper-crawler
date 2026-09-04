@@ -106,12 +106,14 @@ onMounted(async () => {
 
 <template>
   <div class="page-stack">
-    <section class="page-hero">
+    <section class="page-hero task-center-hero">
       <div>
         <p class="eyebrow">创建任务、查看进度</p>
         <h2>任务中心</h2>
       </div>
+      <div class="hero-actions">
       <TaskCreateWizard :accounts="accounts" :submitting="submitting" @submit="handleSubmit" />
+      </div>
     </section>
 
     <TaskSummaryCards :tasks="visibleTasks" />
@@ -166,5 +168,12 @@ onMounted(async () => {
   border: 1px solid rgba(97, 175, 239, 0.3);
   border-radius: 999px;
   background: var(--app-primary-soft);
+}
+
+@media (max-width: 760px) {
+  .task-center-hero .hero-actions,
+  .task-center-hero .hero-actions :deep(.el-button) {
+    width: 100%;
+  }
 }
 </style>

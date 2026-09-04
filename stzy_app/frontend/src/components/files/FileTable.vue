@@ -460,14 +460,29 @@ onMounted(() => {
 }
 
 @media (max-width: 900px) {
-  .artifact-browser-toolbar,
-  .artifact-browser-actions {
+  .artifact-browser-toolbar {
     align-items: stretch;
     flex-direction: column;
   }
 
+  .artifact-browser-title {
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .artifact-browser-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
   .artifact-search {
+    grid-column: 1 / -1;
     width: 100%;
+  }
+
+  .artifact-browser-actions :deep(.el-button) {
+    min-height: 40px;
+    margin-left: 0;
   }
 
   .artifact-browser-layout {
@@ -478,6 +493,12 @@ onMounted(() => {
     max-height: 220px;
     border-right: 0;
     border-bottom: 1px solid var(--app-border);
+  }
+}
+
+@media (max-width: 520px) {
+  .artifact-browser-actions {
+    grid-template-columns: 1fr;
   }
 }
 </style>

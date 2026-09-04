@@ -1,5 +1,7 @@
 <script setup lang="ts">
-withDefaults(
+import { computed } from 'vue'
+
+const props = withDefaults(
   defineProps<{
     page: number
     pageSize: number
@@ -15,6 +17,9 @@ withDefaults(
     label: '当前页',
   },
 )
+
+const hasPrev = computed(() => props.page > 1)
+const hasAnyPagerControl = computed(() => hasPrev.value || props.hasNext || props.itemCount > props.pageSize)
 
 const emit = defineEmits<{
   prev: []
@@ -34,8 +39,9 @@ const emit = defineEmits<{
       <el-select :model-value="pageSize" size="small" class="simple-pager-size" @change="emit('pageSizeChange', Number($event))">
         <el-option v-for="size in pageSizes" :key="size" :label="`${size} 条`" :value="size" />
       </el-select>
-      <el-button size="small" :disabled="page <= 1 || loading" @click="emit('prev')">上一页</el-button>
-      <el-button size="small" type="primary" plain :disabled="!hasNext || loading" @click="emit('next')">下一页</el-button>
+      <el-button v-if="hasPrev" size="small" :disabled="loading" @click="emit('prev')">上一页</el-button>
+      <el-button v-if="hasNext" size="small" type="primary" plain :disabled="loading" @click="emit('next')">下一页</el-button>
+      <span v-if="!hasAnyPagerControl" class="simple-pager-single">没有更多页</span>
       <el-button size="small" :loading="loading" @click="emit('refresh')">刷新</el-button>
     </div>
   </div>

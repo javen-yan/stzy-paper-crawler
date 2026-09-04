@@ -639,6 +639,44 @@ class DomainWebTest(unittest.TestCase):
         self.assertEqual([item["message"] for item in payload["items"]], ["log-3", "log-4"])
         self.assertEqual(payload["next_cursor"], payload["items"][-1]["id"])
 
+    def test_task_resources_support_status_filter_and_counts(self) -> None:
+        self.client.post("/api/v1/auth/login", json={"password": "secret"})
+        self.context.store.create_task(
+            task_id="task-resource-filter",
+            mode="crawl",
+            spec={"title": "资源筛选"},
+            output_dir=self.root / "tasks" / "task-resource-filter",
+        )
+        for index in range(2):
+            self.context.store.record_resource(
+                "task-resource-filter",
+                ResourceRecord(
+                    resource_id=f"done-{index}",
+                    resource_name=f"完成 {index}",
+                    status=ResourceStatus.completed,
+                ),
+            )
+        self.context.store.record_resource(
+            "task-resource-filter",
+            ResourceRecord(
+                resource_id="failed-1",
+                resource_name="失败 1",
+                status=ResourceStatus.failed,
+                error="代理失败",
+            ),
+        )
+
+        response = self.client.get(
+            "/api/v1/tasks/task-resource-filter/resources",
+            params={"status": "failed", "limit": "10"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["status_counts"], {"completed": 2, "failed": 1})
+        self.assertEqual([item["resource_id"] for item in payload["items"]], ["failed-1"])
+
     def test_estimate_endpoint_does_not_create_task_record(self) -> None:
         login = self.client.post("/api/v1/auth/login", json={"password": "secret"})
         csrf = login.json()["csrf_token"]

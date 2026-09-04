@@ -378,17 +378,25 @@ class DomainStore:
                 row,
             )
 
-    def resources(self, task_id: str, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+    def resources(self, task_id: str, *, limit: int = 100, offset: int = 0, status: str = "") -> list[dict[str, Any]]:
+        limit = max(1, min(500, int(limit or 100)))
+        offset = max(0, int(offset or 0))
+        where = "WHERE task_id = ?"
+        params: list[Any] = [task_id]
+        if status:
+            where += " AND status = ?"
+            params.append(status)
+        params.extend([limit, offset])
         with self.transaction() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT *
                 FROM domain_task_resources
-                WHERE task_id = ?
+                {where}
                 ORDER BY created_at DESC, id DESC
                 LIMIT ? OFFSET ?
                 """,
-                (task_id, limit, offset),
+                params,
             ).fetchall()
         resources = []
         for row in rows:
@@ -396,6 +404,19 @@ class DomainStore:
             resource["raw"] = _loads(resource.pop("raw_json", ""))
             resources.append(resource)
         return resources
+
+    def resource_count(self, task_id: str, *, status: str = "") -> int:
+        where = "WHERE task_id = ?"
+        params: list[Any] = [task_id]
+        if status:
+            where += " AND status = ?"
+            params.append(status)
+        with self.transaction() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) AS count FROM domain_task_resources {where}",
+                params,
+            ).fetchone()
+        return int(row["count"] or 0) if row else 0
 
     def completed_resource_ids(self, task_id: str) -> set[str]:
         with self.transaction() as connection:
