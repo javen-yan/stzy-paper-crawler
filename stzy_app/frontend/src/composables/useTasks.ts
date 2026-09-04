@@ -79,7 +79,7 @@ export function useTasks() {
       logCursor.value = 0
     }
     try {
-      const payload = await fetchTaskLogs(selectedTaskId.value, logCursor.value)
+      const payload = await fetchTaskLogs(selectedTaskId.value, logCursor.value, 300, reset)
       const knownIds = new Set(logs.value.map((line) => line.id))
       logs.value.push(...payload.items.filter((line) => !knownIds.has(line.id)))
       logCursor.value = payload.next_cursor

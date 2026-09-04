@@ -310,18 +310,32 @@ class DomainStore:
                 (task_id, level, message),
             )
 
-    def logs(self, task_id: str, *, after: int = 0, limit: int = 300) -> list[dict[str, Any]]:
+    def logs(self, task_id: str, *, after: int = 0, limit: int = 300, tail: bool = False) -> list[dict[str, Any]]:
+        limit = max(1, min(1000, int(limit or 300)))
         with self.transaction() as connection:
-            rows = connection.execute(
-                """
-                SELECT id, level, message, created_at
-                FROM domain_task_logs
-                WHERE task_id = ? AND id > ?
-                ORDER BY id ASC
-                LIMIT ?
-                """,
-                (task_id, after, limit),
-            ).fetchall()
+            if tail and after <= 0:
+                rows = connection.execute(
+                    """
+                    SELECT id, level, message, created_at
+                    FROM domain_task_logs
+                    WHERE task_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (task_id, limit),
+                ).fetchall()
+                rows = list(reversed(rows))
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT id, level, message, created_at
+                    FROM domain_task_logs
+                    WHERE task_id = ? AND id > ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (task_id, after, limit),
+                ).fetchall()
         return [dict(row) for row in rows]
 
     def record_resource(self, task_id: str, record: ResourceRecord) -> None:
@@ -393,6 +407,19 @@ class DomainStore:
                 (task_id,),
             ).fetchall()
         return {str(row["resource_id"]) for row in rows}
+
+    def resource_status_counts(self, task_id: str) -> dict[str, int]:
+        with self.transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM domain_task_resources
+                WHERE task_id = ?
+                GROUP BY status
+                """,
+                (task_id,),
+            ).fetchall()
+        return {str(row["status"]): int(row["count"] or 0) for row in rows}
 
     def upsert_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
         with self.transaction() as connection:

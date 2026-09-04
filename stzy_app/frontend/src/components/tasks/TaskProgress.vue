@@ -14,10 +14,11 @@ const total = computed(() => {
 
 const done = computed(() => {
   if (props.task.mode === 'estimate') return Number(stats.value.completed_combos || 0)
-  return Number(stats.value.resources_completed || 0)
+  return Number(stats.value.resources_processed || stats.value.resources_completed || 0)
 })
 
-const downloaded = computed(() => Number(stats.value.resources_completed || 0) - Number(stats.value.filtered_skipped || 0))
+const completed = computed(() => Number(stats.value.resources_completed || 0))
+const failed = computed(() => Number(stats.value.failed || 0))
 const filtered = computed(() => Number(stats.value.filtered_skipped || 0))
 
 const percentage = computed(() => {
@@ -48,7 +49,7 @@ const tone = computed(() => {
     <div class="progress-meta">
       <span class="progress-count" v-if="total">
         {{ done }}/{{ total }}
-        <small v-if="filtered">下载 {{ downloaded }}，地区过滤 {{ filtered }}</small>
+        <small v-if="completed || failed || filtered">完成 {{ completed }}，失败 {{ failed }}，地区过滤 {{ filtered }}</small>
       </span>
       <span class="progress-pct">{{ percentage }}%</span>
     </div>

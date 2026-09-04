@@ -17,6 +17,7 @@ from stzy_app.crawler import CrawlStats
 from stzy_app.domain.context import create_context
 from stzy_app.domain.identity import hash_password
 from stzy_app.domain.proxy_status import PUBLIC_IP_ENDPOINTS, _extract_ip
+from stzy_app.models import ResourceRecord, ResourceStatus
 from stzy_app.runtime import RuntimeAdapter
 from stzy_app.storage.accounts import AccountCredential, AccountPool
 from stzy_app.web import create_app
@@ -583,6 +584,60 @@ class DomainWebTest(unittest.TestCase):
 
         self.assertEqual(task["status"], "completed")
         self.assertEqual(task["error"], "")
+
+    def test_final_stats_use_resource_status_counts_for_success_count(self) -> None:
+        self.context.store.create_task(
+            task_id="task-final-counts",
+            mode="crawl",
+            spec={"title": "统计口径", "mode": "crawl", "filters": {}, "subjects": [{"code": "bio", "name": "生物"}]},
+            output_dir=self.root / "tasks" / "task-final-counts",
+        )
+        for index in range(2):
+            self.context.store.record_resource(
+                "task-final-counts",
+                ResourceRecord(
+                    resource_id=f"done-{index}",
+                    resource_name=f"完成 {index}",
+                    status=ResourceStatus.completed,
+                ),
+            )
+        self.context.store.record_resource(
+            "task-final-counts",
+            ResourceRecord(
+                resource_id="failed-1",
+                resource_name="失败 1",
+                status=ResourceStatus.failed,
+                error="代理失败",
+            ),
+        )
+
+        stats = CrawlStats(task_mode="crawl", resources_total=3, resources_completed=3, failed=1)
+        payload = self.context.tasks._final_stats("task-final-counts", stats)  # noqa: SLF001 - verifies final display contract
+        status = self.context.tasks._final_status("task-final-counts", stats, payload)  # noqa: SLF001
+
+        self.assertEqual(payload["resources_processed"], 3)
+        self.assertEqual(payload["resources_completed"], 2)
+        self.assertEqual(payload["resources_success"], 2)
+        self.assertEqual(payload["failed"], 1)
+        self.assertEqual(status, "partial_completed")
+
+    def test_task_logs_can_tail_latest_entries(self) -> None:
+        self.client.post("/api/v1/auth/login", json={"password": "secret"})
+        self.context.store.create_task(
+            task_id="task-tail-logs",
+            mode="crawl",
+            spec={"title": "日志 tail"},
+            output_dir=self.root / "tasks" / "task-tail-logs",
+        )
+        for index in range(5):
+            self.context.store.append_log("task-tail-logs", f"log-{index}")
+
+        response = self.client.get("/api/v1/tasks/task-tail-logs/logs", params={"tail": "true", "limit": "2"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual([item["message"] for item in payload["items"]], ["log-3", "log-4"])
+        self.assertEqual(payload["next_cursor"], payload["items"][-1]["id"])
 
     def test_estimate_endpoint_does_not_create_task_record(self) -> None:
         login = self.client.post("/api/v1/auth/login", json={"password": "secret"})

@@ -25,9 +25,11 @@ export function taskAction(taskId: string, action: 'pause' | 'resume' | 'cancel'
   return api<Task>(`/api/v1/tasks/${encodeURIComponent(taskId)}/${action}`, { method: 'POST' })
 }
 
-export function fetchTaskLogs(taskId: string, after = 0, limit = 300) {
+export function fetchTaskLogs(taskId: string, after = 0, limit = 300, tail = false) {
+  const query = new URLSearchParams({ after: String(after), limit: String(limit) })
+  if (tail) query.set('tail', 'true')
   return api<{ items: LogLine[]; next_cursor: number }>(
-    `/api/v1/tasks/${encodeURIComponent(taskId)}/logs?after=${after}&limit=${limit}`,
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/logs?${query}`,
   )
 }
 

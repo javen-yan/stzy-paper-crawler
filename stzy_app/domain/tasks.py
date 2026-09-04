@@ -258,8 +258,8 @@ class TaskService:
     def resources(self, task_id: str, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         return self.store.resources(task_id, limit=limit, offset=offset)
 
-    def logs(self, task_id: str, *, after: int = 0, limit: int = 300) -> list[dict[str, Any]]:
-        return self.store.logs(task_id, after=after, limit=limit)
+    def logs(self, task_id: str, *, after: int = 0, limit: int = 300, tail: bool = False) -> list[dict[str, Any]]:
+        return self.store.logs(task_id, after=after, limit=limit, tail=tail)
 
     def _enqueue_existing(self, task: dict[str, Any]) -> None:
         task_id = str(task["id"])
@@ -335,14 +335,15 @@ class TaskService:
                     break
                 if result.paused:
                     break
-            status = self._final_status(task_id, aggregate)
+            stats_payload = self._final_stats(task_id, aggregate)
+            status = self._final_status(task_id, aggregate, stats_payload)
             duration = int((datetime.now() - started_at).total_seconds())
             self.store.update_task(
                 task_id,
                 status=status,
                 ended_at=datetime.now().isoformat(timespec="seconds"),
                 error=aggregate.error if status == "failed" else "",
-                stats_json={**asdict(aggregate), "duration_seconds": duration},
+                stats_json={**stats_payload, "duration_seconds": duration},
             )
         except StzyApiError as exc:
             status = "auth_expired" if exc.requires_login else "failed"
@@ -518,6 +519,28 @@ class TaskService:
         title = str(task.get("title") or (task.get("spec") or {}).get("title") or "").strip()
         task["task_title"] = title
         task["task_display_name"] = title or self._filter_display_name(task.get("spec") or "")
+        self._attach_resource_status_summary(task)
+
+    def _attach_resource_status_summary(self, task: dict[str, Any]) -> None:
+        if task.get("mode") != "crawl":
+            return
+        counts = self.store.resource_status_counts(str(task.get("id") or ""))
+        if not counts:
+            return
+        stats = dict(task.get("stats") or {})
+        completed = counts.get("completed", 0)
+        failed = counts.get("failed", 0)
+        paid = counts.get("paid_unavailable", 0) + counts.get("skipped_paid", 0)
+        partial = counts.get("partial", 0)
+        processed = completed + failed + paid + partial + int(stats.get("filtered_skipped") or 0)
+        stats["resources_processed"] = max(int(stats.get("resources_processed") or 0), int(stats.get("resources_completed") or 0), processed)
+        stats["resources_success"] = completed
+        stats["resources_completed"] = completed
+        stats["failed"] = max(int(stats.get("failed") or 0), failed)
+        stats["paid_skipped"] = max(int(stats.get("paid_skipped") or 0), paid)
+        stats["preview_limited"] = max(int(stats.get("preview_limited") or 0), partial)
+        stats["resource_status_counts"] = counts
+        task["stats"] = stats
 
     def _filter_display_name(self, spec: Any) -> str:
         if not isinstance(spec, dict):
@@ -589,7 +612,26 @@ class TaskService:
         base.running = False
         return base
 
-    def _final_status(self, task_id: str, stats: CrawlStats) -> str:
+    def _final_stats(self, task_id: str, stats: CrawlStats) -> dict[str, Any]:
+        payload = asdict(stats)
+        counts = self.store.resource_status_counts(task_id)
+        if not counts:
+            return payload
+        completed = counts.get("completed", 0)
+        failed = counts.get("failed", 0)
+        paid = counts.get("paid_unavailable", 0) + counts.get("skipped_paid", 0)
+        partial = counts.get("partial", 0)
+        processed = completed + failed + paid + partial + int(payload.get("filtered_skipped") or 0)
+        payload["resources_processed"] = max(int(payload.get("resources_completed") or 0), processed)
+        payload["resources_success"] = completed
+        payload["resources_completed"] = completed
+        payload["failed"] = max(int(payload.get("failed") or 0), failed)
+        payload["paid_skipped"] = max(int(payload.get("paid_skipped") or 0), paid)
+        payload["preview_limited"] = max(int(payload.get("preview_limited") or 0), partial)
+        payload["resource_status_counts"] = counts
+        return payload
+
+    def _final_status(self, task_id: str, stats: CrawlStats, stats_payload: dict[str, Any] | None = None) -> str:
         task = self.store.task(task_id)
         if task and task["status"] == "cancelled":
             return "cancelled"
@@ -597,6 +639,7 @@ class TaskService:
             return "failed"
         if stats.paused:
             return "paused"
-        if stats.failed or stats.paid_skipped or stats.preview_limited:
+        payload = stats_payload or asdict(stats)
+        if payload.get("failed") or payload.get("paid_skipped") or payload.get("preview_limited"):
             return "partial_completed"
         return "completed"

@@ -55,7 +55,7 @@ const overviewStats = computed<TaskOverviewStats>(() => {
   const stats = selectedTask.value?.stats || {}
   return {
     total: numberStat(stats.resources_total || stats.resources_seen),
-    completed: numberStat(stats.resources_completed || stats.success),
+    completed: numberStat(stats.resources_success || stats.resources_completed || stats.success),
     failed: numberStat(stats.failed),
     skipped: numberStat(stats.paid_skipped) + numberStat(stats.preview_limited) + numberStat(stats.filtered_skipped),
   }
@@ -63,7 +63,7 @@ const overviewStats = computed<TaskOverviewStats>(() => {
 
 const summaryMetrics = computed(() => {
   const stats = selectedTask.value?.stats || {}
-  const processed = numberStat(stats.resources_completed || stats.success)
+  const processed = numberStat(stats.resources_processed || stats.resources_completed || stats.success)
   const filtered = numberStat(stats.filtered_skipped)
   return [
     { label: '远端返回', value: numberStat(stats.resources_total || stats.resources_seen) },
