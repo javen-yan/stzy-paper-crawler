@@ -4,19 +4,21 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMOTE_USER="${STZY_DEPLOY_USER:-yanzongzhen}"
 REMOTE_HOST="${STZY_DEPLOY_HOST:-192.168.1.32}"
+REMOTE_PORT="${STZY_DEPLOY_PORT:-22}"
 REMOTE_DIR="${STZY_DEPLOY_DIR:-/vol1/1000/service/stzy-paper-crawler/app}"
 SERVICE_NAME="${STZY_DEPLOY_SERVICE:-stzy-crawler}"
 REMOTE_NODE_DIR="${STZY_REMOTE_NODE_DIR:-/root/.nvm/versions/node/v24.14.0/bin}"
 FRONTEND_BUILD_MODE="${STZY_FRONTEND_BUILD_MODE:-auto}"
 CJK_FONT_QUERY="${STZY_CJK_FONT_QUERY:-Noto Sans CJK SC}"
+read -r -a EXTRA_SSH_OPTS <<< "${STZY_DEPLOY_SSH_OPTS:-}"
 
 if ! command -v rsync >/dev/null 2>&1; then
   echo "未找到 rsync。"
   exit 1
 fi
 
-SSH_CMD=(ssh -o StrictHostKeyChecking=accept-new)
-RSYNC_SSH="ssh -o StrictHostKeyChecking=accept-new"
+SSH_CMD=(ssh -p "${REMOTE_PORT}" -o StrictHostKeyChecking=accept-new "${EXTRA_SSH_OPTS[@]}")
+RSYNC_SSH="ssh -p ${REMOTE_PORT} -o StrictHostKeyChecking=accept-new ${STZY_DEPLOY_SSH_OPTS:-}"
 
 if command -v sshpass >/dev/null 2>&1 && [ -n "${SSHPASS:-}" ]; then
   SSH_CMD=(sshpass -e "${SSH_CMD[@]}")
