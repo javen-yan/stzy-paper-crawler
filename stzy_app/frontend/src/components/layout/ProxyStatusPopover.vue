@@ -240,11 +240,24 @@ onUnmounted(() => {
   .header-status-strip {
     flex: 0 0 auto;
     width: auto;
+    max-width: max-content;
     justify-content: flex-start;
   }
 
   .status-chip {
     flex: 0 0 auto;
+  }
+}
+
+@media (max-width: 760px) {
+  .status-chip {
+    max-width: 142px;
+    min-height: 30px;
+    padding: 0 9px;
+  }
+
+  .status-chip-wide {
+    max-width: 156px;
   }
 }
 </style>

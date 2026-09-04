@@ -1487,28 +1487,44 @@ small {
 
 @media (max-width: 1100px) {
   .app-header {
-    grid-template-columns: 1fr;
-    align-items: start;
-    gap: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
     padding: 12px 16px;
   }
 
   .header-brand {
+    width: 100%;
     min-width: 0;
   }
 
   .header-nav {
     width: 100%;
-    padding-bottom: 4px;
+    min-height: 44px;
+    padding-bottom: 2px;
+    flex-wrap: nowrap;
   }
 
   .header-tools {
     width: 100%;
+    min-height: 36px;
     justify-content: flex-start;
     flex-wrap: nowrap;
     overflow-x: auto;
+    overflow-y: hidden;
     overscroll-behavior-x: contain;
-    padding-bottom: 4px;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+  }
+
+  .header-nav::-webkit-scrollbar,
+  .header-tools::-webkit-scrollbar {
+    display: none;
+  }
+
+  .header-tools .el-button + .el-button {
+    margin-left: 0;
   }
 
   .header-tool-divider {
@@ -1521,8 +1537,26 @@ small {
 }
 
 @media (max-width: 760px) {
+  .app-header {
+    gap: 10px;
+    padding: 12px;
+  }
+
   .header-brand h1 {
     font-size: 16px;
+  }
+
+  .header-brand span {
+    font-size: 11px;
+  }
+
+  .header-nav-item {
+    min-height: 40px;
+    padding: 7px 10px;
+  }
+
+  .runtime-pill {
+    max-width: 180px;
   }
 
   .simple-pager {
