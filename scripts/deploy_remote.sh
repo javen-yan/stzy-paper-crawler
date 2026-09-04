@@ -8,6 +8,7 @@ REMOTE_DIR="${STZY_DEPLOY_DIR:-/vol1/1000/service/stzy-paper-crawler/app}"
 SERVICE_NAME="${STZY_DEPLOY_SERVICE:-stzy-crawler}"
 REMOTE_NODE_DIR="${STZY_REMOTE_NODE_DIR:-/root/.nvm/versions/node/v24.14.0/bin}"
 FRONTEND_BUILD_MODE="${STZY_FRONTEND_BUILD_MODE:-auto}"
+CJK_FONT_QUERY="${STZY_CJK_FONT_QUERY:-Noto Sans CJK SC}"
 
 if ! command -v rsync >/dev/null 2>&1; then
   echo "未找到 rsync。"
@@ -21,6 +22,20 @@ if command -v sshpass >/dev/null 2>&1 && [ -n "${SSHPASS:-}" ]; then
   SSH_CMD=(sshpass -e "${SSH_CMD[@]}")
   RSYNC_SSH="sshpass -e ${RSYNC_SSH}"
 fi
+
+check_remote_fonts() {
+  echo "==> 检查远端中文字体"
+  local font_check
+  font_check="$("${SSH_CMD[@]}" "${REMOTE_USER}@${REMOTE_HOST}" "if command -v fc-match >/dev/null 2>&1; then fc-match -f '%{family}' '${CJK_FONT_QUERY}' || true; else echo ''; fi")"
+  if [[ "${font_check}" == *"Noto Sans CJK"* || "${font_check}" == *"Noto Sans SC"* || "${font_check}" == *"Source Han Sans"* || "${font_check}" == *"WenQuanYi"* || "${font_check}" == *"Microsoft YaHei"* || "${font_check}" == *"PingFang"* || "${font_check}" == *"SimHei"* || "${font_check}" == *"SimSun"* ]]; then
+    echo "    已找到中文字体：${font_check}"
+    return
+  fi
+  echo "    未检测到可靠中文字体，SVG 转图片/PDF 可能出现方块字或排版偏移。"
+  echo "    Debian/Ubuntu 可执行：sudo apt-get update && sudo apt-get install -y fonts-noto-cjk fontconfig && sudo fc-cache -fv"
+}
+
+check_remote_fonts
 
 echo "==> 同步代码到 ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}"
 rsync -az --delete \

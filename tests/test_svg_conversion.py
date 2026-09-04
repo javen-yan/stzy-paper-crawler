@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -31,6 +32,28 @@ class SvgConversionTest(unittest.TestCase):
             )
 
             self.assertTrue(DocumentConverter.svg_needs_font_fallback(svg_path))
+
+    def test_svg_font_fallback_overrides_inline_subset_font(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            svg_path = Path(tmpdir) / "练习1.svg"
+            svg_path.write_text(
+                """
+                <svg xmlns="http://www.w3.org/2000/svg">
+                  <text style="font-family:'HLEOCO+MicrosoftYaHei';">宣城市</text>
+                </svg>
+                """,
+                encoding="utf-8",
+            )
+
+            with patch.object(DocumentConverter, "detect_svg_font_family", return_value="Noto Sans CJK SC"):
+                content = DocumentConverter.svg_with_font_fallback(svg_path)
+
+            self.assertIn("'Noto Sans CJK SC'", content)
+            self.assertIn("!important", content)
+
+    def test_svg_font_detection_returns_empty_without_fontconfig(self) -> None:
+        with patch("stzy_app.crawler.converters.shutil.which", return_value=None):
+            self.assertEqual(DocumentConverter.detect_svg_font_family(), "")
 
     def test_svg_conversion_uses_pymupdf_without_cairo_dependency(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

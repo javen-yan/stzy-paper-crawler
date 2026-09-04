@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Callable
 
@@ -17,6 +19,21 @@ SleepCallback = Callable[[float], None]
 
 class DocumentConverter:
     """Converts SVG/image/PDF documents to final PNG and PDF artifacts."""
+
+    SVG_FONT_FALLBACKS = [
+        "Noto Sans CJK SC",
+        "Noto Sans SC",
+        "Source Han Sans SC",
+        "WenQuanYi Micro Hei",
+        "Microsoft YaHei",
+        "PingFang SC",
+        "Hiragino Sans GB",
+        "SimHei",
+        "SimSun",
+        "Arial",
+        "Helvetica Neue",
+        "sans-serif",
+    ]
 
     def __init__(
         self,
@@ -107,7 +124,9 @@ class DocumentConverter:
                 if self.svg_needs_font_fallback(original):
                     progress = f" - {page_index}/{page_total}" if page_index and page_total else ""
                     prefix = f"{resource_id}{progress}，" if resource_id else ""
-                    self.on_log(f"使用内置转换器处理复杂 SVG：{prefix}{original.name}")
+                    font_family = self.detect_svg_font_family()
+                    font_text = font_family or "系统默认字体"
+                    self.on_log(f"使用内置转换器处理复杂 SVG：{prefix}{original.name}，字体回退 {font_text}")
                 run_conversion(
                     "svg_to_png",
                     original,
@@ -251,16 +270,59 @@ class DocumentConverter:
     @staticmethod
     def svg_with_font_fallback(svg_path: Path) -> str:
         content = svg_path.read_text(encoding="utf-8", errors="ignore")
+        font_family = DocumentConverter.detect_svg_font_family()
+        font_stack = DocumentConverter.svg_font_stack(font_family)
         fallback_css = (
             "<style>"
             "text,tspan{font-family:"
-            "Arial,'Helvetica Neue','PingFang SC','Hiragino Sans GB',"
-            "'Microsoft YaHei','Noto Sans CJK SC','SimHei','SimSun',sans-serif;}"
+            f"{font_stack} !important;"
+            "}"
             "</style>"
         )
         if "<svg" not in content:
             return content
         return re.sub(r"(<svg\b[^>]*>)", r"\1" + fallback_css, content, count=1)
+
+    @classmethod
+    def svg_font_stack(cls, preferred: str | None = None) -> str:
+        families = []
+        if preferred:
+            families.append(preferred)
+        families.extend(cls.SVG_FONT_FALLBACKS)
+        unique = []
+        for family in families:
+            if family not in unique:
+                unique.append(family)
+        return ",".join(cls.css_font_family(family) for family in unique)
+
+    @staticmethod
+    def css_font_family(family: str) -> str:
+        if family == "sans-serif":
+            return family
+        escaped = family.replace("\\", "\\\\").replace("'", "\\'")
+        return f"'{escaped}'"
+
+    @classmethod
+    def detect_svg_font_family(cls) -> str:
+        if not shutil.which("fc-match"):
+            return ""
+        for family in cls.SVG_FONT_FALLBACKS:
+            if family == "sans-serif":
+                continue
+            try:
+                result = subprocess.run(
+                    ["fc-match", "-f", "%{family}", family],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            matched = (result.stdout or "").split(",", 1)[0].strip()
+            if matched and matched.lower() == family.lower():
+                return family
+        return ""
 
     @staticmethod
     def convert_image_to_png(image_path: Path, png_path: Path) -> None:
