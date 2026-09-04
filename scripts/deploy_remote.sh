@@ -10,6 +10,7 @@ SERVICE_NAME="${STZY_DEPLOY_SERVICE:-stzy-crawler}"
 REMOTE_NODE_DIR="${STZY_REMOTE_NODE_DIR:-/root/.nvm/versions/node/v24.14.0/bin}"
 FRONTEND_BUILD_MODE="${STZY_FRONTEND_BUILD_MODE:-auto}"
 CJK_FONT_QUERY="${STZY_CJK_FONT_QUERY:-Noto Sans CJK SC}"
+SKIP_NPM_INSTALL="${STZY_SKIP_NPM_INSTALL:-0}"
 read -r -a EXTRA_SSH_OPTS <<< "${STZY_DEPLOY_SSH_OPTS:-}"
 
 if ! command -v rsync >/dev/null 2>&1; then
@@ -56,7 +57,9 @@ rsync -az --delete \
 build_frontend_locally() {
   echo "==> 本地构建前端并同步 dist"
   cd "${ROOT_DIR}/stzy_app/frontend"
-  if [ -f package-lock.json ]; then
+  if [ "${SKIP_NPM_INSTALL}" = "1" ]; then
+    echo "    跳过 npm install/npm ci，复用当前 node_modules"
+  elif [ -f package-lock.json ]; then
     npm ci
   else
     npm install
@@ -71,10 +74,10 @@ if [ "${FRONTEND_BUILD_MODE}" = "local-dist" ]; then
   build_frontend_locally
 elif "${SSH_CMD[@]}" "${REMOTE_USER}@${REMOTE_HOST}" "command -v npm >/dev/null 2>&1"; then
   echo "==> 远端构建前端"
-  "${SSH_CMD[@]}" "${REMOTE_USER}@${REMOTE_HOST}" "cd '${REMOTE_DIR}/stzy_app/frontend' && if [ -f package-lock.json ]; then npm ci; else npm install; fi && npm run build"
+  "${SSH_CMD[@]}" "${REMOTE_USER}@${REMOTE_HOST}" "cd '${REMOTE_DIR}/stzy_app/frontend' && if [ '${SKIP_NPM_INSTALL}' = '1' ]; then echo '    跳过 npm install/npm ci，复用当前 node_modules'; elif [ -f package-lock.json ]; then npm ci; else npm install; fi && npm run build"
 elif [ -n "${SSHPASS:-}" ] && printf '%s\n' "${SSHPASS}" | "${SSH_CMD[@]}" "${REMOTE_USER}@${REMOTE_HOST}" "sudo -S test -x '${REMOTE_NODE_DIR}/npm'"; then
   echo "==> 使用 sudo Node 路径远端构建前端"
-  printf '%s\n' "${SSHPASS}" | "${SSH_CMD[@]}" "${REMOTE_USER}@${REMOTE_HOST}" "cd '${REMOTE_DIR}/stzy_app/frontend' && sudo -S env PATH='${REMOTE_NODE_DIR}':\$PATH sh -c 'if [ -f package-lock.json ]; then npm ci; else npm install; fi && npm run build'"
+  printf '%s\n' "${SSHPASS}" | "${SSH_CMD[@]}" "${REMOTE_USER}@${REMOTE_HOST}" "cd '${REMOTE_DIR}/stzy_app/frontend' && sudo -S env PATH='${REMOTE_NODE_DIR}':\$PATH STZY_SKIP_NPM_INSTALL='${SKIP_NPM_INSTALL}' sh -c 'if [ \"\$STZY_SKIP_NPM_INSTALL\" = \"1\" ]; then echo \"    跳过 npm install/npm ci，复用当前 node_modules\"; elif [ -f package-lock.json ]; then npm ci; else npm install; fi && npm run build'"
 else
   echo "==> 远端未找到 npm，改用本地 dist"
   build_frontend_locally
