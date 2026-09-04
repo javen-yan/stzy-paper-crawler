@@ -5,6 +5,7 @@ import { ElMessageBox } from 'element-plus'
 import { Archive, ArrowLeft, CirclePause, CirclePlay, Download, RotateCcw, XCircle } from 'lucide-vue-next'
 import { openLocalPath } from '../api/local'
 import { fetchCatalogs } from '../api/catalogs'
+import { fetchTaskResources } from '../api/tasks'
 import FileTable from '../components/files/FileTable.vue'
 import ExportZipPanel from '../components/files/ExportZipPanel.vue'
 import EmptyState from '../components/common/EmptyState.vue'
@@ -22,7 +23,7 @@ import { useToast } from '../composables/useToast'
 import { resolveTaskFilters } from '../utils/filters'
 import { taskDisplayName } from '../utils/taskDisplay'
 import type { CatalogState } from '../types/catalogs'
-import type { TaskDetailTabKey, TaskIssue, TaskOverviewStats } from '../types/tasks'
+import type { TaskDetailTabKey, TaskIssue, TaskOverviewStats, TaskResource } from '../types/tasks'
 
 const props = defineProps<{ id: string }>()
 const router = useRouter()
@@ -45,12 +46,15 @@ const resourceStatusCounts = ref<Record<string, number>>({})
 const resourceStatusFilter = ref('')
 const fileManagerKey = ref(0)
 const resourceRefreshAt = ref(0)
+const issueResources = ref<TaskResource[]>([])
+const issueRefreshAt = ref(0)
 const visibleResources = computed(() => resources.value.slice(0, resourcePageSize.value))
 
 const polling = usePolling(async () => {
   await refreshSelectedTask()
   if (activeTab.value === 'logs') await refreshLogs()
   if (shouldRefreshResources()) await refreshResourcePage()
+  if (shouldRefreshIssues()) await refreshIssueResources()
   if (currentTaskExport.value && !['completed', 'failed'].includes(currentTaskExport.value.status)) await refreshExport()
 }, 2000, { hiddenIntervalMs: 15000 })
 
@@ -114,15 +118,13 @@ const issues = computed<TaskIssue[]>(() => {
   if (task.status === 'cancelled') {
     result.push({ type: 'task', title: '任务已取消', detail: '任务已停止调度，未完成的范围会保留。', recovery: '点击恢复，从检查点继续下载未完成部分。' })
   }
-  for (const resource of visibleResources.value) {
-    if (resource.error) {
-      result.push({
-        type: 'resource',
-        title: String(resource.resource_name || resource.name || resource.resource_id || '资源失败'),
-        detail: String(resource.error),
-        recovery: '系统恢复任务时会继续扫描未完成范围；也可以重新提交任务。',
-      })
-    }
+  for (const resource of issueResources.value) {
+    result.push({
+      type: 'resource',
+      title: String(resource.resource_name || resource.name || resource.resource_id || '资源异常'),
+      detail: issueResourceDetail(resource),
+      recovery: '点击恢复任务后，系统只会重试未完成资源，不会重新扫描已完成资源。',
+    })
   }
   if (!result.length) {
     result.push({ type: 'task', title: '暂无需处理问题', detail: '当前任务没有记录到阻塞性错误。', recovery: '可以继续等待任务完成，或在文件结果中查看已发布文件。' })
@@ -160,9 +162,41 @@ async function refreshResourcePage() {
   resourceRefreshAt.value = Date.now()
 }
 
+async function refreshIssueResources() {
+  const statuses = ['failed', 'partial', 'downloading', 'pending']
+  const payloads = await Promise.all(
+    statuses.map((status) => fetchTaskResources(props.id, 20, 0, status)),
+  )
+  const seen = new Set<string>()
+  issueResources.value = payloads
+    .flatMap((payload) => payload.items)
+    .filter((resource) => {
+      const key = String(resource.resource_id || resource.id || resource.resource_name || '')
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .slice(0, 80)
+  issueRefreshAt.value = Date.now()
+}
+
 function shouldRefreshResources() {
-  if (!['resources', 'issues'].includes(activeTab.value)) return false
+  if (activeTab.value !== 'resources') return false
   return Date.now() - resourceRefreshAt.value > (isTaskActive.value ? 3000 : 15000)
+}
+
+function shouldRefreshIssues() {
+  if (activeTab.value !== 'issues') return false
+  return Date.now() - issueRefreshAt.value > (isTaskActive.value ? 3000 : 15000)
+}
+
+function issueResourceDetail(resource: TaskResource) {
+  if (resource.error) return String(resource.error)
+  const status = String(resource.status || '')
+  if (status === 'partial') return '资源只完成了部分文件，恢复任务时会补下载。'
+  if (status === 'downloading') return '资源停留在下载中状态，可能是任务中断留下的未完成记录。'
+  if (status === 'pending') return '资源尚未开始下载，恢复任务时会继续处理。'
+  return '资源未完成。'
 }
 
 function refreshFileManager() {
@@ -276,7 +310,8 @@ watch(
   () => activeTab.value,
   async (tab) => {
     if (tab === 'logs') await refreshLogs()
-    if (tab === 'resources' || tab === 'issues') await refreshResourcePage()
+    if (tab === 'resources') await refreshResourcePage()
+    if (tab === 'issues') await refreshIssueResources()
   },
 )
 </script>
