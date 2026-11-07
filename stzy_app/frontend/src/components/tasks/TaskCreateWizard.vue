@@ -46,7 +46,7 @@ const form = reactive<TaskCreateForm>({
   title: '',
   mode: 'estimate',
   studyPhase: '300',
-  fileType: 'PDF',
+  fileType: '',
   downloadPaid: false,
   maxPagesPerCombo: undefined,
   subjectLabels: {},
@@ -65,6 +65,7 @@ const abnormalAccounts = computed(() => props.accounts.filter((account) => !acco
 const canSubmit = computed(() => usableAccounts.value.length > 0)
 const selectedFilterSummary = computed(() => {
   const parts = [
+    form.fileType || '全部文件类型',
     optionLabel(advancedSubjectSelectOptions.value, advanced.subject),
     optionLabel(optionList('provinceCode', '地区不限', advanced.studyPhase), advanced.province),
     optionLabel(optionList('yearCode', '年份不限', advanced.studyPhase), advanced.year),
@@ -249,6 +250,7 @@ function resetEstimateResult() {
 
 function currentFilterSignature() {
   return JSON.stringify({
+    fileType: form.fileType,
     studyPhase: advanced.studyPhase,
     subject: advanced.subject,
     scene: advanced.scene,
@@ -362,6 +364,14 @@ async function loadCatalogs(force = false) {
               <span class="collapse-title">高级筛选：学段 / 学科 / 场景 / 年份 / 等级 / 地区 / 年级 / 学期</span>
             </template>
             <div class="filter-list">
+              <div class="filter-row">
+                <span class="filter-row-label">文件类型</span>
+                <el-radio-group v-model="form.fileType" class="filter-toggle">
+                  <el-radio-button label="">不限（含 Word / ZIP）</el-radio-button>
+                  <el-radio-button label="PDF">PDF</el-radio-button>
+                  <el-radio-button label="IMAGE">图片</el-radio-button>
+                </el-radio-group>
+              </div>
               <div class="filter-row">
                 <span class="filter-row-label">学段</span>
                 <el-radio-group v-model="advanced.studyPhase" class="filter-toggle" @change="changeAdvancedPhase">

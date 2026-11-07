@@ -37,6 +37,7 @@ class AppSettings(BaseSettings):
     preview_max_pages: int = 300
     preview_max_pixels: int = 24_000_000
     preview_timeout_seconds: int = 45
+    document_timeout_seconds: int = 180
     export_ttl_hours: int = 24
     disk_low_watermark_mb: int = 1024
     task_scope: str = ""
@@ -46,7 +47,7 @@ class AppSettings(BaseSettings):
     study_phase_code: str = "200"
     subject_code: str = ""
     subject_name: str = "不限"
-    file_type: str = "PDF"
+    file_type: str = ""
     max_pages_per_combo: Optional[int] = None
 
     list_delay_seconds: float = 0.8

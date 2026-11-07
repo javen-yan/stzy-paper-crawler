@@ -164,6 +164,88 @@ class DownloadServiceTest(unittest.TestCase):
         self.assertEqual(result.status, ResourceStatus.completed)
         self.assertEqual(service.account_scheduler.download_calls, 1)
 
+    def test_word_and_zip_convert_original_and_reuse_download(self) -> None:
+        from unittest.mock import Mock, patch
+
+        for suffix in ("doc", ".DOCX", ".zip"):
+            with self.subTest(suffix=suffix):
+                converter = Mock()
+                converter.convert_source_and_publish.return_value = (7, 7)
+                service = self._service(pictures=[], converter=converter,
+                                        scheduler=FakeScheduler(url="https://cdn.test/original"))
+                record = ResourceRecord(resource_id=suffix, resource_name=suffix, page_count=7,
+                                        raw={"resourceSuffix": suffix})
+                with patch("stzy_app.crawler.source_documents.source_kind", return_value='.' + suffix.lower().lstrip('.')):
+                    result = service.handle_resource(record)
+                    service.handle_resource(record)
+                self.assertEqual(result.status, ResourceStatus.completed)
+                self.assertEqual(result.source, "original_pdf")
+                self.assertEqual(result.saved_pages, 7)
+                self.assertEqual(service.api.picture_calls, 0)
+                self.assertEqual(service.account_scheduler.download_calls, 1)
+                self.assertEqual(len(list(Path(result.local_dir).glob('源文件.*'))), 1)
+
+    def test_font_failure_is_partial_and_preserves_original(self) -> None:
+        from unittest.mock import Mock, patch
+
+        converter = Mock()
+        converter.convert_source_and_publish.side_effect = RuntimeError('缺少原文字体：宋体')
+        service = self._service(pictures=[], converter=converter,
+                                scheduler=FakeScheduler(url="https://cdn.test/original"))
+        record = ResourceRecord(resource_id='word', resource_name='Word', page_count=11,
+                                raw={'resourceSuffix': '.docx'})
+        with patch('stzy_app.crawler.source_documents.source_kind', return_value='.docx'):
+            result = service.handle_resource(record)
+        self.assertEqual(result.status, ResourceStatus.partial)
+        self.assertIn('缺少原文字体', result.error)
+        self.assertEqual(result.saved_pages, 0)
+        self.assertTrue((Path(result.local_dir) / '源文件.docx').exists())
+
+    def test_zip_uses_sum_of_child_pages_instead_of_top_level_page_count(self) -> None:
+        from unittest.mock import Mock, patch
+
+        converter = Mock()
+        converter.convert_source_and_publish.return_value = (13, 13)
+        service = self._service(pictures=[], converter=converter,
+                                scheduler=FakeScheduler(url='https://cdn.test/original'))
+        files = [{'fileName': name, 'totalPage': count} for name, count in [('paper.pdf',7),('card.pdf',2),('answers.pdf',4)]]
+        service.api.resource_detail = Mock(return_value={'fileList':files})
+        record = ResourceRecord(resource_id='zip',resource_name='Zip',page_count=7,raw={'resourceSuffix':'.zip'})
+        with patch('stzy_app.crawler.source_documents.source_kind', return_value='.zip'):
+            result = service.handle_resource(record)
+        self.assertEqual(result.saved_pages,13)
+        self.assertEqual(converter.convert_source_and_publish.call_args.kwargs, {'expected_pages':13,'files':files})
+
+    def test_invalid_original_is_not_marked_completed(self) -> None:
+        service = self._service(pictures=[], converter=FakeConverter(),
+                                scheduler=FakeScheduler(url="https://cdn.test/file.docx"))
+        record = ResourceRecord(resource_id="word", resource_name="Word", page_count=11,
+                                raw={"resourceSuffix": ".docx"})
+        with self.assertRaises(RuntimeError):
+            service.handle_resource(record)
+        self.assertFalse((Path(record.local_dir) / "源文件.docx").exists())
+
+    def test_word_permission_failure_returns_paid_unavailable(self) -> None:
+        service = self._service(pictures=[], converter=FakeConverter(),
+                                scheduler=FakeScheduler(status=ResourceStatus.paid_unavailable))
+        record = ResourceRecord(resource_id="word", resource_name="Word", page_count=11,
+                                raw={"resourceSuffix": ".docx"})
+        result = service.handle_resource(record)
+        self.assertEqual(result.status, ResourceStatus.paid_unavailable)
+        self.assertEqual(service.api.picture_calls, 0)
+
+    def test_no_preview_unknown_page_count_downloads_original(self) -> None:
+        service = self._service(pictures=[], converter=FakeConverter(pdf_count=2),
+                                scheduler=FakeScheduler(url="https://cdn.test/file.pdf"))
+        result = service.handle_resource(ResourceRecord(resource_id="r1", resource_name="paper"))
+        self.assertEqual(result.saved_pages, 2)
+        self.assertEqual(service.account_scheduler.download_calls, 1)
+
+    def test_zero_pages_not_completed(self) -> None:
+        result = DownloadService._result_from_count(saved_count=0, expected_pages=0,
+                    source="preview", local_dir="", images_added=0)
+        self.assertEqual(result.status, ResourceStatus.partial)
+
     def _service(
         self,
         *,
@@ -183,6 +265,9 @@ class FakeApi:
     def __init__(self, pictures: list[str]) -> None:
         self.pictures = pictures
         self.picture_calls = 0
+
+    def resource_detail(self, resource_id: str) -> dict:
+        return {}
 
     def resource_pictures(self, resource_id: str) -> list[str]:
         self.picture_calls += 1

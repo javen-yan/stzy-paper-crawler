@@ -61,7 +61,7 @@ class CrawlFilters:
     provinces: list[str] = field(default_factory=list)
     grades: list[str] = field(default_factory=list)
     terms: list[str] = field(default_factory=list)
-    file_type: str = "PDF"
+    file_type: str = ""
     max_pages_per_combo: int | None = None
     download_paid: bool = False
 

@@ -40,6 +40,10 @@ def _pool() -> ProcessPoolExecutor:
 def _dispatch(method: str, *args: Any) -> Any:
     from stzy_app.crawler.converters import DocumentConverter
 
+    if method == "source_to_pdf":
+        from stzy_app.crawler.source_documents import source_to_pdf
+
+        return source_to_pdf(Path(args[0]), Path(args[1]), float(args[2]), int(args[3]), args[4])
     if method == "pdf_to_pngs":
         return DocumentConverter.convert_pdf_to_pngs_with_pymupdf(Path(args[0]), Path(args[1]))
     if method == "svg_to_png":

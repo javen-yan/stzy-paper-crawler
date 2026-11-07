@@ -109,6 +109,36 @@ class DocumentConverter:
         artifacts.cleanup_transient_artifacts()
         return converted, max(0, converted - existing_count)
 
+    def convert_source_and_publish(
+        self, original: Path, directory: Path, *, expected_pages: int = 0,
+        files: list[dict] | None = None,
+    ) -> tuple[int, int]:
+        import json
+        import tempfile
+
+        existing = self.saved_picture_count_from_dir(directory)
+        artifacts = ResourceArtifacts(directory)
+        # New pages are staged together so a failed conversion cannot mix old and new pages.
+        with tempfile.TemporaryDirectory(prefix=".convert-", dir=directory) as temporary:
+            staging = Path(temporary)
+            pdf = staging / "converted.pdf"
+            report = run_conversion(
+                "source_to_pdf", original, pdf, self.settings.document_timeout_seconds,
+                expected_pages, files or [], timeout=self.settings.document_timeout_seconds + 5,
+            )
+            count = self.convert_pdf_to_pngs(pdf, staging)
+            if count != report["pages"] or not count:
+                raise RuntimeError("PDF 图片页数校验失败，未发布")
+            report_path = staging / "conversion-report.json"
+            report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            artifacts.publish_pdf(pdf)
+            for page in directory.glob("练习*.png"):
+                page.unlink()
+            for page in staging.glob("练习*.png"):
+                page.replace(directory / page.name)
+            report_path.replace(directory / report_path.name)
+        return count, max(0, count - existing)
+
     def convert_original_to_png(
         self,
         original: Path,

@@ -13,7 +13,7 @@ const toast = useToast()
 
 const form = reactive({
   output_dir: '',
-  file_type: 'PDF',
+  file_type: '',
   max_pages_per_combo: undefined as number | undefined,
   list_delay_seconds: 0.8,
   image_delay_seconds: 0.3,
@@ -28,7 +28,7 @@ watch(
   () => props.settings,
   (settings) => {
     form.output_dir = String(settings.output_dir || '')
-    form.file_type = String(settings.file_type || 'PDF')
+    form.file_type = String(settings.file_type ?? '')
     form.max_pages_per_combo = settings.max_pages_per_combo == null ? undefined : Number(settings.max_pages_per_combo)
     form.list_delay_seconds = Number(settings.list_delay_seconds || 0.8)
     form.image_delay_seconds = Number(settings.image_delay_seconds || 0.3)
@@ -81,7 +81,7 @@ async function pickDirectory() {
           <el-select v-model="form.file_type" class="full-width">
             <el-option label="PDF" value="PDF" />
             <el-option label="图片" value="IMAGE" />
-            <el-option label="不限" value="" />
+            <el-option label="不限（含 Word / ZIP）" value="" />
           </el-select>
         </el-form-item>
         <el-form-item label="每个组合最多页数">
