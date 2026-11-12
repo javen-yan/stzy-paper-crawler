@@ -139,10 +139,35 @@ class ConversionFidelityTest(unittest.TestCase):
         from unittest.mock import patch
         from types import SimpleNamespace
         from stzy_app.crawler.source_documents import check_word_fonts
-        with patch('stzy_app.crawler.source_documents.shutil.which',return_value='/bin/fc-list'), patch('stzy_app.crawler.source_documents.subprocess.run',return_value=SimpleNamespace(stdout='Songti SC\n')):
-            with self.assertRaisesRegex(RuntimeError,'宋体'):check_word_fonts({'宋体'},{})
-        with patch('stzy_app.crawler.source_documents.shutil.which',return_value='/bin/fc-list'), patch('stzy_app.crawler.source_documents.subprocess.run',return_value=SimpleNamespace(stdout='SimSun\n')):
-            check_word_fonts({'宋体'},{})
+        available = SimpleNamespace(stdout='Songti SC\n')
+        fc = patch('stzy_app.crawler.source_documents.shutil.which', return_value='/bin/fc-list')
+        with fc, patch('stzy_app.crawler.source_documents.subprocess.run', return_value=available), \
+                patch.dict('os.environ', {'STZY_WORD_FONT_POLICY': 'strict'}):
+            with self.assertRaisesRegex(RuntimeError, '宋体'):
+                check_word_fonts({'宋体'}, {})
+        with fc, patch('stzy_app.crawler.source_documents.subprocess.run', return_value=available), \
+                patch.dict('os.environ', {'STZY_WORD_FONT_POLICY': 'substitute'}):
+            plan = check_word_fonts({'宋体'}, {})
+            self.assertEqual(plan['exact'], [])
+            self.assertEqual(plan['substituted'], {'宋体': 'Songti SC'})
+            self.assertTrue(plan['visual_review'])
+        with fc, patch('stzy_app.crawler.source_documents.subprocess.run', return_value=SimpleNamespace(stdout='SimSun\n')), \
+                patch.dict('os.environ', {'STZY_WORD_FONT_POLICY': 'strict'}):
+            plan = check_word_fonts({'宋体'}, {})
+            self.assertEqual(plan['exact'], ['宋体'])
+            self.assertFalse(plan['visual_review'])
+
+    def test_metric_compatible_latin_substitute_is_not_flagged_for_review(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from stzy_app.crawler.source_documents import check_word_fonts
+        with patch('stzy_app.crawler.source_documents.shutil.which', return_value='/bin/fc-list'), \
+                patch('stzy_app.crawler.source_documents.subprocess.run', return_value=SimpleNamespace(stdout='Carlito,Tinos\n')), \
+                patch.dict('os.environ', {'STZY_WORD_FONT_POLICY': 'substitute'}):
+            plan = check_word_fonts({'Calibri', 'Times New Roman'}, {})
+        self.assertEqual(plan['substituted'], {'Calibri': 'Carlito', 'Times New Roman': 'Tinos'})
+        self.assertEqual(plan['missing'], [])
+        self.assertFalse(plan['visual_review'])
 
     def docx(self):
         path=self.root/'source.docx'
@@ -151,28 +176,49 @@ class ConversionFidelityTest(unittest.TestCase):
             z.writestr('word/document.xml','<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:rFonts w:ascii="TestFont"/></w:rPr><w:t>Expected text</w:t></w:r></w:p></w:body></w:document>')
         return path
 
-    def test_word_page_and_text_checks_before_publication(self):
+    def convert_with(self, pages: int, text: str, expected: int, plan: dict):
         import pymupdf
         from types import SimpleNamespace
         from unittest.mock import patch
         from stzy_app.crawler.source_documents import word_to_pdf
-        source=self.docx()
-        for pages,text,expected,error in [(2,'Expected text',1,'分页'),(1,'Missing',1,'文字覆盖'),(1,'Expected text',1,None)]:
-            target=self.root/'converted.pdf'
-            target.unlink(missing_ok=True)
-            def run(command, **kwargs):
-                folder=Path(command[command.index('--outdir')+1])
-                with pymupdf.open() as document:
-                    for _ in range(pages):document.new_page().insert_text((30,30),text)
-                    document.save(folder/'source.pdf')
-                return SimpleNamespace(returncode=0)
-            with patch('stzy_app.crawler.source_documents.shutil.which',return_value='/bin/soffice'), patch('stzy_app.crawler.source_documents.check_word_fonts'), patch('stzy_app.crawler.source_documents.subprocess.run',side_effect=run):
-                if error:
-                    with self.assertRaisesRegex(RuntimeError,error):word_to_pdf(source,target,30,expected)
-                    self.assertFalse(target.exists())
-                else:
-                    word_to_pdf(source,target,30,expected)
-                    self.assertTrue(target.exists())
+
+        source = self.docx()
+        target = self.root / 'converted.pdf'
+        target.unlink(missing_ok=True)
+
+        def run(command, **kwargs):
+            folder = Path(command[command.index('--outdir') + 1])
+            with pymupdf.open() as document:
+                for _ in range(pages):
+                    document.new_page().insert_text((30, 30), text)
+                document.save(folder / 'source.pdf')
+            return SimpleNamespace(returncode=0)
+
+        with patch('stzy_app.crawler.source_documents.shutil.which', return_value='/bin/soffice'), \
+                patch('stzy_app.crawler.source_documents.check_word_fonts', return_value=plan), \
+                patch('stzy_app.crawler.source_documents.subprocess.run', side_effect=run):
+            return word_to_pdf(source, target, 30, expected), target
+
+    def test_word_page_and_text_checks_before_publication(self):
+        original = {'exact': ['TestFont'], 'substituted': {}, 'missing': [], 'visual_review': False}
+        for pages, text, expected, error in [(2, 'Expected text', 1, '页数与站点预览不一致'), (1, 'Missing', 1, '文字覆盖'),
+                                             (1, 'Expected text', 1, None)]:
+            if error:
+                with self.assertRaisesRegex(RuntimeError, error):
+                    self.convert_with(pages, text, expected, dict(original))
+                self.assertFalse((self.root / 'converted.pdf').exists())
+            else:
+                plan, target = self.convert_with(pages, text, expected, dict(original))
+                self.assertTrue(target.exists())
+                self.assertEqual(plan['page_check']['tolerated'], False)
+
+    def test_substituted_fonts_publish_with_actual_page_count(self):
+        plan = {'exact': [], 'substituted': {'宋体': 'Noto Serif CJK SC'}, 'missing': [], 'visual_review': True}
+        report, target = self.convert_with(2, 'Expected text', 1, dict(plan))
+        self.assertTrue(target.exists())
+        self.assertEqual(report['page_check']['tolerated'], True)
+        self.assertEqual(report['page_check']['actual'], 2)
+        self.assertIn('按实际页数发布', report['page_check']['note'])
 
     def test_failed_conversion_does_not_replace_existing_artifacts(self):
         from unittest.mock import patch

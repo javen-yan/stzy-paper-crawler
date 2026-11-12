@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { Connection, Cpu, Files, Operation } from '@element-plus/icons-vue'
+import { Connection, Cpu, Document, Files, Operation } from '@element-plus/icons-vue'
 import BasicSettingsForm from '../components/settings/BasicSettingsForm.vue'
 import ConcurrencySettingsForm from '../components/settings/ConcurrencySettingsForm.vue'
+import FontSettingsForm from '../components/settings/FontSettingsForm.vue'
 import PreviewSettingsForm from '../components/settings/PreviewSettingsForm.vue'
 import ProxySettingsForm from '../components/settings/ProxySettingsForm.vue'
 import { fetchSettings, updateSettings } from '../api/settings'
@@ -97,6 +98,13 @@ onMounted(refresh)
               <span class="tab-label"><el-icon><Files /></el-icon>预览与转换</span>
             </template>
             <PreviewSettingsForm :settings="settings" :saving="saving" @save="save" />
+          </el-tab-pane>
+
+          <el-tab-pane name="fonts">
+            <template #label>
+              <span class="tab-label"><el-icon><Document /></el-icon>Word 字体</span>
+            </template>
+            <FontSettingsForm />
           </el-tab-pane>
         </el-tabs>
       </el-card>

@@ -18,3 +18,5 @@ start-windows.ps1
 build/
 dist/
 node_modules/
+fonts/
+

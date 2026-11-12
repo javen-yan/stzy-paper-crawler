@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from stzy_app.crawler import fonts as font_support
 from stzy_app.crawler.conversion_pool import configure_conversion_pool, shutdown_conversion_pool
 from stzy_app.auth import COOKIE_TOKEN_CONSOLE_SCRIPT
 from stzy_app.domain.context import AppContext
@@ -70,6 +71,10 @@ class EnabledRequest(BaseModel):
 class ExportRequest(BaseModel):
     task_id: str
     file_paths: list[str] = Field(default_factory=list)
+
+
+class FontCheckRequest(BaseModel):
+    fonts: list[str] = Field(default_factory=list)
 
 
 def create_app(context: AppContext) -> FastAPI:
@@ -240,6 +245,20 @@ def create_app(context: AppContext) -> FastAPI:
     @app.post("/api/v1/proxy/bind-local-ip")
     def proxy_bind_local_ip() -> dict[str, Any]:
         return bind_local_ip(context.settings, context.store)
+
+    @app.get("/api/v1/fonts/status")
+    def font_status() -> dict[str, Any]:
+        return font_support.status()
+
+    @app.post("/api/v1/fonts/check")
+    def font_check(payload: FontCheckRequest | None = None) -> dict[str, Any]:
+        declared = {name.strip() for name in (payload.fonts if payload else []) if name.strip()}
+        return font_support.status(declared or None)
+
+    @app.post("/api/v1/fonts/repair")
+    def font_repair(payload: FontCheckRequest | None = None) -> dict[str, Any]:
+        declared = {name for name in (payload.fonts if payload else []) if name.strip()}
+        return font_support.repair(declared or None)
 
     @app.get("/api/v1/tasks")
     def list_tasks(archived: bool = False, limit: int = 50, offset: int = 0) -> dict[str, Any]:

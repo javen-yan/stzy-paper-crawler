@@ -10,11 +10,13 @@ import subprocess
 import tempfile
 import time
 import xml.etree.ElementTree as ET
-from xml.sax.saxutils import escape
 from pathlib import PurePosixPath
 
 import zipfile
 from pathlib import Path
+
+from stzy_app.crawler import fonts as font_support
+from stzy_app.crawler.fonts import FONT_ALIASES, font_key  # re-exported for older callers
 
 SUPPORTED = {'.pdf', '.doc', '.docx', '.zip', '.rar', '.7z', '.png', '.jpg', '.jpeg', '.webp', '.svg'}
 
@@ -42,20 +44,8 @@ def source_kind(path: Path) -> str:
 
 
 WORD_NS = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
-FONT_ALIASES = [
-    {'simsun', '宋体'}, {'kaiti', '楷体'}, {'simhei', '黑体'},
-    {'microsoft yahei ui', '微软雅黑 ui'}, {'microsoft yahei', '微软雅黑'},
-]
 MAX_MEMBERS = 500
 MAX_EXPANDED_BYTES = 512 * 1024 * 1024
-
-
-def font_key(name: str) -> str:
-    value = name.strip().lstrip('@').casefold()
-    for group in FONT_ALIASES:
-        if value in group:
-            return sorted(group)[0]
-    return value
 
 
 def docx_content(path: Path) -> tuple[set[str], str]:
@@ -85,36 +75,48 @@ def docx_content(path: Path) -> tuple[set[str], str]:
     return fonts, ''.join(text)
 
 
-def office_environment(work: Path) -> dict[str, str]:
-    environment = os.environ.copy()
-    font_dir = environment.get('STZY_WORD_FONT_DIR')
-    if font_dir:
-        directory = Path(font_dir).expanduser().resolve()
-        if not directory.is_dir():
-            raise RuntimeError('STZY_WORD_FONT_DIR 不是有效字体目录')
-        config = work / 'fonts.conf'
-        system = next((p for p in ('/etc/fonts/fonts.conf', '/opt/homebrew/etc/fonts/fonts.conf') if Path(p).exists()), '')
-        include = f'<include ignore_missing="yes">{escape(system)}</include>' if system else ''
-        config.write_text(f'<?xml version="1.0"?><fontconfig>{include}<dir>{escape(str(directory))}</dir>'
-                          f'<cachedir>{escape(str(work / "font-cache"))}</cachedir></fontconfig>', encoding='utf-8')
-        environment['FONTCONFIG_FILE'] = str(config)
-        environment['SAL_FONTPATH'] = str(directory)
-    return environment
-
-
-def check_word_fonts(fonts: set[str], environment: dict[str, str]) -> None:
+def available_fonts(environment: dict[str, str]) -> set[str]:
     executable = shutil.which('fc-list')
     if not executable:
         raise RuntimeError('Word 原样转换需要 fontconfig（fc-list）检查字体，原件已保留')
     result = subprocess.run([executable, '--format=%{family}\n'], env=environment,
-                            capture_output=True, text=True, check=True, timeout=15)
-    available = {font_key(name) for line in result.stdout.splitlines() for name in line.split(',')}
-    missing = sorted(name for name in fonts if font_key(name) not in available)
-    if missing:
-        raise RuntimeError('缺少原文字体：' + '、'.join(missing) + '；请安装有授权的字体或设置 STZY_WORD_FONT_DIR，原件已保留')
+                            capture_output=True, text=True, check=True, timeout=30)
+    return {font_key(name) for line in result.stdout.splitlines() for name in line.split(',') if name.strip()}
 
 
-def word_to_pdf(source: Path, target: Path, timeout: float, expected_pages: int = 0) -> None:
+def office_environment(work: Path, aliases: dict[str, str] | None = None) -> dict[str, str]:
+    """Isolated fontconfig: system fonts, licensed dir, our install dir."""
+    return font_support.font_environment(work, aliases)
+
+
+def check_word_fonts(fonts: set[str], environment: dict[str, str]) -> dict:
+    """Resolve declared fonts, downloading open substitutes when needed.
+
+    Returns the resolution plan. Raises only when a font is neither installed nor
+    replaceable; a substitution is reported so the conversion report can say so.
+    """
+    executable = shutil.which('fc-list')
+    if not executable:
+        raise RuntimeError('Word 原样转换需要 fontconfig（fc-list）检查字体，原件已保留')
+    plan = font_support.ensure(fonts, lambda: available_fonts(environment))
+    if plan['missing']:
+        raise RuntimeError('缺少原文字体：' + '、'.join(plan['missing'])
+                           + '；请安装有授权的字体或设置 STZY_WORD_FONT_DIR，原件已保留')
+    return plan
+
+
+def page_check(expected: int, actual: int, tolerant: bool, label: str = '') -> dict:
+    """Site page count is an oracle only while the layout uses the original fonts."""
+    if not expected or actual == expected:
+        return {'expected': expected, 'actual': actual, 'tolerated': False, 'note': ''}
+    note = f'{label}页数与站点预览不一致：{actual}/{expected}'
+    if not tolerant:
+        raise RuntimeError(note + '，需核对字体和排版；未发布 PDF')
+    return {'expected': expected, 'actual': actual, 'tolerated': True,
+            'note': note + '；使用了替代字体，按实际页数发布'}
+
+
+def word_to_pdf(source: Path, target: Path, timeout: float, expected_pages: int = 0) -> dict:
     import pymupdf
 
     executable = os.environ.get('STZY_SOFFICE_PATH') or shutil.which('soffice') or shutil.which('libreoffice')
@@ -156,7 +158,10 @@ def word_to_pdf(source: Path, target: Path, timeout: float, expected_pages: int 
             if not inspection.exists():
                 raise RuntimeError('无法检查 DOC 字体，文件可能已加密或损坏')
         fonts, source_text = docx_content(inspection)
-        check_word_fonts(fonts, environment)
+        plan = check_word_fonts(fonts, environment)
+        if plan.get('substituted'):
+            # Give the substituted families to the converter's own fontconfig.
+            environment = office_environment(work, plan['substituted'])
         convert(local, 'pdf:writer_pdf_Export')
         output = work / 'source.pdf'
         if not output.exists():
@@ -164,14 +169,14 @@ def word_to_pdf(source: Path, target: Path, timeout: float, expected_pages: int 
         with pymupdf.open(output) as pdf:
             if pdf.needs_pass or not pdf.page_count:
                 raise RuntimeError('Word 输出为空或加密，未发布')
-            if expected_pages and pdf.page_count != expected_pages:
-                raise RuntimeError(f'Word 分页与站点不一致：{pdf.page_count}/{expected_pages} 页，需核对字体和排版；未发布 PDF')
+            plan['page_check'] = page_check(expected_pages, pdf.page_count, bool(plan.get('visual_review')))
             # A necessary content check, not a proof of identical layout.
             source_chars = collections.Counter(re.sub(r'\s+', '', source_text))
             rendered_chars = collections.Counter(re.sub(r'\s+', '', ''.join(page.get_text() for page in pdf)))
             if source_chars - rendered_chars:
                 raise RuntimeError('Word 转换文字覆盖校验失败，可能缺字或对象未正确渲染；未发布 PDF')
         shutil.copyfile(output, target)
+    return plan
 
 
 def unpack_zip(source: Path, directory: Path, file_order: list[str]) -> list[tuple[str, Path]]:
@@ -211,10 +216,12 @@ def source_to_pdf(source: Path, target: Path, timeout: float, expected_pages: in
 
     kind = source_kind(source)
     parts = []
+    font_plan: dict = {}
+    parts_tolerated = False
     if kind == '.pdf':
         shutil.copyfile(source, target)
     elif kind in {'.doc', '.docx'}:
-        word_to_pdf(source, target, timeout, expected_pages)
+        font_plan = word_to_pdf(source, target, timeout, expected_pages) or {}
     elif kind == '.zip':
         metadata = files or []
         with tempfile.TemporaryDirectory(prefix='stzy-zip-') as temporary:
@@ -239,13 +246,18 @@ def source_to_pdf(source: Path, target: Path, timeout: float, expected_pages: in
                     with pymupdf.open(pdf_path) as document:
                         if document.needs_pass or not document.page_count:
                             raise RuntimeError(f'{name} 是加密或空 PDF')
-                        if expected and document.page_count != expected:
-                            raise RuntimeError(f'{name} 页数与站点不一致，未发布 PDF')
+                        member_check = member_report.get('page_check') or page_check(
+                            expected, document.page_count, bool(member_report.get('fonts', {}).get('visual_review')),
+                            label=f'{name} ')
+                        if member_check.get('tolerated'):
+                            parts_tolerated = True
                         first = merged.page_count + 1
                         toc.append([1, name, first])
                         merged.insert_pdf(document)
                         parts.append({'name': name, 'pages': document.page_count, 'first_page': first,
-                                      'source_kind': member_report['source_kind'], 'layout': member_report['layout']})
+                                      'source_kind': member_report['source_kind'], 'layout': member_report['layout'],
+                                      'fonts': member_report.get('fonts', {}),
+                                      'page_check': member_report.get('page_check', {})})
                 merged.set_toc(toc)
                 merged.save(target)
     elif kind in {'.png', '.jpg', '.jpeg', '.webp'}:
@@ -255,7 +267,10 @@ def source_to_pdf(source: Path, target: Path, timeout: float, expected_pages: in
     with pymupdf.open(target) as document:
         if document.needs_pass or not document.page_count:
             raise RuntimeError('没有生成有效 PDF 页面')
-        if expected_pages and document.page_count != expected_pages:
-            raise RuntimeError(f'原文转换页数不一致：{document.page_count}/{expected_pages}，未发布 PDF')
+        font_plan['page_check'] = page_check(
+            expected_pages, document.page_count,
+            bool(font_plan.get('visual_review')) or parts_tolerated)
         return {'source_kind': kind, 'pages': document.page_count, 'files': parts,
+                'fonts': font_support.describe_report(font_plan or {}),
+                'page_check': font_plan.get('page_check', {}),
                 'layout': 'source_pdf_pages' if kind in {'.pdf', '.zip'} and all(p['layout'] == 'source_pdf_pages' for p in parts) else 'converted_requires_visual_review'}

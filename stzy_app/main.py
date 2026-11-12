@@ -39,6 +39,9 @@ def main(argv: list[str] | None = None) -> None:
         open_existing_instance()
         return
     host = args.host or ("0.0.0.0" if mode == "server" else "127.0.0.1")
+    if args.data_dir:
+        # Conversion runs in child processes that re-read config, so export it too.
+        os.environ["STZY_DATA_DIR"] = str(Path(args.data_dir).expanduser().resolve())
     settings = AppSettings()
     updates = {}
     if args.data_dir:

@@ -109,6 +109,24 @@ class DocumentConverter:
         artifacts.cleanup_transient_artifacts()
         return converted, max(0, converted - existing_count)
 
+    def log_font_report(self, report: dict) -> None:
+        """Tell the task log which fonts were substituted and whether pages moved."""
+        fonts = report.get("fonts") or {}
+        substituted = fonts.get("substituted") or {}
+        check = report.get("page_check") or {}
+        if not substituted and not check.get("tolerated"):
+            return
+        pairs = "、".join(f"{declared}→{actual}" for declared, actual in substituted.items())
+        parts = []
+        if pairs:
+            parts.append(f"使用替代字体：{pairs}")
+        if fonts.get("installed"):
+            parts.append(f"自动下载字体：{'、'.join(fonts['installed'])}")
+        if check.get("tolerated"):
+            parts.append(check.get("note", ""))
+            parts.append("PDF 已按实际页数发布，排版请人工核对")
+        self.on_log("字体提示：" + "；".join(part for part in parts if part))
+
     def convert_source_and_publish(
         self, original: Path, directory: Path, *, expected_pages: int = 0,
         files: list[dict] | None = None,
@@ -131,6 +149,7 @@ class DocumentConverter:
                 raise RuntimeError("PDF 图片页数校验失败，未发布")
             report_path = staging / "conversion-report.json"
             report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.log_font_report(report)
             artifacts.publish_pdf(pdf)
             for page in directory.glob("练习*.png"):
                 page.unlink()

@@ -156,9 +156,14 @@ python -m stzy_app.cli sample
 **Word 所需依赖和验证边界**
 
 1. 服务机器安装稳定版 LibreOffice Writer 和 fontconfig。`STZY_SOFFICE_PATH` 可指定 soffice 可执行文件。
-2. 安装原文实际使用的、有合法使用授权的字体；也可通过 `STZY_WORD_FONT_DIR` 指定字体目录（通过转换进程独立 Fontconfig 配置加载，不修改系统字体）。不将 Noto、思源或 macOS Songti 当成 Windows SimSun 的同款字体。
-3. DOCX 检查声明字体和主题字体；旧 DOC 先转临时 DOCX 检查字体。缺少字体时列出缺失项，保留原件并标记部分完成。
-4. Word 转换后检查文字覆盖、非空输出；有站点页数时要求页数一致。检查失败不发布新 PDF，也不标记完成。没有完整原版参照时，这些检查**不等于**已经证明排版完全一致；公式、浮动对象、复杂表格和分页仍需视觉验收。要求严格复刻 Word 版面时，应使用源站完整 PDF 或具备相同字体的原 Word 排版环境。
+2. 字体自动补齐（`stzy_app/crawler/fonts.py`）：
+   - 先找本机已安装的原版字体，包括 `STZY_WORD_FONT_DIR` 指向的授权字体目录（通过转换进程独立 Fontconfig 配置加载，不修改系统字体）。
+   - 仍缺时下载开源且**度量一致**的替代字体到数据目录 `fonts/`：Calibri→Carlito、Cambria→Caladea、Times New Roman→Tinos/Liberation Serif、Arial→Arimo、Courier New→Cousine。这些字体与原字体的字符宽度和行高完全相同，分页不会变化，只有字形轮廓不同，因此可以视为排版等价。
+   - 中文字体没有开源同度量替代（宋体→Noto Serif CJK SC / Songti SC、黑体→Noto Sans CJK SC、楷体→AR PL UKai 等全角宽度一致但行高不同），替代后文字覆盖校验照旧，页数按实际结果发布，并在转换报告 `fonts.visual_review` 标记需要视觉验收。选字顺序是本机原版 → 度量一致的开源字体 → 候选中文字体，先用页面接近原字体的，再退到候选。
+   - 微软原版字体不会自动下载（不可再分发）。需要 100% 原版字形时，把有授权的字体放进 `STZY_WORD_FONT_DIR`，或设置 `STZY_WORD_FONT_POLICY=strict` 关闭替代。
+   - 相关开关：`STZY_WORD_FONT_POLICY`（`substitute` 默认／`strict`）、`STZY_WORD_FONT_AUTO_INSTALL`（默认 `1`）、`STZY_FONT_INSTALL_DIR`（默认 `STZY_DATA_DIR/fonts`）。设置页「Word 字体」标签提供自检和一键补齐。
+3. DOCX 检查声明字体和主题字体；旧 DOC 先转临时 DOCX 检查字体。既没有原版也没有可用替代时列出缺失项，保留原件并标记部分完成。实际用了哪些字体、哪些是替代，会写进 `conversion-report.json` 的 `fonts` 字段。
+4. Word 转换后检查文字覆盖、非空输出；有站点页数时要求页数一致——除非有字体被替代。替代字体（尤其中文）会改变行高，站点页数不再是可靠参照，此时按实际转换页数发布，并在 `conversion-report.json` 的 `page_check` 写明 `expected` / `actual` / `tolerated`，任务日志也会提示「PDF 已按实际页数发布，排版请人工核对」。字体全部为原版时仍严格比对页数，不一致视为排版异常不发布。检查失败不发布新 PDF，也不标记完成。没有完整原版参照时，这些检查**不等于**已经证明排版完全一致；公式、浮动对象、复杂表格和分页仍需视觉验收。要求严格复刻 Word 版面时，应使用源站完整 PDF 或具备相同字体的原 Word 排版环境。
 5. 转换总超时默认 180 秒，可用 `STZY_DOCUMENT_TIMEOUT_SECONDS` 配置；PDF 转 PNG 沿用 `STZY_PREVIEW_TIMEOUT_SECONDS`。
 
-已验证样本：ZIP `773614591691493376` 中试卷 7 页、答题卡 2 页、答案 4 页，合并后 13 页，所有页面在 72 DPI 下与原 PDF 渲染像素一致。Word `773569953530155008` 登录后仍只提供 10/11 页预览；服务器已安装 LibreOffice 7.4.7 和开源替代字体，独立测试输出 11 页且文字覆盖通过，但标题字重、行距和分页位置仍与站点预览不同；严格转换仍因缺少原文字体保持部分完成，不能宣称原样验收。
+已验证样本：ZIP `773614591691493376` 中试卷 7 页、答题卡 2 页、答案 4 页，合并后 13 页，所有页面在 72 DPI 下与原 PDF 渲染像素一致。Word `773569953530155008` 登录后仍只提供 10/11 页预览；服务器已安装 LibreOffice 7.4.7 和开源替代字体，独立测试输出 11 页且文字覆盖通过，但标题字重、行距和分页位置仍与站点预览不同；启用替代策略后可发布，但 `fonts.visual_review` 会标为需要视觉验收，不能宣称原样验收。
