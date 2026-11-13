@@ -1,4 +1,4 @@
-# STZY Paper Crawler · Native Desktop Client (`Rust + Tauri v2`)
+# PaperDesk · Native Desktop Client (`Rust + Tauri v2`)
 
 完全独立于 Python Web/Server 版的原生跨平台桌面客户端（支持 **macOS Apple Silicon / Intel** 与 **Windows x64**）。无外部 HTTP Server 依赖，所有采集调度、网络请求、AES 加解密、文档渲染转换、SQLite 存储与系统交互均在本地 Rust 进程内完成。
 

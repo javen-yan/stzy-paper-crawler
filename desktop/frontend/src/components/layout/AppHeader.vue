@@ -62,7 +62,7 @@ async function handleCoreClick() {
         <Layers :size="19" />
       </div>
       <div class="brand-copy">
-        <h1>试卷下载器</h1>
+        <h1>PaperDesk</h1>
         <button
           type="button"
           class="version-btn"

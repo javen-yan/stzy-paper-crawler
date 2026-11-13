@@ -70,7 +70,7 @@ pub const COOKIE_TOKEN_CONSOLE_SCRIPT: &str = r#"(async () => {
   console.log(JSON.stringify(result, null, 2));
   copy(JSON.stringify(result, null, 2));
   alert(result.api_check?.ok
-    ? 'Token 已通过官网接口验证并复制，请粘贴到 STZY Paper Crawler。'
+    ? 'Token 已通过官网接口验证并复制，请粘贴到 PaperDesk。'
     : 'Token 已复制，但官网接口验证未通过；请重新登录网页后再复制。');
 })();"#;
 

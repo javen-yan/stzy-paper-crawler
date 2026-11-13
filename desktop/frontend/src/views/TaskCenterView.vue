@@ -20,8 +20,9 @@ import type { Task, TaskCreateForm } from '../types/tasks'
 
 const router = useRouter()
 const toast = useToast()
-const { setActiveTaskId } = useLayoutState()
+const { setActiveTaskId, newTaskRequestSeq, consumeNewTaskDialogRequest } = useLayoutState()
 const { tasks, selectedTaskId, refreshTasks, selectTask, submitTask, createDownloadFromEstimate, runTaskAction } = useTasks()
+const wizardRef = ref<InstanceType<typeof TaskCreateWizard> | null>(null)
 const accounts = ref<Account[]>([])
 const loading = ref(false)
 const submitting = ref(false)
@@ -183,6 +184,15 @@ async function handleAction(task: Task, action: 'pause' | 'resume' | 'cancel' | 
 
 const polling = usePolling(refresh, 3000, { hiddenIntervalMs: 15000 })
 
+watch(
+  () => newTaskRequestSeq.value,
+  (seq) => {
+    if (seq > 0 && consumeNewTaskDialogRequest()) {
+      wizardRef.value?.openDialog()
+    }
+  },
+)
+
 onMounted(async () => {
   loading.value = true
   try {
@@ -190,6 +200,9 @@ onMounted(async () => {
     polling.start()
   } finally {
     loading.value = false
+  }
+  if (consumeNewTaskDialogRequest()) {
+    wizardRef.value?.openDialog()
   }
 })
 </script>
@@ -205,7 +218,7 @@ onMounted(async () => {
         <el-button size="large" @click="handleOpenRootFolder">
           <FolderOutput :size="16" style="margin-right: 6px" />打开下载目录
         </el-button>
-        <TaskCreateWizard :accounts="accounts" :submitting="submitting" @submit="handleSubmit" />
+        <TaskCreateWizard ref="wizardRef" :accounts="accounts" :submitting="submitting" @submit="handleSubmit" />
       </div>
     </section>
 

@@ -317,19 +317,60 @@ impl TaskManager {
     }
 
     pub fn active_task_count(&self) -> usize {
+        self.tray_task_summary().0
+    }
+
+    pub fn tray_task_summary(&self) -> (usize, usize) {
         if let Ok(tasks) = self.store.list_tasks(false, 200, 0) {
-            tasks
-                .iter()
-                .filter(|t| {
-                    matches!(
-                        t.get("status").and_then(Value::as_str).unwrap_or(""),
-                        "running" | "queued"
-                    )
-                })
-                .count()
+            let mut active = 0usize;
+            let mut resumable = 0usize;
+            for t in &tasks {
+                match t.get("status").and_then(Value::as_str).unwrap_or("") {
+                    "running" | "queued" => active += 1,
+                    "paused" | "interrupted" => resumable += 1,
+                    _ => {}
+                }
+            }
+            (active, resumable)
         } else {
-            self.running_tokens.lock().len()
+            (self.running_tokens.lock().len(), 0)
         }
+    }
+
+    pub fn pause_all_active_tasks(&self) -> usize {
+        let mut paused_count = 0usize;
+        if let Ok(tasks) = self.store.list_tasks(false, 200, 0) {
+            for t in tasks {
+                let status = t.get("status").and_then(Value::as_str).unwrap_or("");
+                if matches!(status, "running" | "queued") {
+                    if let Some(tid) = t.get("id").and_then(Value::as_str) {
+                        if self.pause_task(tid).is_ok() {
+                            self.emit_task_snapshot(tid);
+                            paused_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        paused_count
+    }
+
+    pub fn resume_all_paused_tasks(&self) -> usize {
+        let mut resumed_count = 0usize;
+        if let Ok(tasks) = self.store.list_tasks(false, 200, 0) {
+            for t in tasks {
+                let status = t.get("status").and_then(Value::as_str).unwrap_or("");
+                if matches!(status, "paused" | "interrupted") {
+                    if let Some(tid) = t.get("id").and_then(Value::as_str) {
+                        if self.resume_task(tid).is_ok() {
+                            self.emit_task_snapshot(tid);
+                            resumed_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        resumed_count
     }
 
     pub async fn pause_active_tasks_for_restart(&self) -> usize {

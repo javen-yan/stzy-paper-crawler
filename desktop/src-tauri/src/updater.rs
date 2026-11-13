@@ -130,5 +130,6 @@ pub async fn download_and_install_app_update(app: &AppHandle, state: &AppState) 
         100.0,
     );
     tokio::time::sleep(Duration::from_millis(350)).await;
+    crate::tray::mark_exiting();
     app.restart();
 }

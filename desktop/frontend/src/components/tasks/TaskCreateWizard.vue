@@ -244,6 +244,8 @@ function openDialog() {
   ensureCatalogsLoaded(false)
 }
 
+defineExpose({ openDialog })
+
 async function runEstimate() {
   if (!canSubmit.value) return
   syncLabelsIntoForm()

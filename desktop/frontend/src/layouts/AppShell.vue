@@ -1,15 +1,30 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
-import { RouterView, useRoute } from 'vue-router'
+import { computed, onBeforeUnmount, onMounted } from 'vue'
+import { RouterView, useRoute, useRouter } from 'vue-router'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import AppHeader from '../components/layout/AppHeader.vue'
 import AppFooterLogPanel from '../components/layout/AppFooterLogPanel.vue'
 import OfficeCoreDialog from '../components/layout/OfficeCoreDialog.vue'
 import ProxyStatusPopover from '../components/layout/ProxyStatusPopover.vue'
 import UpdateDialog from '../components/layout/UpdateDialog.vue'
+import { useLayoutState } from '../composables/useLayoutState'
+import { useTasks } from '../composables/useTasks'
+import { useToast } from '../composables/useToast'
 import { useUpdater } from '../composables/useUpdater'
 
+interface TrayActionPayload {
+  action: 'new_task' | 'navigate' | 'check_update' | 'tasks_changed' | string
+  path?: string
+  toast?: string
+}
+
 const route = useRoute()
-const { runSilentStartupCheck } = useUpdater()
+const router = useRouter()
+const toast = useToast()
+const { requestNewTaskDialog } = useLayoutState()
+const { refreshTasks } = useTasks()
+const { runSilentStartupCheck, checkForUpdates } = useUpdater()
+let trayUnlisten: UnlistenFn | null = null
 
 const sectionTitle = computed(() => {
   const path = route.path
@@ -23,8 +38,39 @@ const sectionTitle = computed(() => {
 
 const showFooterLog = computed(() => !route.path.startsWith('/tasks/'))
 
-onMounted(() => {
+onMounted(async () => {
   runSilentStartupCheck()
+  try {
+    trayUnlisten = await listen<TrayActionPayload>('tray:action', async (event) => {
+      const payload = event.payload || { action: '' }
+      if (payload.action === 'new_task') {
+        requestNewTaskDialog()
+        if (route.path !== '/tasks') {
+          await router.push('/tasks')
+        }
+      } else if (payload.action === 'navigate' && payload.path) {
+        if (route.path !== payload.path) {
+          await router.push(payload.path)
+        }
+      } else if (payload.action === 'check_update') {
+        await checkForUpdates({ silent: false, openIfAvailable: true })
+      } else if (payload.action === 'tasks_changed') {
+        await refreshTasks({ archived: false, limit: 20, offset: 0 }).catch(() => {})
+        if (payload.toast) {
+          toast.success(payload.toast)
+        }
+      }
+    })
+  } catch {
+    // Non-Tauri browser environment
+  }
+})
+
+onBeforeUnmount(() => {
+  if (trayUnlisten) {
+    trayUnlisten()
+    trayUnlisten = null
+  }
 })
 </script>
 

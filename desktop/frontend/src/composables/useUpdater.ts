@@ -6,7 +6,7 @@ import { useToast } from './useToast'
 import type { AppUpdateInfo, AppUpdateProgress } from '../types/updater'
 
 const updateInfo = ref<AppUpdateInfo | null>(null)
-const runtimeAppVersion = ref('0.3.1')
+const runtimeAppVersion = ref('0.3.2')
 const checking = ref(false)
 const installing = ref(false)
 const dialogVisible = ref(false)

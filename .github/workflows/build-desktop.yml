@@ -106,11 +106,11 @@ jobs:
         shell: bash
         run: |
           MAC_DIR="desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos"
-          if [ -f "${MAC_DIR}/STZY Paper Crawler.app.tar.gz" ]; then
-            cp -v "${MAC_DIR}/STZY Paper Crawler.app.tar.gz" "${MAC_DIR}/STZY.Paper.Crawler_${{ matrix.arch_suffix }}.app.tar.gz"
+          if [ -f "${MAC_DIR}/PaperDesk.app.tar.gz" ]; then
+            cp -v "${MAC_DIR}/PaperDesk.app.tar.gz" "${MAC_DIR}/PaperDesk_${{ matrix.arch_suffix }}.app.tar.gz"
           fi
-          if [ -f "${MAC_DIR}/STZY Paper Crawler.app.tar.gz.sig" ]; then
-            cp -v "${MAC_DIR}/STZY Paper Crawler.app.tar.gz.sig" "${MAC_DIR}/STZY.Paper.Crawler_${{ matrix.arch_suffix }}.app.tar.gz.sig"
+          if [ -f "${MAC_DIR}/PaperDesk.app.tar.gz.sig" ]; then
+            cp -v "${MAC_DIR}/PaperDesk.app.tar.gz.sig" "${MAC_DIR}/PaperDesk_${{ matrix.arch_suffix }}.app.tar.gz.sig"
           fi
 
       - name: Upload macOS Installer & Updater Artifacts
@@ -121,8 +121,8 @@ jobs:
           if-no-files-found: error
           path: |
             desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg/*.dmg
-            desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/STZY.Paper.Crawler_*.app.tar.gz
-            desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/STZY.Paper.Crawler_*.app.tar.gz.sig
+            desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/PaperDesk_*.app.tar.gz
+            desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/PaperDesk_*.app.tar.gz.sig
 
       - name: Upload Windows Installer & Updater Artifacts
         if: runner.os == 'Windows'
@@ -208,7 +208,7 @@ jobs:
           def build_manifest(base_url: str) -> dict:
               return {
                   "version": version,
-                  "notes": f"STZY Paper Crawler {tag} 在线升级包（包含最新转换与交互优化）",
+                  "notes": f"PaperDesk {tag} 在线升级包（包含最新转换与交互优化）",
                   "pub_date": pub_date,
                   "platforms": {
                       "darwin-aarch64": {
@@ -242,27 +242,27 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: STZY Paper Crawler ${{ github.ref_name }}
+          name: PaperDesk ${{ github.ref_name }}
           draft: false
           prerelease: false
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
-            ## STZY Paper Crawler ${{ github.ref_name }} · 原生桌面客户端 (`Rust + Tauri v2`)
+            ## PaperDesk ${{ github.ref_name }} · 试卷下载器桌面客户端 (`Rust + Tauri v2`)
 
-            跨平台原生桌面客户端，支持客户端内一键检查更新与在线升级。
+            跨平台原生桌面客户端，支持系统托盘常驻与客户端内一键在线升级。
 
             ### 安装包选择指南
-            - **macOS（Apple Silicon M1/M2/M3/M4）**：下载 `*_aarch64.dmg`
-            - **macOS（Intel 芯片）**：下载 `*_x64.dmg`
-            - **Windows 10 / 11（64 位）**：下载 `*_x64-setup.exe`（推荐）或 `*_x64_en-US.msi`
+            - **macOS（Apple Silicon M1/M2/M3/M4）**：下载 `PaperDesk_*_aarch64.dmg`
+            - **macOS（Intel 芯片）**：下载 `PaperDesk_*_x64.dmg`
+            - **Windows 10 / 11（64 位）**：下载 `PaperDesk_*_x64-setup.exe`（推荐）或 `PaperDesk_*_x64_en-US.msi`
 
-            ### macOS 首次打开提示「“STZY Paper Crawler”已损坏，无法打开」解决方法
+            ### macOS 首次打开提示「“PaperDesk”已损坏，无法打开」解决方法
             首次手动安装 `.dmg` 时，浏览器下载会附带 macOS 隔离标记（`com.apple.quarantine`）：
-            1. 打开 `.dmg` 后，**先将 `STZY Paper Crawler.app` 拖入 `Applications`（应用程序）文件夹**。
+            1. 打开 `.dmg` 后，**先将 `PaperDesk.app` 拖入 `Applications`（应用程序）文件夹**。
             2. 打开「终端（Terminal）」，执行以下命令即可正常打开（后续应用内在线更新无需重复执行）：
                ```bash
-               xattr -cr "/Applications/STZY Paper Crawler.app"
+               xattr -cr "/Applications/PaperDesk.app"
                ```
           files: |
             release-dist/*.dmg

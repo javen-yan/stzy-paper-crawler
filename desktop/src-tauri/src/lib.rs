@@ -10,6 +10,7 @@ pub mod protocol;
 pub mod proxy;
 pub mod store;
 pub mod task_engine;
+pub mod tray;
 pub mod updater;
 
 use std::path::PathBuf;
@@ -86,6 +87,7 @@ pub fn run() {
             let emit_handle = handle.clone();
             task_manager.set_event_emitter(Arc::new(move |event_name, payload| {
                 let _ = emit_handle.emit(event_name, payload);
+                tray::refresh_tray_state(&emit_handle);
             }));
 
             task_manager.enqueue_startup_tasks();
@@ -96,7 +98,22 @@ pub fn run() {
                 artifact_service,
                 task_manager,
             });
+
+            if let Err(err) = tray::setup_tray(&handle) {
+                tracing::warn!("初始化系统托盘失败: {err}");
+            }
+            tray::refresh_tray_state(&handle);
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    if !tray::is_exiting() {
+                        api.prevent_close();
+                        tray::hide_window_to_tray(window);
+                    }
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_runtime_info,
@@ -133,6 +150,16 @@ pub fn run() {
             commands::check_app_update,
             commands::install_app_update,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running STZY Desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building STZY Desktop application")
+        .run(|app_handle, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                if let Some(win) = app_handle.get_webview_window("main") {
+                    if !win.is_visible().unwrap_or(true) || win.is_minimized().unwrap_or(false) {
+                        tray::show_main_window(app_handle);
+                    }
+                }
+            }
+        });
 }

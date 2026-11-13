@@ -31,7 +31,7 @@ async function openReleasePage() {
       <div class="version-banner">
         <div class="version-info">
           <div class="version-title">
-            <strong>试卷下载器</strong>
+            <strong>PaperDesk · 试卷下载器</strong>
             <span class="ver-pill mono">v{{ currentVersion }}</span>
             <el-tag v-if="hasUpdate" type="warning" size="small">发现新版本 v{{ updateInfo?.version }}</el-tag>
             <el-tag v-else-if="updateInfo && !hasUpdate" type="success" size="small">已是最新版本</el-tag>

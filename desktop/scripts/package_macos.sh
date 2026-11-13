@@ -13,9 +13,9 @@ if [ ! -f "${RELEASE_BIN}" ]; then
   exit 1
 fi
 
-APP_NAME="STZY Paper Crawler"
+APP_NAME="PaperDesk"
 VERSION="$(grep -m1 '"version"' "${TAURI_DIR}/tauri.conf.json" | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
-VERSION="${VERSION:-0.3.0}"
+VERSION="${VERSION:-0.3.1}"
 ARCH="$(uname -m)"
 if [ "${ARCH}" = "arm64" ]; then
   ARCH_LABEL="aarch64"
@@ -30,7 +30,7 @@ CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_EXE_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 
-rm -rf "${APP_DIR}"
+rm -rf "${APP_DIR}" "${MACOS_BUNDLE_DIR}/STZY Paper Crawler.app"
 mkdir -p "${MACOS_EXE_DIR}" "${RESOURCES_DIR}/resources" "${DMG_BUNDLE_DIR}"
 
 cp -f "${RELEASE_BIN}" "${MACOS_EXE_DIR}/stzy-desktop"
@@ -56,7 +56,7 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
   <key>CFBundleDevelopmentRegion</key>
   <string>zh_CN</string>
   <key>CFBundleDisplayName</key>
-  <string>试卷下载器</string>
+  <string>PaperDesk</string>
   <key>CFBundleName</key>
   <string>${APP_NAME}</string>
   <key>CFBundleExecutable</key>
