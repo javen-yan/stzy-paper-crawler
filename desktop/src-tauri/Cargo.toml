@@ -1,0 +1,67 @@
+[package]
+name = "stzy-desktop"
+version = "0.3.0"
+description = "STZY Paper Crawler Native Desktop Client (Rust + Tauri v2)"
+authors = ["STZY Team"]
+edition = "2021"
+rust-version = "1.80"
+
+[lib]
+name = "stzy_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+# Async & Concurrency
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "io-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+parking_lot = "0.12"
+futures-util = "0.3"
+
+# Serialization & Core Utilities
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+percent-encoding = "2"
+mime_guess = "2"
+dirs = "5"
+regex = "1"
+shlex = "1.3"
+rand = "0.8"
+walkdir = "2.5"
+tempfile = "3"
+
+# Networking & Crypto
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies", "socks", "stream", "gzip", "blocking"] }
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc", "block-padding"] }
+aes-gcm = "0.10"
+base64 = "0.22"
+sha2 = "0.10"
+
+# Embedded SQLite
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Document Pipeline (PDF / SVG / Image / DOCX / ZIP / Fonts)
+pdfium-render = { version = "0.8", default-features = false, features = ["pdfium_6721", "thread_safe", "image_025"] }
+lopdf = "0.34"
+resvg = "0.43"
+svg2pdf = "0.12"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"

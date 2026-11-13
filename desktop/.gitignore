@@ -1,0 +1,9 @@
+node_modules/
+frontend/node_modules/
+frontend/dist/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/resources/libpdfium.dylib
+src-tauri/resources/pdfium.dll
+src-tauri/resources/libpdfium.so
+.DS_Store

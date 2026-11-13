@@ -1,22 +1,40 @@
+# Python / legacy local artifacts (if switching to `server` branch)
 .venv/
 __pycache__/
 *.py[cod]
 .ruff_cache/
 .pytest_cache/
+
+# Local runtime data & credentials (never commit)
 output/
 .env
 stzy.db
 .stzy-credentials.key
+*.db
+*.db-shm
+*.db-wal
 *.db.domain-v1
 *.db.backup-*
-.DS_Store
-.playwright-cli/
-start-macos.command
-start-linux.sh
-start-windows.bat
-start-windows.ps1
-build/
-dist/
-node_modules/
 fonts/
+.playwright-cli/
 
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Node / Frontend build artifacts
+node_modules/
+dist/
+build/
+desktop/node_modules/
+desktop/package-lock.json
+desktop/frontend/node_modules/
+desktop/frontend/dist/
+
+# Rust / Tauri build artifacts & platform Pdfium binaries
+target/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/src-tauri/resources/*.dylib
+desktop/src-tauri/resources/*.dll
+desktop/src-tauri/resources/*.so

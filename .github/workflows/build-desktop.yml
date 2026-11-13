@@ -1,0 +1,127 @@
+name: Build Desktop (macOS & Windows)
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+      - "desktop-v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-desktop:
+    name: Build (${{ matrix.artifact_name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            rust_target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+            pdfium_target: mac-arm64
+            artifact_name: macos-arm64
+            run_tests: true
+          - platform: macos-latest
+            rust_target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+            pdfium_target: mac-x64
+            artifact_name: macos-x64
+            run_tests: false
+          - platform: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc
+            pdfium_target: win-x64
+            artifact_name: windows-x64
+            run_tests: true
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/frontend/package-lock.json
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+          key: ${{ matrix.artifact_name }}
+
+      - name: Fetch prebuilt Pdfium library (${{ matrix.pdfium_target }})
+        shell: bash
+        run: bash desktop/scripts/fetch_pdfium.sh ${{ matrix.pdfium_target }}
+
+      - name: Install Tauri CLI & frontend dependencies
+        run: |
+          npm --prefix desktop install --no-package-lock
+          npm --prefix desktop/frontend ci
+
+      - name: Verify frontend TypeScript & Vite build
+        working-directory: desktop/frontend
+        run: npm run build
+
+      - name: Run Rust unit tests
+        if: matrix.run_tests
+        working-directory: desktop/src-tauri
+        run: cargo test --lib --target ${{ matrix.rust_target }}
+
+      - name: Build Tauri Desktop Bundles (CI check / artifact build)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          STZY_SKIP_FRONTEND_BUILD: "1"
+        with:
+          projectPath: desktop
+          args: ${{ matrix.args }}
+
+      - name: Build & Publish Tauri Desktop Release (Tag push)
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STZY_SKIP_FRONTEND_BUILD: "1"
+        with:
+          projectPath: desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: "STZY Paper Crawler ${{ github.ref_name }}"
+          releaseBody: "Native Rust + Tauri v2 Desktop Client installers for macOS (Apple Silicon & Intel) and Windows (x64)."
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
+
+      - name: Upload macOS Installer Artifacts (.dmg)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stzy-desktop-${{ matrix.artifact_name }}
+          if-no-files-found: error
+          path: |
+            desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg/*.dmg
+
+      - name: Upload Windows Installer Artifacts (.exe & .msi)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stzy-desktop-${{ matrix.artifact_name }}
+          if-no-files-found: error
+          path: |
+            desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis/*-setup.exe
+            desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/msi/*.msi
