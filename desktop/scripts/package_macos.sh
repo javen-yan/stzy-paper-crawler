@@ -14,7 +14,8 @@ if [ ! -f "${RELEASE_BIN}" ]; then
 fi
 
 APP_NAME="STZY Paper Crawler"
-VERSION="0.3.0"
+VERSION="$(grep -m1 '"version"' "${TAURI_DIR}/tauri.conf.json" | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+VERSION="${VERSION:-0.3.0}"
 ARCH="$(uname -m)"
 if [ "${ARCH}" = "arm64" ]; then
   ARCH_LABEL="aarch64"

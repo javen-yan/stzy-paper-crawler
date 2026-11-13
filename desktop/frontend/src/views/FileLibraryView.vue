@@ -1,42 +1,36 @@
 <script setup lang="ts">
+import { FolderOutput } from 'lucide-vue-next'
+import { openLocalPath } from '../api/local'
 import FileTable from '../components/files/FileTable.vue'
+import { useToast } from '../composables/useToast'
+
+const toast = useToast()
+
+async function openRootFolder() {
+  try {
+    await openLocalPath('')
+  } catch (error) {
+    toast.error(error, '打开下载目录失败')
+  }
+}
 </script>
 
 <template>
   <div class="page-stack">
     <section class="page-hero">
       <div>
-        <p class="eyebrow">本地归档 · 即时预览 · 压缩导出</p>
-        <h2>文件库</h2>
-        <p class="hero-subtitle">按学科、年级与地区层级浏览已下载试卷，支持内置高清预览与一键另存。</p>
+        <h2>本地文件</h2>
+        <p class="hero-subtitle">浏览已下载的试卷 PDF 与图片，点击文件可直接预览。</p>
+      </div>
+      <div class="hero-actions">
+        <el-button @click="openRootFolder">
+          <FolderOutput :size="15" style="margin-right: 6px" />在系统文件夹中打开
+        </el-button>
       </div>
     </section>
 
     <el-card shadow="never">
-      <template #header>
-        <div class="card-header file-library-header">
-          <span>文件列表</span>
-          <small class="block-muted">按任务筛选名称与实际保存路径浏览。</small>
-        </div>
-      </template>
       <FileTable />
     </el-card>
   </div>
 </template>
-
-<style scoped>
-.file-library-header {
-  align-items: flex-start;
-}
-
-.file-library-header small {
-  min-width: 0;
-}
-
-@media (max-width: 760px) {
-  .file-library-header {
-    display: grid;
-    gap: 4px;
-  }
-}
-</style>

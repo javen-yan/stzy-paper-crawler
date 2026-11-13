@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Plus, UserRoundCog } from 'lucide-vue-next'
+import { ElMessageBox } from 'element-plus'
+import { Calculator, ChevronDown, Download, Plus, RefreshCw, RotateCcw, UserRoundCog } from 'lucide-vue-next'
 import { fetchCatalogs, refreshCatalogs } from '../../api/catalogs'
 import { useTasks } from '../../composables/useTasks'
 import { useToast } from '../../composables/useToast'
@@ -14,37 +15,20 @@ const emit = defineEmits<{ submit: [form: TaskCreateForm] }>()
 const router = useRouter()
 const toast = useToast()
 const { estimateTask } = useTasks()
-const ALL_VALUE = '__all__'
 
 const visible = ref(false)
-const step = ref(0)
-const advancedPanels = ref<string[]>([])
+const showMoreOptions = ref(false)
 const catalog = ref<CatalogState | null>(null)
 const catalogLoading = ref(false)
+const catalogSyncing = ref(false)
+const catalogError = ref('')
 const estimateLoading = ref(false)
 const estimateResult = ref<TaskEstimateResult | null>(null)
 const estimatedSignature = ref('')
-const quick = reactive({
-  studyPhase: '300',
-  subject: ALL_VALUE,
-  province: ALL_VALUE,
-  year: ALL_VALUE,
-  term: ALL_VALUE,
-  scene: ALL_VALUE,
-})
-const advanced = reactive({
-  studyPhase: '300',
-  subject: ALL_VALUE,
-  scene: ALL_VALUE,
-  year: ALL_VALUE,
-  rank: ALL_VALUE,
-  province: ALL_VALUE,
-  grade: ALL_VALUE,
-  term: ALL_VALUE,
-})
+
 const form = reactive<TaskCreateForm>({
   title: '',
-  mode: 'estimate',
+  mode: 'crawl',
   studyPhase: '300',
   fileType: '',
   downloadPaid: false,
@@ -61,99 +45,213 @@ const form = reactive<TaskCreateForm>({
 })
 
 const usableAccounts = computed(() => props.accounts.filter((account) => account.usable && account.enabled))
-const abnormalAccounts = computed(() => props.accounts.filter((account) => !account.usable || !account.enabled))
 const canSubmit = computed(() => usableAccounts.value.length > 0)
-const selectedFilterSummary = computed(() => {
-  const parts = [
-    form.fileType || '全部文件类型',
-    optionLabel(advancedSubjectSelectOptions.value, advanced.subject),
-    optionLabel(optionList('provinceCode', '地区不限', advanced.studyPhase), advanced.province),
-    optionLabel(optionList('yearCode', '年份不限', advanced.studyPhase), advanced.year),
-    optionLabel(optionList('termCode', '年级学期不限', advanced.studyPhase), advanced.term),
-    optionLabel(optionList('sceneCode', '场景不限', advanced.studyPhase), advanced.scene),
-  ].filter((item) => item && !item.endsWith('不限') && item !== '不限')
-  return parts.length ? parts.join(' / ') : '不限'
-})
-const estimateStats = computed(() => estimateResult.value?.stats || {})
-const estimatedResources = computed(() => numberStat(estimateStats.value.resources_seen))
-const estimatedCombos = computed(() => `${numberStat(estimateStats.value.completed_combos)}/${numberStat(estimateStats.value.total_combos)}`)
-const estimateIssues = computed(() => numberStat(estimateStats.value.failed))
-const canStartDownload = computed(() => Boolean(estimateResult.value && estimatedSignature.value === currentFilterSignature()))
+
 const studyPhaseOptions = computed(() => {
   const phases = catalog.value?.study_phases
-  if (phases && typeof phases === 'object') return Object.entries(phases).map(([value, label]) => ({ value, label: String(label) }))
+  if (phases && typeof phases === 'object' && Object.keys(phases).length) {
+    return Object.entries(phases).map(([value, label]) => ({ value, label: String(label) }))
+  }
   return [
-    { value: '200', label: '初中' },
     { value: '300', label: '高中' },
+    { value: '200', label: '初中' },
   ]
 })
 
-const quickSubjectSelectOptions = computed(() => [{ value: ALL_VALUE, label: '学科不限' }, ...subjectOptionsForPhase(quick.studyPhase)])
-const advancedSubjectSelectOptions = computed(() => [{ value: ALL_VALUE, label: '学科不限' }, ...subjectOptionsForPhase(advanced.studyPhase)])
-
-function subjectOptionsForPhase(phase: string) {
+const subjectOptions = computed(() => {
   const subjects = catalog.value?.subjects as Record<string, Record<string, string>> | undefined
-  const current = subjects?.[phase] || {}
+  const current = subjects?.[form.studyPhase] || {}
   return Object.entries(current).map(([value, label]) => ({ value, label }))
-}
+})
 
-function tagOptions(field: string, phase = advanced.studyPhase) {
+function tagOptions(field: string, phase = form.studyPhase) {
   const catalogs = catalog.value?.catalogs as Record<string, Record<string, Array<{ code: string; name: string }>>> | undefined
   const items = catalogs?.[phase]?.[field] || []
   return items.map((item) => ({ value: item.code, label: item.name }))
 }
 
-function optionList(field: string, allLabel: string, phase = advanced.studyPhase) {
-  return [{ value: ALL_VALUE, label: allLabel }, ...tagOptions(field, phase)]
+const yearOptions = computed(() => tagOptions('yearCode'))
+const sceneOptions = computed(() => tagOptions('sceneCode'))
+const gradeOptions = computed(() => tagOptions('gradeCode'))
+const termOptions = computed(() => tagOptions('termCode'))
+const rankOptions = computed(() => tagOptions('rank'))
+const provinceOptions = computed(() => tagOptions('provinceCode'))
+
+const isCatalogPopulated = computed(() => {
+  return subjectOptions.value.length > 0 && (yearOptions.value.length > 0 || provinceOptions.value.length > 0)
+})
+
+function labelsFor(options: Array<{ value: string; label: string }>, selected: string[]) {
+  const map = new Map(options.map((o) => [o.value, o.label]))
+  return selected.map((code) => map.get(code) || '').filter(Boolean)
 }
 
-function optionLabel(options: Array<{ value: string; label: string }>, value: string) {
-  return options.find((item) => item.value === value)?.label || ''
+const phaseLabel = computed(() => studyPhaseOptions.value.find((p) => p.value === form.studyPhase)?.label || '高中')
+
+const autoTitlePlaceholder = computed(() => {
+  const parts = [
+    phaseLabel.value,
+    ...labelsFor(subjectOptions.value, form.subjects).slice(0, 2),
+    ...labelsFor(provinceOptions.value, form.provinces).slice(0, 2),
+    ...labelsFor(yearOptions.value, form.years).slice(0, 1),
+    ...labelsFor(sceneOptions.value, form.scenes).slice(0, 1),
+  ].filter(Boolean)
+  return parts.length > 1 ? `留空自动命名为：${parts.join(' · ')}` : '可选，留空自动按所选条件生成任务名'
+})
+
+const hasNarrowingFilter = computed(() => {
+  return Boolean(
+    form.subjects.length ||
+      form.provinces.length ||
+      form.years.length ||
+      form.scenes.length ||
+      form.grades.length ||
+      form.terms.length ||
+      form.ranks.length,
+  )
+})
+
+const hasExtraOptionsSelected = computed(() => Boolean(form.ranks.length || form.fileType || form.maxPagesPerCombo))
+
+const estimateStats = computed(() => estimateResult.value?.stats || {})
+const estimatedResources = computed(() => numberStat(estimateStats.value.resources_seen))
+const estimatedCombos = computed(() => numberStat(estimateStats.value.total_combos || estimateStats.value.completed_combos))
+const isEstimateFresh = computed(() => Boolean(estimateResult.value && estimatedSignature.value === currentFilterSignature()))
+
+function numberStat(value: unknown) {
+  const numeric = Number(value || 0)
+  return Number.isFinite(numeric) ? numeric : 0
 }
 
-function findOptionValue(options: Array<{ value: string; label: string }>, label: string) {
-  const target = label.trim().replace('市', '')
-  return options.find((item) => item.label.trim().replace('市', '') === target)?.value || ALL_VALUE
+function hasAnyCatalogData(data: CatalogState | null | undefined) {
+  if (!data) return false
+  const subjects = data.subjects as Record<string, Record<string, string>> | undefined
+  const catalogs = data.catalogs as Record<string, Record<string, unknown[]>> | undefined
+  const hasSubj = Boolean(subjects && Object.values(subjects).some((group) => group && Object.keys(group).length > 0))
+  const hasTags = Boolean(
+    catalogs &&
+      Object.values(catalogs).some(
+        (phaseMap) => phaseMap && Object.values(phaseMap).some((arr) => Array.isArray(arr) && arr.length > 0),
+      ),
+  )
+  return hasSubj && hasTags
 }
 
-function resetAndOpen() {
-  step.value = 0
-  advancedPanels.value = []
+function resetFilters(keepPhase = false) {
+  if (!keepPhase) {
+    form.studyPhase = '300'
+    form.title = ''
+    form.fileType = ''
+    form.maxPagesPerCombo = undefined
+  }
+  form.subjects = []
+  form.scenes = []
+  form.grades = []
+  form.terms = []
+  form.provinces = []
+  form.years = []
+  form.ranks = []
   estimateResult.value = null
   estimatedSignature.value = ''
-  form.mode = 'estimate'
-  quick.studyPhase = '300'
-  quick.subject = ALL_VALUE
-  quick.province = ALL_VALUE
-  quick.year = ALL_VALUE
-  quick.term = ALL_VALUE
-  quick.scene = ALL_VALUE
-  advanced.studyPhase = '300'
-  advanced.subject = ALL_VALUE
-  advanced.scene = ALL_VALUE
-  advanced.year = ALL_VALUE
-  advanced.rank = ALL_VALUE
-  advanced.province = ALL_VALUE
-  advanced.grade = ALL_VALUE
-  advanced.term = ALL_VALUE
-  visible.value = true
-  loadCatalogs()
 }
 
-function submit() {
-  syncFormFromAdvanced()
-  visible.value = false
-  emit('submit', { ...form, mode: 'crawl' })
+function handlePhaseChange(value: string) {
+  if (form.studyPhase === value) return
+  form.studyPhase = value
+  resetFilters(true)
+}
+
+function syncLabelsIntoForm() {
+  const subjMap = new Map(subjectOptions.value.map((o) => [o.value, o.label]))
+  form.subjectLabels = Object.fromEntries(
+    form.subjects.map((code) => [code, subjMap.get(code) || '']).filter(([, label]) => Boolean(label)),
+  )
+  form.filterLabels = {
+    scenes: labelsFor(sceneOptions.value, form.scenes),
+    grades: labelsFor(gradeOptions.value, form.grades),
+    terms: labelsFor(termOptions.value, form.terms),
+    provinces: labelsFor(provinceOptions.value, form.provinces),
+    years: labelsFor(yearOptions.value, form.years),
+    ranks: labelsFor(rankOptions.value, form.ranks),
+  }
+}
+
+function currentFilterSignature() {
+  return JSON.stringify({
+    studyPhase: form.studyPhase,
+    fileType: form.fileType,
+    maxPagesPerCombo: form.maxPagesPerCombo || null,
+    subjects: [...form.subjects].sort(),
+    scenes: [...form.scenes].sort(),
+    grades: [...form.grades].sort(),
+    terms: [...form.terms].sort(),
+    provinces: [...form.provinces].sort(),
+    years: [...form.years].sort(),
+    ranks: [...form.ranks].sort(),
+  })
+}
+
+async function ensureCatalogsLoaded(forceRefresh = false) {
+  catalogError.value = ''
+  if (!forceRefresh) {
+    catalogLoading.value = true
+    try {
+      const cached = await fetchCatalogs()
+      catalog.value = cached
+      if (hasAnyCatalogData(cached)) {
+        return
+      }
+    } catch (error) {
+      catalogError.value = error instanceof Error ? error.message : String(error)
+    } finally {
+      catalogLoading.value = false
+    }
+  }
+
+  if (!canSubmit.value && !forceRefresh) {
+    return
+  }
+
+  catalogSyncing.value = true
+  try {
+    catalog.value = await refreshCatalogs()
+    if (forceRefresh) {
+      toast.success('筛选分类已同步')
+    }
+  } catch (error) {
+    catalogError.value = error instanceof Error ? error.message : String(error)
+    if (forceRefresh) {
+      toast.error(error, '分类同步失败')
+    }
+  } finally {
+    catalogSyncing.value = false
+  }
+}
+
+watch(
+  () => [visible.value, canSubmit.value] as const,
+  ([isOpen, hasAccount]) => {
+    if (isOpen && hasAccount && !hasAnyCatalogData(catalog.value) && !catalogSyncing.value && !catalogLoading.value) {
+      ensureCatalogsLoaded(true)
+    }
+  },
+)
+
+function openDialog() {
+  resetFilters(false)
+  showMoreOptions.value = false
+  visible.value = true
+  ensureCatalogsLoaded(false)
 }
 
 async function runEstimate() {
-  syncFormFromAdvanced()
+  if (!canSubmit.value) return
+  syncLabelsIntoForm()
   estimateLoading.value = true
-  estimateResult.value = null
   try {
     estimateResult.value = await estimateTask({ ...form, mode: 'estimate' })
     estimatedSignature.value = currentFilterSignature()
-    toast.success('预估完成')
+    toast.success(`预估完成：约 ${numberStat(estimateResult.value?.stats?.resources_seen)} 份试卷`)
   } catch (error) {
     toast.error(error, '预估失败')
   } finally {
@@ -161,310 +259,585 @@ async function runEstimate() {
   }
 }
 
-function numberStat(value: unknown) {
-  const numeric = Number(value || 0)
-  return Number.isFinite(numeric) ? numeric : 0
-}
-
-function valueArray(value: string) {
-  return value && value !== ALL_VALUE ? [value] : []
-}
-
-function applyQuickFilter() {
-  if ([quick.subject, quick.province, quick.year, quick.term, quick.scene].every((value) => value === ALL_VALUE)) {
-    toast.error('请选择快速筛选条件')
-    return
+async function submitDownload() {
+  if (!canSubmit.value) return
+  if (!isEstimateFresh.value && !hasNarrowingFilter.value) {
+    try {
+      await ElMessageBox.confirm(
+        '当前未选择学科、年份或地区，直接开始会扫描当前学段全部试卷。建议至少选择学科或年份后再下载，确定继续吗？',
+        '范围确认',
+        {
+          confirmButtonText: '继续下载',
+          cancelButtonText: '返回选择',
+          type: 'warning',
+        },
+      )
+    } catch {
+      return
+    }
   }
-  advanced.studyPhase = quick.studyPhase
-  advanced.subject = quick.subject
-  advanced.province = quick.province
-  advanced.year = quick.year
-  advanced.term = quick.term
-  advanced.scene = quick.scene
-  if (quick.term !== ALL_VALUE) {
-    const termLabel = optionLabel(optionList('termCode', '年级学期不限', advanced.studyPhase), quick.term)
-    const gradeName = termLabel.endsWith('上') || termLabel.endsWith('下') ? termLabel.slice(0, -1) : termLabel
-    advanced.grade = findOptionValue(optionList('gradeCode', '年级不限', advanced.studyPhase), gradeName)
-  } else {
-    advanced.grade = ALL_VALUE
-  }
-  syncFormFromAdvanced()
-  resetEstimateResult()
-  toast.success('快速筛选已应用')
+  syncLabelsIntoForm()
+  visible.value = false
+  emit('submit', { ...form, mode: 'crawl' })
 }
 
-function changeQuickPhase() {
-  advanced.studyPhase = quick.studyPhase
-  changeAdvancedPhase()
-  quick.subject = ALL_VALUE
-  quick.province = ALL_VALUE
-  quick.year = ALL_VALUE
-  quick.term = ALL_VALUE
-  quick.scene = ALL_VALUE
-}
-
-function changeAdvancedPhase() {
-  advanced.subject = ALL_VALUE
-  advanced.scene = ALL_VALUE
-  advanced.year = ALL_VALUE
-  advanced.rank = ALL_VALUE
-  advanced.province = ALL_VALUE
-  advanced.grade = ALL_VALUE
-  advanced.term = ALL_VALUE
-  syncFormFromAdvanced()
-  resetEstimateResult()
-}
-
-function syncFormFromAdvanced() {
-  form.studyPhase = advanced.studyPhase
-  form.subjects = valueArray(advanced.subject)
-  form.scenes = valueArray(advanced.scene)
-  form.grades = valueArray(advanced.grade)
-  form.terms = valueArray(advanced.term)
-  form.provinces = valueArray(advanced.province)
-  form.years = valueArray(advanced.year)
-  form.ranks = valueArray(advanced.rank)
-  form.subjectLabels = Object.fromEntries(
-    form.subjects.map((code) => [code, optionLabel(advancedSubjectSelectOptions.value, code)]).filter(([, label]) => label),
-  )
-  form.filterLabels = {
-    scenes: selectedLabels(optionList('sceneCode', '不限', advanced.studyPhase), form.scenes),
-    grades: selectedLabels(optionList('gradeCode', '不限', advanced.studyPhase), form.grades),
-    terms: selectedLabels(optionList('termCode', '不限', advanced.studyPhase), form.terms),
-    provinces: selectedLabels(optionList('provinceCode', '不限', advanced.studyPhase), form.provinces),
-    years: selectedLabels(optionList('yearCode', '不限', advanced.studyPhase), form.years),
-    ranks: selectedLabels(optionList('rank', '不限', advanced.studyPhase), form.ranks),
-  }
-}
-
-function selectedLabels(options: Array<{ value: string; label: string }>, values: string[]) {
-  return values
-    .map((value) => optionLabel(options, value))
-    .filter((label) => label && !label.endsWith('不限') && label !== '不限')
-}
-
-function resetEstimateResult() {
-  estimateResult.value = null
-  estimatedSignature.value = ''
-}
-
-function currentFilterSignature() {
-  return JSON.stringify({
-    fileType: form.fileType,
-    studyPhase: advanced.studyPhase,
-    subject: advanced.subject,
-    scene: advanced.scene,
-    year: advanced.year,
-    rank: advanced.rank,
-    province: advanced.province,
-    grade: advanced.grade,
-    term: advanced.term,
-  })
-}
-
-async function loadCatalogs(force = false) {
-  if (catalog.value && !force) return
-  catalogLoading.value = true
-  try {
-    catalog.value = force ? await refreshCatalogs() : await fetchCatalogs()
-  } catch (error) {
-    toast.error(error, '分类加载失败')
-  } finally {
-    catalogLoading.value = false
-  }
+function goAccounts() {
+  visible.value = false
+  router.push('/accounts')
 }
 </script>
 
 <template>
-  <el-button type="primary" size="large" :icon="Plus" @click="resetAndOpen">新建下载任务</el-button>
+  <el-button type="primary" size="large" :icon="Plus" @click="openDialog">新建下载任务</el-button>
 
-  <el-drawer v-model="visible" size="min(1180px, 96vw)" title="新建下载任务" class="task-create-drawer" destroy-on-close>
-    <el-steps :active="step" finish-status="success" align-center class="compact-steps">
-      <el-step title="账号检查" />
-      <el-step title="筛选预估 / 下载" />
-    </el-steps>
-
-    <section class="wizard-body">
-      <div v-if="step === 0" class="stack">
-        <el-alert
-          v-if="canSubmit"
-          :title="`可用账号 ${usableAccounts.length} 个。`"
-          type="success"
-          show-icon
-          :closable="false"
-        />
-        <el-alert
-          v-else
-          title="还没有可用账号，先添加账号。"
-          type="warning"
-          show-icon
-          :closable="false"
-        />
-        <el-descriptions :column="1" border>
-          <el-descriptions-item label="可用账号">{{ usableAccounts.length }}</el-descriptions-item>
-          <el-descriptions-item label="异常/停用">{{ abnormalAccounts.length }}</el-descriptions-item>
-        </el-descriptions>
-        <el-button v-if="!canSubmit" :icon="UserRoundCog" @click="router.push('/accounts')">去添加账号</el-button>
-      </div>
-
-      <el-form v-else label-position="top" class="wizard-form task-create-form">
-        <el-alert
-          title="先预估数量，确认后再下载。"
-          type="info"
-          show-icon
-          :closable="false"
-          class="span-full"
-        />
-
-        <div class="task-form-section span-full">
-          <div class="section-title">
-            <strong>1 筛选试卷</strong>
-            <div class="section-title-actions">
-              <span>快速 + 高级</span>
-              <el-button text type="primary" size="small" :loading="catalogLoading" @click="loadCatalogs(true)">刷新分类</el-button>
-            </div>
-          </div>
-          <el-form-item label="任务名称" class="task-title-field">
-            <el-input v-model="form.title" placeholder="可选，例如：高一数学期末预估" />
-          </el-form-item>
-          <div class="quick-filter">
-            <div class="quick-filter-head">
-              <span class="quick-filter-title">快速筛选</span>
-            </div>
-            <div class="quick-filter-fields">
-              <el-select v-model="quick.studyPhase" class="quick-filter-input" placeholder="学段" @change="changeQuickPhase">
-                <el-option v-for="item in studyPhaseOptions" :key="item.value" :label="item.label" :value="item.value" />
-              </el-select>
-              <el-select v-model="quick.subject" class="quick-filter-input" filterable placeholder="学科">
-                <el-option v-for="item in quickSubjectSelectOptions" :key="item.value" :label="item.label" :value="item.value" />
-              </el-select>
-              <el-select v-model="quick.province" class="quick-filter-input" filterable placeholder="地区">
-                <el-option v-for="item in optionList('provinceCode', '地区不限', quick.studyPhase)" :key="item.value" :label="item.label" :value="item.value" />
-              </el-select>
-              <el-select v-model="quick.year" class="quick-filter-input" filterable placeholder="年份">
-                <el-option v-for="item in optionList('yearCode', '年份不限', quick.studyPhase)" :key="item.value" :label="item.label" :value="item.value" />
-              </el-select>
-              <el-select v-model="quick.term" class="quick-filter-input" filterable placeholder="年级学期">
-                <el-option v-for="item in optionList('termCode', '年级学期不限', quick.studyPhase)" :key="item.value" :label="item.label" :value="item.value" />
-              </el-select>
-              <el-select v-model="quick.scene" class="quick-filter-input" filterable placeholder="场景">
-                <el-option v-for="item in optionList('sceneCode', '场景不限', quick.studyPhase)" :key="item.value" :label="item.label" :value="item.value" />
-              </el-select>
-              <el-button type="primary" class="quick-filter-button" @click="applyQuickFilter">应用</el-button>
-            </div>
-          </div>
-          <div class="filter-panel-footer">
-            <span>当前筛选：{{ selectedFilterSummary }}</span>
-          </div>
+  <el-dialog
+    v-model="visible"
+    width="min(660px, 94vw)"
+    align-center
+    destroy-on-close
+    class="task-create-dialog"
+  >
+    <template #header>
+      <div class="dialog-head">
+        <div>
+          <h3>新建下载任务</h3>
+          <p>支持多选与搜索过滤，留空代表不限该项</p>
         </div>
-
-        <el-collapse v-model="advancedPanels" class="span-full task-advanced-collapse">
-          <el-collapse-item name="advancedFilters">
-            <template #title>
-              <span class="collapse-title">高级筛选：学段 / 学科 / 场景 / 年份 / 等级 / 地区 / 年级 / 学期</span>
-            </template>
-            <div class="filter-list">
-              <div class="filter-row">
-                <span class="filter-row-label">文件类型</span>
-                <el-radio-group v-model="form.fileType" class="filter-toggle">
-                  <el-radio-button label="">不限（含 Word / ZIP）</el-radio-button>
-                  <el-radio-button label="PDF">PDF</el-radio-button>
-                  <el-radio-button label="IMAGE">图片</el-radio-button>
-                </el-radio-group>
-              </div>
-              <div class="filter-row">
-                <span class="filter-row-label">学段</span>
-                <el-radio-group v-model="advanced.studyPhase" class="filter-toggle" @change="changeAdvancedPhase">
-                  <el-radio-button v-for="item in studyPhaseOptions" :key="item.value" :label="item.value">{{ item.label }}</el-radio-button>
-                </el-radio-group>
-              </div>
-              <div class="filter-row">
-                <span class="filter-row-label">学科</span>
-                <el-radio-group v-model="advanced.subject" class="filter-toggle">
-                  <el-radio-button v-for="item in advancedSubjectSelectOptions" :key="item.value" :label="item.value">{{ item.label }}</el-radio-button>
-                </el-radio-group>
-              </div>
-              <div class="filter-row">
-                <span class="filter-row-label">场景</span>
-                <el-radio-group v-model="advanced.scene" class="filter-toggle">
-                  <el-radio-button v-for="item in optionList('sceneCode', '不限', advanced.studyPhase)" :key="item.value" :label="item.value">{{ item.label }}</el-radio-button>
-                </el-radio-group>
-              </div>
-              <div class="filter-row">
-                <span class="filter-row-label">年份</span>
-                <el-radio-group v-model="advanced.year" class="filter-toggle">
-                  <el-radio-button v-for="item in optionList('yearCode', '不限', advanced.studyPhase)" :key="item.value" :label="item.value">{{ item.label }}</el-radio-button>
-                </el-radio-group>
-              </div>
-              <div class="filter-row">
-                <span class="filter-row-label">等级</span>
-                <el-radio-group v-model="advanced.rank" class="filter-toggle">
-                  <el-radio-button v-for="item in optionList('rank', '不限', advanced.studyPhase)" :key="item.value" :label="item.value">{{ item.label }}</el-radio-button>
-                </el-radio-group>
-              </div>
-              <div class="filter-row">
-                <span class="filter-row-label">地区</span>
-                <el-radio-group v-model="advanced.province" class="filter-toggle">
-                  <el-radio-button v-for="item in optionList('provinceCode', '不限', advanced.studyPhase)" :key="item.value" :label="item.value">{{ item.label }}</el-radio-button>
-                </el-radio-group>
-              </div>
-              <div class="filter-row">
-                <span class="filter-row-label">年级</span>
-                <el-radio-group v-model="advanced.grade" class="filter-toggle">
-                  <el-radio-button v-for="item in optionList('gradeCode', '不限', advanced.studyPhase)" :key="item.value" :label="item.value">{{ item.label }}</el-radio-button>
-                </el-radio-group>
-              </div>
-              <div class="filter-row">
-                <span class="filter-row-label">学期</span>
-                <el-radio-group v-model="advanced.term" class="filter-toggle">
-                  <el-radio-button v-for="item in optionList('termCode', '不限', advanced.studyPhase)" :key="item.value" :label="item.value">{{ item.label }}</el-radio-button>
-                </el-radio-group>
-              </div>
-            </div>
-          </el-collapse-item>
-        </el-collapse>
-
-        <div class="task-form-section span-full task-control-panel">
-          <div class="section-title">
-            <strong>2 执行任务</strong>
-            <span class="task-context">当前筛选：{{ selectedFilterSummary }}</span>
-          </div>
-          <div class="action-grid status-action-flow">
-            <el-button class="task-control-action secondary-action" size="large" :loading="estimateLoading" :disabled="!canSubmit" @click="runEstimate">
-              预估数量
-            </el-button>
-            <el-button class="task-control-action primary-action" type="primary" size="large" :loading="submitting" :disabled="!canSubmit || !canStartDownload" @click="submit">
-              开始下载
-            </el-button>
-          </div>
-          <div class="estimate-inline-result">
-            <template v-if="estimateResult">
-              <span>条件组合：{{ estimatedCombos }}</span>
-              <span>匹配试卷：{{ estimatedResources }}</span>
-              <span>异常数量：{{ estimateIssues }}</span>
-              <span v-if="!canStartDownload" class="warning-text">筛选已变化，请重新预估。</span>
-            </template>
-            <template v-else>
-              <span>先预估数量，确认后再下载。</span>
-            </template>
-          </div>
-        </div>
-
-      </el-form>
-
-    </section>
-
-    <template #footer>
-      <div class="drawer-footer">
-        <span class="drawer-footer-hint">
-          {{ step === 0 ? '确认账号池可用' : '筛选并预估/下载' }}
-        </span>
-        <div class="drawer-footer-actions">
-          <el-button @click="visible = false">取消</el-button>
-          <el-button v-if="step > 0" @click="step -= 1">上一步</el-button>
-          <el-button v-if="step < 1" type="primary" :disabled="!canSubmit" @click="step += 1">下一步</el-button>
+        <div class="dialog-head-right">
+          <span class="account-pill" :class="{ warn: !canSubmit }">
+            {{ canSubmit ? `可用账号 ${usableAccounts.length}` : '无可用账号' }}
+          </span>
+          <el-button
+            size="small"
+            :loading="catalogSyncing"
+            :disabled="!canSubmit"
+            title="从官网重新拉取最新分类"
+            @click="ensureCatalogsLoaded(true)"
+          >
+            <RefreshCw v-if="!catalogSyncing" :size="13" style="margin-right: 4px" />同步分类
+          </el-button>
         </div>
       </div>
     </template>
-  </el-drawer>
+
+    <div class="dialog-body">
+      <!-- 未配置账号引导 -->
+      <div v-if="!canSubmit" class="state-banner warn">
+        <div>
+          <strong>请先添加至少一个可用账号</strong>
+          <p>拉取筛选分类、预估试卷数和下载文件均需要登录账号。</p>
+        </div>
+        <el-button type="primary" :icon="UserRoundCog" @click="goAccounts">去添加账号</el-button>
+      </div>
+
+      <!-- 首次自动同步分类加载态 -->
+      <div v-else-if="(catalogLoading || catalogSyncing) && !isCatalogPopulated" class="sync-loading-box">
+        <el-skeleton :rows="4" animated />
+        <p>正在同步学科、年份与地区分类，请稍候…</p>
+      </div>
+
+      <!-- 同步失败引导 -->
+      <div v-else-if="!isCatalogPopulated" class="state-banner error">
+        <div>
+          <strong>尚未获取到筛选分类</strong>
+          <p>{{ catalogError || '网络波动或账号状态过期，请点击重新同步。' }}</p>
+        </div>
+        <el-button type="primary" :loading="catalogSyncing" @click="ensureCatalogsLoaded(true)">
+          重新同步
+        </el-button>
+      </div>
+
+      <!-- 清爽双列下拉表单 -->
+      <div v-if="isCatalogPopulated || canSubmit" class="compact-form" :class="{ disabled: !isCatalogPopulated }">
+        <!-- 学段分段切换 + 重置 -->
+        <div class="phase-bar">
+          <div class="phase-segmented">
+            <button
+              v-for="phase in studyPhaseOptions"
+              :key="phase.value"
+              type="button"
+              class="seg-btn"
+              :class="{ active: form.studyPhase === phase.value }"
+              @click="handlePhaseChange(phase.value)"
+            >
+              {{ phase.label }}
+            </button>
+          </div>
+
+          <el-button
+            v-if="hasNarrowingFilter || hasExtraOptionsSelected"
+            link
+            size="small"
+            @click="resetFilters(true)"
+          >
+            <RotateCcw :size="12" style="margin-right: 4px" />清空已选条件
+          </el-button>
+        </div>
+
+        <!-- 2x3 核心条件网格 -->
+        <div class="form-grid-2">
+          <div class="field-item">
+            <label>学科</label>
+            <el-select
+              v-model="form.subjects"
+              multiple
+              filterable
+              clearable
+              collapse-tags
+              collapse-tags-tooltip
+              :max-collapse-tags="2"
+              placeholder="全部学科"
+            >
+              <el-option v-for="item in subjectOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </div>
+
+          <div class="field-item">
+            <label>年份</label>
+            <el-select
+              v-model="form.years"
+              multiple
+              filterable
+              clearable
+              collapse-tags
+              collapse-tags-tooltip
+              :max-collapse-tags="2"
+              placeholder="不限年份"
+            >
+              <el-option v-for="item in yearOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </div>
+
+          <div class="field-item">
+            <label>地区</label>
+            <el-select
+              v-model="form.provinces"
+              multiple
+              filterable
+              clearable
+              collapse-tags
+              collapse-tags-tooltip
+              :max-collapse-tags="2"
+              placeholder="全部地区（可输入省份搜索）"
+            >
+              <el-option v-for="item in provinceOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </div>
+
+          <div class="field-item">
+            <label>考试类型</label>
+            <el-select
+              v-model="form.scenes"
+              multiple
+              filterable
+              clearable
+              collapse-tags
+              collapse-tags-tooltip
+              :max-collapse-tags="2"
+              placeholder="不限类型"
+            >
+              <el-option v-for="item in sceneOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </div>
+
+          <div class="field-item">
+            <label>年级</label>
+            <el-select
+              v-model="form.grades"
+              multiple
+              clearable
+              collapse-tags
+              collapse-tags-tooltip
+              :max-collapse-tags="2"
+              placeholder="不限年级"
+            >
+              <el-option v-for="item in gradeOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </div>
+
+          <div class="field-item">
+            <label>学期</label>
+            <el-select
+              v-model="form.terms"
+              multiple
+              clearable
+              collapse-tags
+              collapse-tags-tooltip
+              :max-collapse-tags="2"
+              placeholder="不限学期"
+            >
+              <el-option v-for="item in termOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </div>
+        </div>
+
+        <!-- 任务名称 -->
+        <div class="field-item">
+          <label>任务名称（可选）</label>
+          <el-input v-model="form.title" :placeholder="autoTitlePlaceholder" clearable />
+        </div>
+
+        <!-- 折叠更多限制 -->
+        <div class="extra-panel" :class="{ open: showMoreOptions }">
+          <button type="button" class="extra-trigger" @click="showMoreOptions = !showMoreOptions">
+            <span>
+              更多限制（试卷等级 / 文件格式 / 页数上限）
+              <em v-if="hasExtraOptionsSelected" class="extra-dot">已设置</em>
+            </span>
+            <ChevronDown :size="15" class="extra-chevron" :class="{ rotated: showMoreOptions }" />
+          </button>
+
+          <div v-if="showMoreOptions" class="extra-body">
+            <div class="form-grid-3">
+              <div class="field-item">
+                <label>试卷等级</label>
+                <el-select
+                  v-model="form.ranks"
+                  multiple
+                  clearable
+                  collapse-tags
+                  :max-collapse-tags="1"
+                  placeholder="不限等级"
+                >
+                  <el-option v-for="item in rankOptions" :key="item.value" :label="item.label" :value="item.value" />
+                </el-select>
+              </div>
+
+              <div class="field-item">
+                <label>文件格式</label>
+                <el-select v-model="form.fileType" placeholder="全部格式">
+                  <el-option label="全部格式（推荐）" value="" />
+                  <el-option label="仅 PDF" value="PDF" />
+                  <el-option label="仅图片" value="IMAGE" />
+                </el-select>
+              </div>
+
+              <div class="field-item">
+                <label>单组合最大页数</label>
+                <el-input-number
+                  v-model="form.maxPagesPerCombo"
+                  :min="1"
+                  :max="999"
+                  controls-position="right"
+                  placeholder="默认"
+                  class="full-width-num"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <template #footer>
+      <div class="dialog-foot">
+        <div class="foot-left">
+          <div v-if="estimateResult" class="estimate-pill" :class="{ stale: !isEstimateFresh }">
+            <template v-if="isEstimateFresh">
+              预计匹配 <strong class="mono">{{ estimatedResources }}</strong> 份试卷（{{ estimatedCombos }} 组）
+            </template>
+            <template v-else>条件已变更，可重新预估</template>
+          </div>
+        </div>
+
+        <div class="foot-actions">
+          <el-button @click="visible = false">取消</el-button>
+          <el-button
+            :loading="estimateLoading"
+            :disabled="!canSubmit || !isCatalogPopulated"
+            @click="runEstimate"
+          >
+            <Calculator v-if="!estimateLoading" :size="15" style="margin-right: 5px" />预估数量
+          </el-button>
+          <el-button
+            type="primary"
+            :loading="submitting"
+            :disabled="!canSubmit || !isCatalogPopulated"
+            @click="submitDownload"
+          >
+            <Download v-if="!submitting" :size="15" style="margin-right: 5px" />
+            {{ isEstimateFresh ? `开始下载（约 ${estimatedResources} 份）` : '开始下载' }}
+          </el-button>
+        </div>
+      </div>
+    </template>
+  </el-dialog>
 </template>
+
+<style scoped>
+.dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-right: 22px;
+  flex-wrap: wrap;
+}
+
+.dialog-head h3 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--app-text);
+}
+
+.dialog-head p {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  color: var(--app-muted);
+}
+
+.dialog-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.account-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: rgba(16, 185, 129, 0.13);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #6ee7b7;
+}
+
+.account-pill.warn {
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.34);
+  color: #fcd34d;
+}
+
+.dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.state-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 16px;
+  border-radius: 12px;
+}
+
+.state-banner.warn {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.28);
+}
+
+.state-banner.error {
+  background: rgba(244, 63, 94, 0.1);
+  border: 1px solid rgba(244, 63, 94, 0.28);
+}
+
+.state-banner strong {
+  display: block;
+  font-size: 13.5px;
+  color: var(--app-text);
+}
+
+.state-banner p {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  color: var(--app-muted);
+}
+
+.sync-loading-box {
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--app-border);
+  background: rgba(14, 20, 34, 0.55);
+}
+
+.sync-loading-box p {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--app-muted);
+  text-align: center;
+}
+
+.compact-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.compact-form.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.phase-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.phase-segmented {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(11, 16, 28, 0.85);
+  border: 1px solid var(--app-border);
+}
+
+.seg-btn {
+  min-width: 72px;
+  height: 30px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-muted);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+}
+
+.seg-btn:hover {
+  color: var(--app-text);
+}
+
+.seg-btn.active {
+  background: var(--app-primary-gradient);
+  color: #ffffff;
+  box-shadow: 0 3px 10px -2px rgba(99, 102, 241, 0.5);
+}
+
+.form-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+}
+
+.form-grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.field-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field-item label {
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--app-muted);
+}
+
+.field-item :deep(.el-select) {
+  width: 100%;
+}
+
+.full-width-num {
+  width: 100% !important;
+}
+
+.extra-panel {
+  border: 1px solid var(--app-border);
+  border-radius: 11px;
+  background: rgba(14, 20, 34, 0.52);
+  overflow: hidden;
+}
+
+.extra-panel.open {
+  border-color: var(--app-border-strong);
+}
+
+.extra-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border: none;
+  background: transparent;
+  color: var(--app-muted);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: color 140ms ease, background-color 140ms ease;
+}
+
+.extra-trigger:hover {
+  color: var(--app-text);
+  background: rgba(30, 42, 68, 0.3);
+}
+
+.extra-dot {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-style: normal;
+  font-size: 11px;
+  background: rgba(99, 102, 241, 0.2);
+  color: #c7d2fe;
+}
+
+.extra-chevron {
+  transition: transform 170ms ease;
+}
+
+.extra-chevron.rotated {
+  transform: rotate(180deg);
+}
+
+.extra-body {
+  padding: 12px 14px 14px;
+  border-top: 1px solid var(--app-border);
+}
+
+.dialog-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.foot-left {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+}
+
+.estimate-pill {
+  padding: 4px 11px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.28);
+  color: #a7f3d0;
+}
+
+.estimate-pill strong {
+  color: #ffffff;
+}
+
+.estimate-pill.stale {
+  background: rgba(148, 163, 184, 0.1);
+  border-color: var(--app-border);
+  color: var(--app-muted);
+}
+
+.foot-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+@media (max-width: 640px) {
+  .form-grid-2,
+  .form-grid-3 {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

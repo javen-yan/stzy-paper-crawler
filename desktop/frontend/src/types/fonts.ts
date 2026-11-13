@@ -1,3 +1,11 @@
+export interface SampledFontEntry {
+  font: string
+  seen_count: number
+  status: 'installed' | 'downloaded' | 'substituted' | 'missing' | string
+  mapped_to?: string
+  updated_at?: string
+}
+
 export interface FontStatus {
   font_config: boolean
   font_engine?: string
@@ -10,12 +18,15 @@ export interface FontStatus {
   open_fonts_available: string[]
   open_fonts_installed: string[]
   open_fonts_missing: string[]
+  sampled_fonts?: SampledFontEntry[]
   data_dir: string
   checked?: string[]
   resolved?: {
     exact: string[]
     substituted: Record<string, string>
+    heuristic?: string[]
     missing: string[]
+    warnings?: string[]
     policy: string
     visual_review: boolean
   }

@@ -217,6 +217,48 @@ select,
   border: 1px solid var(--app-border) !important;
 }
 
+.el-collapse {
+  --el-collapse-border-color: transparent;
+  --el-collapse-header-bg-color: transparent;
+  --el-collapse-content-bg-color: transparent;
+  border: 1px solid var(--app-border) !important;
+  border-radius: 12px;
+  background: rgba(14, 20, 34, 0.65);
+  overflow: hidden;
+}
+
+.el-collapse-item__header {
+  padding: 0 18px !important;
+  height: 46px !important;
+  line-height: 46px !important;
+  font-size: 13.5px !important;
+  font-weight: 600 !important;
+  color: var(--app-muted) !important;
+  background: transparent !important;
+  border-bottom: none !important;
+  transition: color 150ms ease, background-color 150ms ease;
+}
+
+.el-collapse-item__header:hover {
+  color: var(--app-text) !important;
+  background: rgba(30, 42, 68, 0.38) !important;
+}
+
+.el-collapse-item__header.is-active {
+  color: var(--app-text) !important;
+  border-bottom: 1px solid var(--app-border) !important;
+}
+
+.el-collapse-item__wrap {
+  background: transparent !important;
+  border-bottom: none !important;
+}
+
+.el-collapse-item__content {
+  padding: 16px 18px !important;
+  color: var(--app-text) !important;
+}
+
 /* 等宽与等宽数字工具类 */
 .mono,
 code,

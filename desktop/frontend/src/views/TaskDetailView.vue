@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
-import { Archive, ArrowLeft, CirclePause, CirclePlay, Download, RotateCcw, XCircle } from 'lucide-vue-next'
+import { Archive, ArrowLeft, CirclePause, CirclePlay, Download, FolderOpen, RotateCcw, XCircle } from 'lucide-vue-next'
 import { openLocalPath } from '../api/local'
 import { fetchCatalogs } from '../api/catalogs'
 import { fetchTaskResources } from '../api/tasks'
@@ -29,10 +29,20 @@ const props = defineProps<{ id: string }>()
 const router = useRouter()
 const toast = useToast()
 const { setActiveTaskId } = useLayoutState()
-const { selectedTask, logs, resources, selectTask, refreshSelectedTask, refreshLogs, refreshResources, createDownloadFromEstimate, runTaskAction } = useTasks()
+const {
+  selectedTask,
+  logs,
+  resources,
+  selectTask,
+  refreshSelectedTask,
+  refreshLogs,
+  refreshResources,
+  createDownloadFromEstimate,
+  runTaskAction,
+} = useTasks()
 const { currentExport, createTaskZip } = useExports()
 const { canUseLocal } = useRuntime()
-const activeTab = ref<TaskDetailTabKey>('overview')
+const activeTab = ref<TaskDetailTabKey>('files')
 const loading = ref(false)
 const actionLoading = ref(false)
 const zipLoading = ref(false)
@@ -50,12 +60,16 @@ const issueResources = ref<TaskResource[]>([])
 const issueRefreshAt = ref(0)
 const visibleResources = computed(() => resources.value.slice(0, resourcePageSize.value))
 
-const polling = usePolling(async () => {
-  await refreshSelectedTask()
-  if (activeTab.value === 'logs') await refreshLogs()
-  if (shouldRefreshResources()) await refreshResourcePage()
-  if (shouldRefreshIssues()) await refreshIssueResources()
-}, 3000, { hiddenIntervalMs: 15000 })
+const polling = usePolling(
+  async () => {
+    await refreshSelectedTask()
+    if (activeTab.value === 'logs') await refreshLogs()
+    if (shouldRefreshResources()) await refreshResourcePage()
+    if (shouldRefreshIssues()) await refreshIssueResources()
+  },
+  3000,
+  { hiddenIntervalMs: 15000 },
+)
 
 const overviewStats = computed<TaskOverviewStats>(() => {
   const stats = selectedTask.value?.stats || {}
@@ -72,28 +86,13 @@ const overviewStats = computed<TaskOverviewStats>(() => {
   }
 })
 
-const summaryMetrics = computed(() => {
-  const stats = selectedTask.value?.stats || {}
-  const processed = numberStat(stats.resources_processed || stats.resources_completed || stats.success)
-  const filtered = numberStat(stats.filtered_skipped)
-  return [
-    { label: '远端返回', value: numberStat(stats.resources_total || stats.resources_seen) },
-    { label: '已处理', value: processed },
-    { label: '实际下载', value: Math.max(0, processed - filtered) },
-    { label: '地区过滤', value: filtered },
-    { label: '已下载图片', value: numberStat(stats.images_downloaded) },
-    { label: '跳过付费', value: numberStat(stats.paid_skipped) },
-    { label: '条件组合', value: `${numberStat(stats.completed_combos)}/${numberStat(stats.total_combos)}` },
-  ]
+const resolvedFilters = computed(() => (selectedTask.value ? resolveTaskFilters(selectedTask.value, catalog.value) : []))
+
+const subjectTagNames = computed(() => {
+  const subjects = selectedTask.value?.spec?.subjects || []
+  const names = subjects.map((s) => s.name || s.code || '').filter(Boolean)
+  return names.length ? names.join('、') : '全部学科'
 })
-
-const resolvedFilters = computed(() => resolveTaskFilters(selectedTask.value!, catalog.value))
-
-const configSnapshot = computed(() => ({
-  filters: selectedTask.value?.spec?.filters || {},
-  subjects: selectedTask.value?.spec?.subjects || [],
-  settings: selectedTask.value?.spec?.settings || {},
-}))
 
 const taskError = computed(() => {
   const task = selectedTask.value
@@ -106,46 +105,86 @@ const issues = computed<TaskIssue[]>(() => {
   const task = selectedTask.value
   if (!task) return result
   if (taskError.value) {
-    result.push({ type: 'task', title: '任务错误', detail: taskError.value, recovery: '查看日志定位原因，修复后可尝试恢复任务。' })
+    result.push({
+      type: 'task',
+      title: '任务异常停止',
+      detail: taskError.value,
+      recovery: '检查网络或账号状态后，点击「继续任务」从断点恢复。',
+    })
   }
   if (task.status === 'auth_expired') {
-    result.push({ type: 'account', title: '账号登录失效', detail: '任务运行时检测到账号不可用。', recovery: '进入账号池验证或更新账号后，在本页点击恢复。' })
+    result.push({
+      type: 'account',
+      title: '账号登录已失效',
+      detail: '任务执行过程中检测到当前账号不可用。',
+      recovery: '前往「账号管理」重新验证或补充可用账号后恢复任务。',
+    })
   }
   if (task.status === 'interrupted') {
-    result.push({ type: 'task', title: '任务被中断', detail: '服务重启或异常退出导致任务停止。', recovery: '点击恢复，从检查点继续。' })
-  }
-  if (task.status === 'cancelled') {
-    result.push({ type: 'task', title: '任务已取消', detail: '任务已停止调度，未完成的范围会保留。', recovery: '点击恢复，从检查点继续下载未完成部分。' })
+    result.push({
+      type: 'task',
+      title: '任务中断',
+      detail: '客户端退出或重启导致未完成任务暂停。',
+      recovery: '点击「继续任务」即可跳过已完成资源继续下载。',
+    })
   }
   for (const resource of issueResources.value) {
+    const detail = issueResourceDetail(resource)
     result.push({
       type: 'resource',
       title: String(resource.resource_name || resource.name || resource.resource_id || '资源异常'),
-      detail: issueResourceDetail(resource),
-      recovery: '点击恢复任务后，系统只会重试未完成资源，不会重新扫描已完成资源。',
+      detail,
+      recovery: issueResourceRecovery(resource, detail),
+      local_dir: resource.local_dir || undefined,
     })
-  }
-  if (!result.length) {
-    result.push({ type: 'task', title: '暂无需处理问题', detail: '当前任务没有记录到阻塞性错误。', recovery: '可以继续等待任务完成，或在文件结果中查看已发布文件。' })
   }
   return result
 })
 
 const currentTaskExport = computed(() => (currentExport.value?.task_id === props.id ? currentExport.value : null))
-const canResume = computed(() => ['paused', 'partial_completed', 'failed', 'auth_expired', 'interrupted', 'cancelled'].includes(selectedTask.value?.status || ''))
+const canResume = computed(() =>
+  selectedTask.value?.mode !== 'estimate' &&
+  ['paused', 'partial_completed', 'failed', 'auth_expired', 'interrupted', 'cancelled'].includes(
+    selectedTask.value?.status || '',
+  ),
+)
 const canPause = computed(() => ['running', 'queued'].includes(selectedTask.value?.status || ''))
 const canStartDownload = computed(() => selectedTask.value?.mode === 'estimate' && selectedTask.value.status === 'completed')
 const isTaskActive = computed(() => ['queued', 'running', 'pausing'].includes(selectedTask.value?.status || ''))
-const canCreateZip = computed(() => Boolean(selectedFilePaths.value.length || ['completed', 'partial_completed'].includes(selectedTask.value?.status || '')))
+const hasLocalFiles = computed(() =>
+  Boolean(
+    selectedTask.value?.mode !== 'estimate' &&
+      (overviewStats.value.completed > 0 || ['completed', 'partial_completed'].includes(selectedTask.value?.status || '')),
+  ),
+)
+const canCreateZip = computed(() => Boolean(selectedFilePaths.value.length || hasLocalFiles.value))
 
 function numberStat(value: unknown) {
   const numeric = Number(value || 0)
   return Number.isFinite(numeric) ? numeric : 0
 }
 
+function formatTime(raw?: string) {
+  if (!raw) return '-'
+  return raw.replace('T', ' ').replace(/\.\d+/, '').replace(/([+-]\d{2}:\d{2}|Z)$/, '')
+}
+
 async function refreshAll() {
   await selectTask(props.id, { includeLogs: false, includeResources: false })
-  await refreshResourcePage()
+  const status = selectedTask.value?.status || ''
+  if (selectedTask.value?.mode === 'estimate') {
+    activeTab.value = 'logs'
+    await refreshLogs(true)
+  } else if (['failed', 'auth_expired', 'interrupted'].includes(status)) {
+    activeTab.value = 'issues'
+    await refreshIssueResources()
+  } else if (['running', 'queued'].includes(status) && overviewStats.value.completed === 0) {
+    activeTab.value = 'resources'
+    await refreshResourcePage()
+  } else {
+    activeTab.value = 'files'
+    await refreshResourcePage()
+  }
 }
 
 async function refreshResourcePage() {
@@ -161,10 +200,8 @@ async function refreshResourcePage() {
 }
 
 async function refreshIssueResources() {
-  const statuses = ['failed', 'paid_unavailable', 'partial', 'downloading', 'pending']
-  const payloads = await Promise.all(
-    statuses.map((status) => fetchTaskResources(props.id, 20, 0, status)),
-  )
+  const statuses = ['failed', 'paid_unavailable', 'partial']
+  const payloads = await Promise.all(statuses.map((status) => fetchTaskResources(props.id, 30, 0, status)))
   const seen = new Set<string>()
   issueResources.value = payloads
     .flatMap((payload) => payload.items)
@@ -191,11 +228,26 @@ function shouldRefreshIssues() {
 function issueResourceDetail(resource: TaskResource) {
   if (resource.error) return String(resource.error)
   const status = String(resource.status || '')
-  if (status === 'paid_unavailable') return '当前账号池没有可下载该付费资源的账号，请补充 VIP 账号后恢复任务。'
-  if (status === 'partial') return '资源只完成了部分文件，恢复任务时会补下载。'
-  if (status === 'downloading') return '资源停留在下载中状态，可能是任务中断留下的未完成记录。'
-  if (status === 'pending') return '资源尚未开始下载，恢复任务时会继续处理。'
+  if (status === 'paid_unavailable') return '当前账号池无可用 VIP 额度下载该资源。'
+  if (status === 'partial') return '仅完成部分页面，继续任务时会补齐。'
   return '资源未完成。'
+}
+
+function issueResourceRecovery(resource: TaskResource, detail: string) {
+  const status = String(resource.status || '')
+  if (status === 'paid_unavailable') {
+    return '前往「账号管理」补充可用 VIP 账号后，点击「继续任务」即可补齐。'
+  }
+  if (detail.includes('RAR') || detail.includes('7z') || detail.includes('密码') || detail.includes('音频')) {
+    return '系统已将原文件完整保存在本地目录，可直接点击「打开原文件目录」查看使用。'
+  }
+  if (detail.includes('LibreOffice')) {
+    return '安装 LibreOffice 后点击「继续任务」，即可将已保存的原文件自动转换为 PDF。'
+  }
+  if (resource.local_dir && (detail.includes('已保留') || detail.includes('已保存'))) {
+    return '原文件已保存在本地目录，可直接打开查看；也可稍后继续任务重试转换。'
+  }
+  return '恢复任务时仅重试未完成资源，不会重复下载已保存文件。'
 }
 
 function refreshFileManager() {
@@ -230,16 +282,27 @@ async function nextResourcePage() {
 async function handleAction(action: 'pause' | 'resume' | 'cancel' | 'archive') {
   if (!selectedTask.value) return
   if (['cancel', 'archive'].includes(action)) {
-    await ElMessageBox.confirm(action === 'cancel' ? '取消后任务会停止调度，在途操作会收尾。' : '归档只隐藏任务，不删除文件。', '确认操作', {
-      confirmButtonText: '确认',
-      cancelButtonText: '取消',
-      type: 'warning',
-    })
+    try {
+      await ElMessageBox.confirm(
+        action === 'cancel' ? '取消后任务停止下载，已完成文件保留。' : '归档后任务从默认列表中隐藏，本地文件不会删除。',
+        action === 'cancel' ? '取消任务' : '归档任务',
+        {
+          confirmButtonText: '确认',
+          cancelButtonText: '返回',
+          type: 'warning',
+        },
+      )
+    } catch {
+      return
+    }
   }
   actionLoading.value = true
   try {
     await runTaskAction(selectedTask.value.id, action)
-    toast.success('操作已提交')
+    toast.success(action === 'archive' ? '任务已归档' : '操作已执行')
+    if (action === 'archive') {
+      router.push('/tasks')
+    }
   } catch (error) {
     toast.error(error)
   } finally {
@@ -249,19 +312,14 @@ async function handleAction(action: 'pause' | 'resume' | 'cancel' | 'archive') {
 
 async function startDownloadFromEstimate() {
   if (!selectedTask.value) return
-  await ElMessageBox.confirm('沿用本次预估的筛选条件创建下载任务。', '开始下载', {
-    confirmButtonText: '开始下载',
-    cancelButtonText: '取消',
-    type: 'info',
-  })
   actionLoading.value = true
   try {
     const task = await createDownloadFromEstimate(selectedTask.value)
     setActiveTaskId(task.id)
-    toast.success('下载任务已创建')
+    toast.success('已创建下载任务')
     router.push(`/tasks/${task.id}`)
   } catch (error) {
-    toast.error(error, '下载任务创建失败')
+    toast.error(error, '创建下载任务失败')
   } finally {
     actionLoading.value = false
   }
@@ -271,18 +329,22 @@ async function createZip() {
   zipLoading.value = true
   try {
     const baseLabel = selectedTask.value ? taskDisplayName(selectedTask.value).replace(/[\\/:*?"<>|]+/g, '_') : props.id
-    const job = await createTaskZip(
-      props.id,
-      selectedFilePaths.value,
-      `${baseLabel}.zip`,
-    )
+    const job = await createTaskZip(props.id, selectedFilePaths.value, `${baseLabel}.zip`)
     if (job) {
       toast.success(`ZIP 已导出至 ${job.file_path || job.display_name || ''}`)
     }
   } catch (error) {
-    toast.error(error, 'ZIP 生成失败')
+    toast.error(error, '导出 ZIP 失败')
   } finally {
     zipLoading.value = false
+  }
+}
+
+async function openTaskFolder() {
+  try {
+    await openLocalPath('', { taskId: props.id })
+  } catch (error) {
+    toast.error(error, '打开本地目录失败')
   }
 }
 
@@ -300,7 +362,9 @@ onMounted(async () => {
   setActiveTaskId(props.id)
   try {
     await refreshAll()
-    fetchCatalogs().then((data) => (catalog.value = data)).catch(() => {})
+    fetchCatalogs()
+      .then((data) => (catalog.value = data))
+      .catch(() => {})
     polling.start()
   } catch (error) {
     toast.error(error, '任务详情加载失败')
@@ -324,111 +388,117 @@ watch(
     <el-skeleton v-if="loading" :rows="8" animated />
 
     <template v-else-if="selectedTask">
+      <!-- 顶部标题与操作栏 -->
       <el-card shadow="never" class="task-detail-header-card">
         <div class="detail-header">
           <div class="detail-header-left">
             <el-button :icon="ArrowLeft" text @click="router.push('/tasks')">返回</el-button>
             <div class="detail-title">
-              <h2>{{ taskDisplayName(selectedTask) }}</h2>
-              <small class="mono">{{ selectedTask.id }}</small>
+              <div class="title-row">
+                <h2>{{ taskDisplayName(selectedTask) }}</h2>
+                <StatusTag :status="selectedTask.status" :label="taskStatusLabel(selectedTask)" />
+              </div>
+              <small class="meta-subline">
+                创建于 {{ formatTime(selectedTask.created_at) }}
+                <template v-if="selectedTask.active_proxy"> · 代理 {{ selectedTask.active_proxy }}</template>
+              </small>
             </div>
-            <StatusTag :status="selectedTask.status" :label="taskStatusLabel(selectedTask)" />
           </div>
+
           <div class="detail-header-actions">
-            <el-button v-if="canStartDownload" :icon="Download" type="primary" :loading="actionLoading" @click="startDownloadFromEstimate">开始下载</el-button>
+            <el-button v-if="canStartDownload" :icon="Download" type="primary" :loading="actionLoading" @click="startDownloadFromEstimate">
+              开始下载
+            </el-button>
+            <el-button v-if="hasLocalFiles" :icon="FolderOpen" @click="openTaskFolder">打开文件夹</el-button>
+            <el-button v-if="selectedTask.mode !== 'estimate'" :icon="Download" :loading="zipLoading" :disabled="!canCreateZip" @click="createZip">
+              {{ selectedFilePaths.length ? `导出已选 (${selectedFilePaths.length})` : '导出 ZIP' }}
+            </el-button>
             <el-button v-if="canPause" :icon="CirclePause" :loading="actionLoading" @click="handleAction('pause')">暂停</el-button>
-            <el-button v-if="canResume" :icon="CirclePlay" :loading="actionLoading" @click="handleAction('resume')">恢复</el-button>
+            <el-button v-if="canResume" :icon="CirclePlay" type="primary" :loading="actionLoading" @click="handleAction('resume')">继续任务</el-button>
             <el-button v-if="isTaskActive" :icon="XCircle" type="danger" plain :loading="actionLoading" @click="handleAction('cancel')">取消</el-button>
-            <el-button :icon="Archive" :loading="actionLoading" @click="handleAction('archive')">归档</el-button>
-            <el-button :icon="Download" type="primary" plain :loading="zipLoading" :disabled="!canCreateZip" @click="createZip">下载 ZIP</el-button>
+            <el-button v-if="!selectedTask.archived" :icon="Archive" :loading="actionLoading" @click="handleAction('archive')">归档</el-button>
           </div>
         </div>
       </el-card>
 
-      <section class="detail-desc">
+      <!-- 核心进度与筛选摘要 -->
+      <section class="detail-overview-grid">
         <el-card shadow="never">
-          <template #header>进度</template>
           <TaskProgress :task="selectedTask" />
-          <div class="summary-grid detail-stats-row">
+          <div class="detail-stats-row">
             <div class="detail-stat" data-tone="idle">
-              <span class="detail-stat-label">远端返回</span>
+              <span class="detail-stat-label">匹配总数</span>
               <strong>{{ overviewStats.total }}</strong>
-            </div>
-            <div class="detail-stat" data-tone="idle">
-              <span class="detail-stat-label">已处理</span>
-              <strong>{{ overviewStats.processed }}</strong>
             </div>
             <div class="detail-stat" data-tone="success">
               <span class="detail-stat-label">已完成</span>
               <strong>{{ overviewStats.completed }}</strong>
+            </div>
+            <div class="detail-stat" data-tone="idle">
+              <span class="detail-stat-label">待处理</span>
+              <strong>{{ overviewStats.pending }}</strong>
             </div>
             <div class="detail-stat" data-tone="danger">
               <span class="detail-stat-label">失败</span>
               <strong>{{ overviewStats.failed }}</strong>
             </div>
             <div class="detail-stat" data-tone="warning">
-              <span class="detail-stat-label">跳过/受限</span>
+              <span class="detail-stat-label">跳过 / 过滤</span>
               <strong>{{ overviewStats.skipped }}</strong>
-            </div>
-            <div class="detail-stat" data-tone="idle">
-              <span class="detail-stat-label">未处理</span>
-              <strong>{{ overviewStats.pending }}</strong>
             </div>
           </div>
         </el-card>
 
-        <el-card shadow="never">
-          <template #header>任务信息</template>
-          <el-descriptions :column="1" border class="task-meta">
-            <el-descriptions-item label="模式">{{ selectedTask.mode === 'estimate' ? '预估' : '采集下载' }}</el-descriptions-item>
-            <el-descriptions-item label="创建时间">{{ selectedTask.created_at }}</el-descriptions-item>
-            <el-descriptions-item label="更新时间">{{ selectedTask.updated_at }}</el-descriptions-item>
-            <el-descriptions-item label="开始时间">{{ selectedTask.started_at || '未记录' }}</el-descriptions-item>
-            <el-descriptions-item label="结束时间">{{ selectedTask.ended_at || '未结束' }}</el-descriptions-item>
-            <el-descriptions-item label="当前代理">{{ selectedTask.active_proxy || '未使用代理' }}</el-descriptions-item>
-          </el-descriptions>
+        <el-card shadow="never" class="filter-snapshot-card">
+          <div class="snapshot-title">筛选范围</div>
+          <div class="snapshot-kv-list">
+            <div class="snapshot-kv">
+              <span>学科</span>
+              <strong>{{ subjectTagNames }}</strong>
+            </div>
+            <div v-for="row in resolvedFilters" :key="row.key" class="snapshot-kv">
+              <span>{{ row.label }}</span>
+              <strong>{{ row.value }}</strong>
+            </div>
+            <div class="snapshot-kv">
+              <span>已下载页数</span>
+              <strong class="mono">{{ numberStat(selectedTask.stats?.images_downloaded) }}</strong>
+            </div>
+          </div>
         </el-card>
       </section>
+
       <el-alert v-if="taskError" :title="taskError" type="error" show-icon :closable="false" />
 
+      <ExportZipPanel
+        v-if="currentTaskExport"
+        :export-job="currentTaskExport"
+        :disabled="!canCreateZip"
+        :loading="zipLoading"
+        @create="createZip"
+      />
+
+      <!-- 精简后的 4 个功能页签 -->
       <el-tabs v-model="activeTab" class="detail-tabs">
-        <el-tab-pane label="概览" name="overview">
+        <el-tab-pane v-if="selectedTask.mode !== 'estimate'" label="本地文件" name="files">
           <el-card shadow="never">
-            <template #header>运行概览</template>
-            <el-descriptions :column="2" border>
-              <el-descriptions-item v-for="metric in summaryMetrics" :key="metric.label" :label="metric.label">
-                {{ metric.value }}
-              </el-descriptions-item>
-              <el-descriptions-item label="异常数量">{{ overviewStats.failed + overviewStats.skipped }}</el-descriptions-item>
-            </el-descriptions>
+            <template #header>
+              <div class="card-header files-card-header">
+                <span>已保存文件（点击文件名可直接预览）</span>
+                <div class="files-card-actions">
+                  <el-button size="small" :icon="RotateCcw" @click="refreshFileManager">刷新目录</el-button>
+                </div>
+              </div>
+            </template>
+            <FileTable
+              :key="fileManagerKey"
+              :task-id="props.id"
+              @selection-change="selectedFilePaths = $event"
+            />
           </el-card>
         </el-tab-pane>
 
-        <el-tab-pane label="运行日志" name="logs">
-          <TaskLogsPanel :logs="logs" @refresh="refreshLogs" />
-        </el-tab-pane>
-
-        <el-tab-pane label="筛选配置" name="config">
-          <div class="content-grid">
-            <el-card shadow="never">
-              <template #header>筛选条件</template>
-              <el-descriptions :column="1" border>
-                <el-descriptions-item v-for="row in resolvedFilters" :key="row.key" :label="row.label">
-                  {{ row.value }}
-                </el-descriptions-item>
-                <el-descriptions-item v-if="!resolvedFilters.length" label="筛选条件">未记录</el-descriptions-item>
-              </el-descriptions>
-            </el-card>
-            <el-card shadow="never">
-              <template #header>学科与策略</template>
-              <el-table :data="configSnapshot.subjects" empty-text="未记录学科信息">
-                <el-table-column label="学科名称" prop="name" min-width="160" />
-              </el-table>
-            </el-card>
-          </div>
-        </el-tab-pane>
-
-        <el-tab-pane label="资源列表" name="resources">
+        <el-tab-pane v-if="selectedTask.mode !== 'estimate'" :label="`资源明细 (${resourceTotal || overviewStats.total})`" name="resources">
           <TaskResourcesTable
             :resources="visibleResources"
             :local-actions="canUseLocal"
@@ -443,7 +513,7 @@ watch(
             :page-size="resourcePageSize"
             :item-count="visibleResources.length"
             :has-next="resourceHasNextPage"
-            :label="resourceStatusFilter ? `${resourceStatusFilter} 资源，共 ${resourceTotal}` : `资源，共 ${resourceTotal}`"
+            :label="`共 ${resourceTotal} 条资源`"
             @prev="prevResourcePage"
             @next="nextResourcePage"
             @refresh="refreshResourcePage"
@@ -451,51 +521,53 @@ watch(
           />
         </el-tab-pane>
 
-        <el-tab-pane label="文件结果" name="files">
+        <el-tab-pane
+          v-if="selectedTask.mode !== 'estimate'"
+          :label="overviewStats.failed > 0 ? `问题诊断 (${overviewStats.failed})` : '问题诊断'"
+          name="issues"
+        >
           <el-card shadow="never">
-            <template #header>
-              <div class="card-header">
-                <span>任务文件列表</span>
-                <small class="block-muted">按实际保存层级展示：学科 / 年级 / 学期 / 地区 / 场景。</small>
-                <el-button :icon="RotateCcw" @click="refreshFileManager">刷新文件</el-button>
-              </div>
+            <template v-if="issues.length">
+              <el-timeline>
+                <el-timeline-item
+                  v-for="issue in issues"
+                  :key="`${issue.type}-${issue.title}-${issue.detail}`"
+                  type="warning"
+                >
+                  <div class="issue-row-head">
+                    <strong>{{ issue.title }}</strong>
+                    <el-button
+                      v-if="canUseLocal && issue.local_dir"
+                      size="small"
+                      :icon="FolderOpen"
+                      @click="openResourceDir({ local_dir: issue.local_dir })"
+                    >
+                      打开原文件目录
+                    </el-button>
+                  </div>
+                  <p>{{ issue.detail }}</p>
+                  <small>{{ issue.recovery }}</small>
+                </el-timeline-item>
+              </el-timeline>
+              <el-button v-if="canResume" type="primary" :icon="CirclePlay" :loading="actionLoading" @click="handleAction('resume')">
+                重试未完成资源
+              </el-button>
             </template>
-            <FileTable
-              :key="fileManagerKey"
-              :task-id="props.id"
-              @selection-change="selectedFilePaths = $event"
+            <EmptyState
+              v-else
+              title="当前没有异常记录"
+              description="所有已扫描资源状态正常。"
             />
           </el-card>
         </el-tab-pane>
 
-        <el-tab-pane label="导出记录" name="exports">
-          <ExportZipPanel :export-job="currentTaskExport" :disabled="!canCreateZip" :loading="zipLoading" @create="createZip" />
-          <el-alert
-            v-if="!currentTaskExport"
-            title="暂无导出记录"
-            type="info"
-            show-icon
-            :closable="false"
-          />
-        </el-tab-pane>
-
-        <el-tab-pane label="错误与恢复" name="issues">
-          <el-card shadow="never">
-            <template #header>问题诊断</template>
-            <el-timeline>
-              <el-timeline-item v-for="issue in issues" :key="`${issue.type}-${issue.title}-${issue.detail}`" :type="issue.title === '暂无需处理问题' ? 'success' : 'warning'">
-                <strong>{{ issue.title }}</strong>
-                <p>{{ issue.detail }}</p>
-                <small>{{ issue.recovery }}</small>
-              </el-timeline-item>
-            </el-timeline>
-            <el-button v-if="canResume" type="primary" :icon="CirclePlay" :loading="actionLoading" @click="handleAction('resume')">恢复任务</el-button>
-          </el-card>
+        <el-tab-pane label="运行日志" name="logs">
+          <TaskLogsPanel :logs="logs" @refresh="refreshLogs(true)" />
         </el-tab-pane>
       </el-tabs>
     </template>
 
-    <EmptyState v-else title="没有找到任务" description="任务可能已被删除。" action-text="返回任务中心" @action="router.push('/tasks')" />
+    <EmptyState v-else title="未找到该任务" description="该任务可能已被删除。" action-text="返回任务列表" @action="router.push('/tasks')" />
   </div>
 </template>
 
@@ -511,12 +583,19 @@ watch(
 .detail-header-left {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
 }
 
 .detail-title {
   min-width: 0;
+}
+
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .detail-title h2 {
@@ -528,11 +607,11 @@ watch(
   white-space: nowrap;
 }
 
-.detail-title small {
+.meta-subline {
   display: block;
-  font-family: var(--app-mono);
-  color: var(--app-faint);
-  font-size: 11px;
+  margin-top: 3px;
+  color: var(--app-muted);
+  font-size: 12px;
 }
 
 .detail-header-actions {
@@ -543,36 +622,36 @@ watch(
   justify-content: flex-end;
 }
 
-.detail-desc {
+.detail-overview-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.9fr);
   gap: 16px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .detail-stats-row {
   margin-top: 16px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .detail-stat {
   border: 1px solid var(--app-border);
-  border-radius: 11px;
+  border-radius: 10px;
   background: rgba(14, 20, 34, 0.72);
-  padding: 13px 15px;
+  padding: 11px 12px;
   display: grid;
-  gap: 5px;
+  gap: 4px;
 }
 
 .detail-stat-label {
   color: var(--app-muted);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
 .detail-stat strong {
-  font-size: 25px;
+  font-size: 22px;
   font-weight: 700;
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
@@ -591,126 +670,74 @@ watch(
   color: var(--app-warning);
 }
 
-.task-meta {
-  margin-top: 0;
+.filter-snapshot-card :deep(.el-card__body) {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.snapshot-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--app-muted);
+}
+
+.snapshot-kv-list {
+  display: grid;
+  gap: 7px;
+}
+
+.snapshot-kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed rgba(148, 163, 184, 0.14);
+}
+
+.snapshot-kv:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.snapshot-kv span {
+  color: var(--app-muted);
+  flex: 0 0 auto;
+}
+
+.snapshot-kv strong {
+  color: var(--app-text);
+  font-weight: 550;
+  text-align: right;
+  word-break: break-word;
+}
+
+.files-card-header {
+  justify-content: space-between;
+}
+
+.issue-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 @media (max-width: 1024px) {
-  .detail-desc {
+  .detail-overview-grid {
     grid-template-columns: 1fr;
   }
 
-  .summary-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 760px) {
-  .task-detail-header-card :deep(.el-card__body) {
-    padding: 12px;
-  }
-
-  .detail-header {
-    display: grid;
-    gap: 12px;
-  }
-
-  .detail-header-left {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: start;
-    gap: 8px 10px;
-  }
-
-  .detail-header-left :deep(.status-tag) {
-    grid-column: 2;
-    justify-self: start;
-  }
-
-  .detail-title h2 {
-    font-size: 17px;
-    white-space: normal;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-  }
-
-  .detail-header-actions {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px;
-  }
-
-  .detail-header-actions :deep(.el-button) {
-    min-height: 38px;
-    margin-left: 0;
-    padding: 8px 10px;
-    white-space: nowrap;
-  }
-
-  .detail-desc {
-    gap: 12px;
-  }
-
   .detail-stats-row {
-    gap: 8px;
-    margin-top: 12px;
-  }
-
-  .detail-stat {
-    min-height: 82px;
-    padding: 10px 12px;
-  }
-
-  .detail-stat-label {
-    font-size: 12px;
-  }
-
-  .detail-stat strong {
-    font-size: 24px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
-@media (max-width: 480px) {
-  .detail-header {
-    gap: 10px;
-  }
-
-  .detail-header-left {
-    grid-template-columns: 54px minmax(0, 1fr);
-  }
-
-  .detail-header-left :deep(.el-button) {
-    justify-self: start;
-    padding: 6px 0;
-  }
-
-  .detail-title h2 {
-    font-size: 16px;
-  }
-
-  .detail-title small {
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .detail-header-actions {
+@media (max-width: 640px) {
+  .detail-stats-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .detail-header-actions :deep(.el-button) {
-    min-height: 36px;
-    padding: 7px 8px;
-  }
-
-  .detail-stat {
-    min-height: 72px;
-  }
-
-  .detail-stat strong {
-    font-size: 22px;
   }
 }
 </style>

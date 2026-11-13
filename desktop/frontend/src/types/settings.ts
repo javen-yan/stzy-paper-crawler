@@ -28,6 +28,12 @@ export interface PublicSettings {
   proxy_min_ttl_seconds?: number
   shenlong_whitelist_key?: string
   shenlong_whitelist_sign?: string
+  has_proxy_pool?: boolean
+  has_proxy_api_url?: boolean
+  has_shenlong_whitelist_key?: boolean
+  has_shenlong_whitelist_sign?: boolean
+  proxy_pool_count?: number
+  soffice_path?: string
   study_phase_code?: string
   subject_code?: string
   subject_name?: string

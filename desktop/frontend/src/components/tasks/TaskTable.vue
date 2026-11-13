@@ -1,20 +1,19 @@
 <script setup lang="ts">
-import { Archive, ArrowUpRight, CirclePause, CirclePlay, MoreHorizontal, Terminal, XCircle } from 'lucide-vue-next'
+import { Archive, ArrowUpRight, CirclePause, CirclePlay, Download, FolderOpen, MoreHorizontal, XCircle } from 'lucide-vue-next'
 import StatusTag from '../common/StatusTag.vue'
 import TaskProgress from './TaskProgress.vue'
 import type { Task } from '../../types/tasks'
-import { useLayoutState } from '../../composables/useLayoutState'
 import { taskStatusLabel } from '../../composables/useTasks'
 import { taskDisplayName } from '../../utils/taskDisplay'
 
 defineProps<{ tasks: Task[]; selectedTaskId?: string }>()
-const emit = defineEmits<{
+defineEmits<{
   select: [task: Task]
   action: [task: Task, action: 'pause' | 'resume' | 'cancel' | 'archive']
   view: [task: Task]
+  openFolder: [task: Task]
+  startDownload: [task: Task]
 }>()
-
-const { setFooterExpanded } = useLayoutState()
 
 function statusTone(status: string) {
   if (status === 'completed') return 'success'
@@ -27,17 +26,32 @@ function statusTone(status: string) {
 const RESUMABLE = ['paused', 'partial_completed', 'failed', 'auth_expired', 'interrupted', 'cancelled']
 const PAUSABLE = ['running', 'queued']
 
-function canResume(status: string) {
-  return RESUMABLE.includes(status)
+function canResume(task: Task) {
+  return task.mode !== 'estimate' && RESUMABLE.includes(task.status)
 }
 
-function canPause(status: string) {
-  return PAUSABLE.includes(status)
+function canPause(task: Task) {
+  return PAUSABLE.includes(task.status)
 }
 
-function openLiveConsole(task: Task) {
-  emit('select', task)
-  setFooterExpanded(true)
+function canOpenFolder(task: Task) {
+  if (task.mode === 'estimate') return false
+  const completedCount = Number(task.stats?.resources_completed || task.stats?.resources_success || 0)
+  return completedCount > 0 || ['completed', 'partial_completed'].includes(task.status)
+}
+
+function canConvertEstimate(task: Task) {
+  return task.mode === 'estimate' && task.status === 'completed'
+}
+
+function formatShortTime(raw?: string) {
+  if (!raw) return ''
+  const cleaned = raw.replace('T', ' ').replace(/\.\d+/, '').replace(/([+-]\d{2}:\d{2}|Z)$/, '')
+  return cleaned.length >= 16 ? cleaned.slice(5, 16) : cleaned
+}
+
+function shouldShowError(task: Task) {
+  return Boolean(task.error && ['failed', 'auth_expired', 'interrupted'].includes(task.status))
 }
 </script>
 
@@ -57,16 +71,16 @@ function openLiveConsole(task: Task) {
 
       <div class="task-main">
         <div class="task-head">
-          <button type="button" class="task-title-btn" @click.stop="$emit('view', task)">
-            <span class="task-title-line">
-              <span class="task-mode-pill" :class="{ estimate: task.mode === 'estimate' }">
-                {{ task.mode === 'estimate' ? '数量预估' : '采集下载' }}
-              </span>
-              <span class="task-title">{{ taskDisplayName(task, index) }}</span>
+          <div class="task-title-line">
+            <span class="task-mode-pill" :class="{ estimate: task.mode === 'estimate' }">
+              {{ task.mode === 'estimate' ? '预估' : '下载' }}
             </span>
-            <span class="task-id mono">#{{ task.id }}</span>
-          </button>
-          <StatusTag :status="task.status" :label="taskStatusLabel(task)" />
+            <span class="task-title">{{ taskDisplayName(task, index) }}</span>
+            <StatusTag :status="task.status" :label="taskStatusLabel(task)" />
+          </div>
+          <span v-if="shouldShowError(task)" class="task-error-inline" :title="task.error">
+            {{ task.error }}
+          </span>
         </div>
 
         <div class="task-progress-row">
@@ -75,42 +89,63 @@ function openLiveConsole(task: Task) {
       </div>
 
       <div class="task-side">
-        <time class="task-time mono">{{ task.updated_at }}</time>
+        <time class="task-time mono">{{ formatShortTime(task.updated_at) }}</time>
         <div class="task-actions" @click.stop>
-          <el-tooltip content="实时日志" placement="top">
-            <el-button class="task-icon-btn" circle aria-label="实时日志" @click="openLiveConsole(task)">
-              <Terminal :size="14" />
+          <el-button
+            v-if="canConvertEstimate(task)"
+            size="small"
+            type="primary"
+            plain
+            @click="$emit('startDownload', task)"
+          >
+            <Download :size="13" style="margin-right: 4px" />开始下载
+          </el-button>
+
+          <el-tooltip v-if="canOpenFolder(task)" content="打开本地保存目录" placement="top">
+            <el-button
+              class="task-icon-btn"
+              circle
+              aria-label="打开本地保存目录"
+              @click="$emit('openFolder', task)"
+            >
+              <FolderOpen :size="14" />
             </el-button>
           </el-tooltip>
-          <el-tooltip content="暂停任务" placement="top">
-            <el-button
-              class="task-icon-btn"
-              :icon="CirclePause"
-              circle
-              aria-label="暂停"
-              :disabled="!canPause(task.status)"
-              @click="$emit('action', task, 'pause')"
-            />
-          </el-tooltip>
-          <el-tooltip content="恢复执行" placement="top">
-            <el-button
-              class="task-icon-btn"
-              :icon="CirclePlay"
-              circle
-              aria-label="恢复"
-              :disabled="!canResume(task.status)"
-              @click="$emit('action', task, 'resume')"
-            />
-          </el-tooltip>
-          <el-dropdown trigger="click">
+
+          <el-button
+            v-if="canPause(task)"
+            size="small"
+            class="task-action-btn"
+            @click="$emit('action', task, 'pause')"
+          >
+            <CirclePause :size="13" style="margin-right: 4px" />暂停
+          </el-button>
+
+          <el-button
+            v-if="canResume(task)"
+            size="small"
+            type="primary"
+            plain
+            class="task-action-btn"
+            @click="$emit('action', task, 'resume')"
+          >
+            <CirclePlay :size="13" style="margin-right: 4px" />继续
+          </el-button>
+
+          <el-dropdown v-if="!task.archived || canPause(task)" trigger="click">
             <el-button class="task-icon-btn" :icon="MoreHorizontal" circle aria-label="更多操作" />
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item :icon="Archive" @click="$emit('action', task, 'archive')">归档任务</el-dropdown-item>
-                <el-dropdown-item :icon="XCircle" @click="$emit('action', task, 'cancel')">取消任务</el-dropdown-item>
+                <el-dropdown-item v-if="canPause(task)" :icon="XCircle" @click="$emit('action', task, 'cancel')">
+                  取消任务
+                </el-dropdown-item>
+                <el-dropdown-item v-if="!task.archived" :icon="Archive" @click="$emit('action', task, 'archive')">
+                  归档隐藏
+                </el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
+
           <el-button class="task-detail-pill" size="small" @click="$emit('view', task)">
             详情 <ArrowUpRight :size="13" style="margin-left: 2px" />
           </el-button>
@@ -130,22 +165,21 @@ function openLiveConsole(task: Task) {
   position: relative;
   display: grid;
   grid-template-columns: 4px minmax(0, 1fr) auto;
-  gap: 18px;
+  gap: 16px;
   align-items: center;
-  padding: 16px 18px 16px 0;
+  padding: 14px 16px 14px 0;
   border: 1px solid var(--app-border);
   border-radius: 12px;
   background: rgba(16, 23, 38, 0.72);
   cursor: pointer;
   overflow: hidden;
-  transition: border-color 170ms ease, box-shadow 170ms ease, transform 170ms cubic-bezier(0.22, 1, 0.36, 1), background-color 170ms ease;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
 }
 
 .task-card:hover {
-  border-color: rgba(129, 140, 248, 0.42);
+  border-color: rgba(129, 140, 248, 0.44);
   background: rgba(23, 33, 54, 0.88);
-  box-shadow: 0 10px 26px -8px rgba(2, 6, 23, 0.6);
-  transform: translateY(-1px);
+  box-shadow: 0 8px 22px -8px rgba(2, 6, 23, 0.55);
 }
 
 .task-card.is-selected {
@@ -183,33 +217,22 @@ function openLiveConsole(task: Task) {
 
 .task-main {
   display: grid;
-  gap: 11px;
+  gap: 9px;
   min-width: 0;
 }
 
 .task-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.task-title-btn {
   display: grid;
   gap: 4px;
-  border: 0;
-  background: transparent;
-  padding: 0;
-  text-align: left;
-  cursor: pointer;
   min-width: 0;
 }
 
 .task-title-line {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .task-mode-pill {
@@ -233,22 +256,22 @@ function openLiveConsole(task: Task) {
 
 .task-title {
   color: var(--app-text);
-  font-size: 15px;
+  font-size: 14.5px;
   font-weight: 620;
   line-height: 1.35;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  transition: color 160ms ease;
+  max-width: min(560px, 60vw);
 }
 
 .task-card:hover .task-title {
   color: #c7d2fe;
 }
 
-.task-id {
-  font-size: 11.5px;
-  color: var(--app-faint);
+.task-error-inline {
+  font-size: 12px;
+  color: var(--app-danger);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -260,13 +283,13 @@ function openLiveConsole(task: Task) {
 
 .task-side {
   display: grid;
-  gap: 9px;
+  gap: 8px;
   justify-items: end;
 }
 
 .task-time {
   font-size: 12px;
-  color: var(--app-muted);
+  color: var(--app-faint);
 }
 
 .task-actions {
@@ -275,16 +298,21 @@ function openLiveConsole(task: Task) {
   gap: 6px;
 }
 
+.task-action-btn.el-button {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+}
+
 .task-icon-btn.el-button {
-  width: 32px;
-  height: 32px;
-  min-height: 32px;
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
   padding: 0;
   border-radius: 8px;
   border-color: var(--app-border);
   color: var(--app-muted);
   background: rgba(15, 23, 42, 0.72);
-  transition: border-color 160ms ease, color 160ms ease, background-color 160ms ease;
 }
 
 .task-icon-btn.el-button:hover:not(.is-disabled) {
@@ -294,9 +322,9 @@ function openLiveConsole(task: Task) {
 }
 
 .task-detail-pill.el-button {
-  height: 32px;
-  min-height: 32px;
-  padding: 0 11px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 10px;
   border-radius: 8px;
   border-color: rgba(129, 140, 248, 0.28);
   background: rgba(99, 102, 241, 0.12);

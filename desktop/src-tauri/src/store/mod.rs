@@ -301,9 +301,18 @@ impl SqliteStore {
             for &key in PUBLIC_SETTING_KEYS {
                 if let Some(mut val) = map.get(key).cloned() {
                     if SECRET_SETTING_KEYS.contains(&key) {
-                        let non_empty = val.as_str().map(|s| !s.is_empty()).unwrap_or(false);
+                        let raw_str = val.as_str().unwrap_or("");
+                        let non_empty = !raw_str.trim().is_empty();
+                        out.insert(format!("has_{key}"), Value::Bool(non_empty));
+                        if key == "proxy_pool" {
+                            let line_count = raw_str
+                                .lines()
+                                .filter(|line| !line.trim().is_empty())
+                                .count();
+                            out.insert("proxy_pool_count".to_string(), json!(line_count));
+                        }
                         if non_empty {
-                            val = Value::String("***".to_string());
+                            val = Value::String(mask_secret_setting(key, raw_str));
                         }
                     }
                     out.insert(key.to_string(), val);
@@ -314,6 +323,8 @@ impl SqliteStore {
     }
 
     pub fn update_settings(&self, base: &AppSettings, payload: &Value) -> AppResult<Value> {
+        let effective = self.effective_settings(base)?;
+        let effective_map = serde_json::to_value(&effective)?;
         let mut current = match self.get_kv("app_settings")? {
             Some(Value::Object(m)) => m,
             _ => serde_json::Map::new(),
@@ -336,10 +347,24 @@ impl SqliteStore {
                 }
                 if SECRET_SETTING_KEYS.contains(&k.as_str()) {
                     if let Some(s) = v.as_str() {
-                        if s == "***" {
+                        let trimmed = s.trim();
+                        let existing_raw = effective_map
+                            .get(k.as_str())
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let existing_masked = mask_secret_setting(k.as_str(), existing_raw);
+                        if trimmed == "***"
+                            || trimmed == "*****"
+                            || (!existing_masked.is_empty() && trimmed == existing_masked)
+                            || (trimmed.contains("*****") && !existing_raw.contains("*****"))
+                        {
                             continue;
                         }
-                        let encrypted = self.vault.encrypt(s)?;
+                        if trimmed.is_empty() {
+                            current.insert(k.clone(), Value::String(String::new()));
+                            continue;
+                        }
+                        let encrypted = self.vault.encrypt(trimmed)?;
                         current.insert(k.clone(), Value::String(encrypted));
                         continue;
                     }
@@ -1396,6 +1421,131 @@ fn value_to_f64(val: &Value) -> Option<f64> {
         .or_else(|| val.as_str().and_then(|s| s.parse::<f64>().ok()))
 }
 
+fn mask_token_value(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() >= 8 {
+        let head: String = chars[..2].iter().collect();
+        let tail: String = chars[chars.len() - 2..].iter().collect();
+        format!("{head}*****{tail}")
+    } else {
+        "*****".to_string()
+    }
+}
+
+fn is_sensitive_query_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    [
+        "key", "sign", "secret", "token", "pwd", "pass", "auth", "order", "uid", "user", "app",
+        "no", "id",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn mask_proxy_api_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Ok(parsed) = url::Url::parse(trimmed) {
+        let mut base = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
+        if let Some(port) = parsed.port() {
+            base.push_str(&format!(":{port}"));
+        }
+        let pairs: Vec<(String, String)> = parsed
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        if !pairs.is_empty() {
+            base.push_str(parsed.path());
+            let mut masked_any = false;
+            let masked_pairs: Vec<String> = pairs
+                .iter()
+                .map(|(k, v)| {
+                    if is_sensitive_query_key(k) || v.chars().count() >= 6 {
+                        masked_any = true;
+                        format!("{k}={}", mask_token_value(v))
+                    } else {
+                        format!("{k}={v}")
+                    }
+                })
+                .collect();
+            if !masked_any {
+                if let Some((k, v)) = pairs.first() {
+                    let mut fallback = masked_pairs;
+                    fallback[0] = format!("{k}={}", mask_token_value(v));
+                    return format!("{base}?{}", fallback.join("&"));
+                }
+            }
+            return format!("{base}?{}", masked_pairs.join("&"));
+        }
+
+        let segments: Vec<&str> = parsed.path().split('/').collect();
+        let mut masked_seg = false;
+        let rebuilt: Vec<String> = segments
+            .into_iter()
+            .map(|seg| {
+                if seg.chars().count() >= 8 {
+                    masked_seg = true;
+                    mask_token_value(seg)
+                } else {
+                    seg.to_string()
+                }
+            })
+            .collect();
+        if masked_seg {
+            return format!("{base}{}", rebuilt.join("/"));
+        }
+        return format!("{base}{}?*****", parsed.path());
+    }
+    mask_token_value(trimmed)
+}
+
+fn mask_proxy_line(line: &str) -> String {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Some((scheme, rest)) = trimmed.split_once("://") {
+        if let Some((_, host_part)) = rest.rsplit_once('@') {
+            return format!("{scheme}://*****:*****@{host_part}");
+        }
+        if let Some((host, port)) = rest.rsplit_once(':') {
+            return format!("{scheme}://{}*****:{port}", host.chars().take(3).collect::<String>());
+        }
+        return format!("{scheme}://*****");
+    }
+    let parts: Vec<&str> = trimmed.split(':').collect();
+    if parts.len() >= 4 {
+        return format!("{}:{}:*****:*****", parts[0], parts[1]);
+    }
+    if let Some((host, port)) = trimmed.rsplit_once(':') {
+        return format!("{}*****:{port}", host.chars().take(3).collect::<String>());
+    }
+    mask_token_value(trimmed)
+}
+
+fn mask_secret_setting(key: &str, raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    match key {
+        "proxy_api_url" => mask_proxy_api_url(trimmed),
+        "proxy_pool" => trimmed
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(mask_proxy_line)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => mask_token_value(trimmed),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1412,22 +1562,54 @@ mod tests {
             .update_settings(
                 &base,
                 &json!({
-                    "proxy_mode": "fixed",
+                    "proxy_mode": "api",
                     "proxy_pool": "socks5://u:p@127.0.0.1:1080",
+                    "proxy_api_url": "https://api.example.com/getip?key=abcdef123456&num=1",
+                    "shenlong_whitelist_key": "slkey987654",
                     "max_download_workers": 6
                 }),
             )
             .unwrap();
-        assert_eq!(public["proxy_pool"], "***");
+        assert_eq!(public["proxy_pool"], "socks5://*****:*****@127.0.0.1:1080");
+        assert_eq!(public["has_proxy_pool"], true);
+        assert_eq!(public["proxy_pool_count"], 1);
+        assert_eq!(
+            public["proxy_api_url"],
+            "https://api.example.com/getip?key=ab*****56&num=1"
+        );
+        assert_eq!(public["has_proxy_api_url"], true);
+        assert_eq!(public["shenlong_whitelist_key"], "sl*****54");
+        assert_eq!(public["has_shenlong_whitelist_key"], true);
         assert_eq!(public["max_download_workers"], 6);
 
-        // Sending "***" back does not overwrite stored proxy_pool
+        // Sending masked values or "***" back does not overwrite stored secrets
+        let masked_api = public["proxy_api_url"].as_str().unwrap().to_string();
         let _ = store
-            .update_settings(&base, &json!({ "proxy_pool": "***", "concurrency": 3 }))
+            .update_settings(
+                &base,
+                &json!({
+                    "proxy_pool": public["proxy_pool"],
+                    "proxy_api_url": masked_api,
+                    "shenlong_whitelist_key": "*****",
+                    "concurrency": 3
+                }),
+            )
             .unwrap();
         let effective = store.effective_settings(&base).unwrap();
         assert_eq!(effective.proxy_pool, "socks5://u:p@127.0.0.1:1080");
+        assert_eq!(
+            effective.proxy_api_url,
+            "https://api.example.com/getip?key=abcdef123456&num=1"
+        );
+        assert_eq!(effective.shenlong_whitelist_key, "slkey987654");
         assert_eq!(effective.concurrency, 3);
+
+        // Explicitly clearing a secret sets it to empty
+        let cleared = store
+            .update_settings(&base, &json!({ "shenlong_whitelist_key": "" }))
+            .unwrap();
+        assert_eq!(cleared["shenlong_whitelist_key"], "");
+        assert_eq!(cleared["has_shenlong_whitelist_key"], false);
 
         // Account roundtrip & secret masking
         let saved = store

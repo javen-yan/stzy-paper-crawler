@@ -316,6 +316,47 @@ impl TaskManager {
         Ok(out)
     }
 
+    pub fn active_task_count(&self) -> usize {
+        if let Ok(tasks) = self.store.list_tasks(false, 200, 0) {
+            tasks
+                .iter()
+                .filter(|t| {
+                    matches!(
+                        t.get("status").and_then(Value::as_str).unwrap_or(""),
+                        "running" | "queued"
+                    )
+                })
+                .count()
+        } else {
+            self.running_tokens.lock().len()
+        }
+    }
+
+    pub async fn pause_active_tasks_for_restart(&self) -> usize {
+        let mut paused_count = 0usize;
+        if let Ok(tasks) = self.store.list_tasks(false, 200, 0) {
+            for t in tasks {
+                let status = t.get("status").and_then(Value::as_str).unwrap_or("");
+                if matches!(status, "running" | "queued") {
+                    if let Some(tid) = t.get("id").and_then(Value::as_str) {
+                        if self.pause_task(tid).is_ok() {
+                            paused_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if paused_count > 0 {
+            for _ in 0..25 {
+                if self.running_tokens.lock().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+        paused_count
+    }
+
     pub fn cancel_task(&self, task_id: &str) -> AppResult<Value> {
         let task = self
             .store

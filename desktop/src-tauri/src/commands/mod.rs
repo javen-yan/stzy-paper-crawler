@@ -47,12 +47,17 @@ impl AppState {
 #[tauri::command]
 pub fn get_runtime_info(state: State<'_, AppState>) -> AppResult<Value> {
     let eff = state.effective_settings()?;
-    let has_office = detect_office_engine(&eff).is_some();
+    let detected = detect_office_engine(&eff);
+    let has_office = detected.is_some();
+    let office_label = detected.map(|e| e.display_label()).unwrap_or_default();
     Ok(json!({
         "mode": "gui",
         "host": "local",
         "port": 0,
         "public_base_url": "",
+        "office_engine": office_label,
+        "libreoffice_url": "https://www.libreoffice.org/download/",
+        "output_dir": eff.output_dir.to_string_lossy().to_string(),
         "capabilities": {
             "local_file_actions": true,
             "native_desktop": true,
@@ -516,13 +521,17 @@ pub fn open_local_path(
                 .artifact_service
                 .browser_file_path(Some(trimmed), Some(tid.as_str()), true)?
         }
+    } else if trimmed.is_empty() {
+        let root = state.artifact_service.current_output_root();
+        let _ = crate::models::ensure_directory(&root);
+        root
     } else {
         expand_tilde(trimmed)
     };
 
     if !target.exists() {
         return Err(AppError::NotFound(format!(
-            "本地路径不存在：{}",
+            "该目录或文件尚未生成：{}",
             target.display()
         )));
     }
@@ -539,4 +548,26 @@ pub fn open_local_path(
     }
 
     Ok(json!({ "ok": true, "path": target.to_string_lossy().to_string() }))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn open_external_url(app: AppHandle, url: String) -> AppResult<Value> {
+    let trimmed = url.trim();
+    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+        return Err(AppError::Validation("仅支持打开 http/https 链接".to_string()));
+    }
+    app.opener()
+        .open_url(trimmed, None::<&str>)
+        .map_err(|e| AppError::Message(format!("打开浏览器链接失败：{e}")))?;
+    Ok(json!({ "ok": true, "url": trimmed }))
+}
+
+#[tauri::command]
+pub async fn check_app_update(app: AppHandle, state: State<'_, AppState>) -> AppResult<Value> {
+    crate::updater::check_for_app_update(&app, &state).await
+}
+
+#[tauri::command]
+pub async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> AppResult<Value> {
+    crate::updater::download_and_install_app_update(&app, &state).await
 }

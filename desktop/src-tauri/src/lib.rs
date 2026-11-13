@@ -10,6 +10,7 @@ pub mod protocol;
 pub mod proxy;
 pub mod store;
 pub mod task_engine;
+pub mod updater;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,6 +62,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .register_uri_scheme_protocol("stzyfile", protocol::handle_stzyfile_request)
         .setup(|app| {
             let handle = app.handle().clone();
@@ -126,6 +129,9 @@ pub fn run() {
             commands::save_browser_file,
             commands::export_task_zip,
             commands::open_local_path,
+            commands::open_external_url,
+            commands::check_app_update,
+            commands::install_app_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running STZY Desktop application");

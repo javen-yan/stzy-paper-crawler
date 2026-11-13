@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -5,7 +6,10 @@ use std::sync::Arc;
 use image::{ImageBuffer, Rgb};
 use regex::Regex;
 
-use crate::converter::fonts::build_font_database;
+use crate::converter::fonts::{
+    base_font_key, build_font_database, ensure_word_fonts, font_key, heuristic_substitutes_for,
+    substitutes_for,
+};
 use crate::error::{AppError, AppResult};
 use crate::models::{ensure_directory, AppSettings};
 
@@ -67,8 +71,31 @@ pub fn detect_svg_cjk_font_family(settings: &AppSettings) -> String {
     String::new()
 }
 
-/// Prepares SVG markup so `usvg` resolves both subset `@font-face` fonts and Windows-only CJK font
-/// names (`SimSun`, `SimHei`, `KaiTi`, `Microsoft YaHei`) cleanly on macOS, Windows, and Linux.
+/// Extracts declared `font-family` names from SVG markup for font sampling & auto-install.
+pub fn extract_svg_declared_fonts(raw_svg: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    if let Ok(re_attr) = Regex::new(r#"font-family="([^"]+)""#) {
+        for cap in re_attr.captures_iter(raw_svg) {
+            if let Some(m) = cap.get(1) {
+                for item in m.as_str().split(',') {
+                    let clean = item.trim().trim_matches(['\'', '"']);
+                    if !clean.is_empty()
+                        && !matches!(
+                            clean.to_lowercase().as_str(),
+                            "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy"
+                        )
+                    {
+                        out.insert(clean.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Prepares SVG markup so `usvg` resolves both subset `@font-face` fonts and any proprietary/Windows
+/// CJK or Math font names (`SimSun`, `方正小标宋简体`, `Cambria Math`, etc.) cleanly across platforms.
 pub fn normalize_svg_for_usvg(raw_svg: &str, preferred_cjk_font: &str) -> String {
     let fallback_stack = if preferred_cjk_font.is_empty() {
         "PingFang SC, Songti SC, Microsoft YaHei, SimSun, Noto Sans CJK SC, sans-serif".to_string()
@@ -98,56 +125,38 @@ pub fn normalize_svg_for_usvg(raw_svg: &str, preferred_cjk_font: &str) -> String
         return out;
     }
 
-    // Standard Aspose/Office SVGs declare Windows-specific single families like `font-family="SimSun"`.
-    // Expand common CJK/Latin font-family attributes with cross-platform fallbacks while keeping the
-    // original font first when installed.
-    let replacements: &[(&str, &str)] = &[
-        (
-            r#"font-family="SimSun""#,
-            r#"font-family="SimSun, 宋体, Songti SC, STSong, Noto Serif CJK SC, PingFang SC, serif""#,
-        ),
-        (
-            r#"font-family="宋体""#,
-            r#"font-family="宋体, SimSun, Songti SC, STSong, Noto Serif CJK SC, PingFang SC, serif""#,
-        ),
-        (
-            r#"font-family="SimHei""#,
-            r#"font-family="SimHei, 黑体, Heiti SC, STHeiti, PingFang SC, Noto Sans CJK SC, sans-serif""#,
-        ),
-        (
-            r#"font-family="KaiTi""#,
-            r#"font-family="KaiTi, 楷体, Kaiti SC, STKaiti, Songti SC, Noto Serif CJK SC, serif""#,
-        ),
-        (
-            r#"font-family="FangSong""#,
-            r#"font-family="FangSong, 仿宋, STFangsong, Songti SC, Noto Serif CJK SC, serif""#,
-        ),
-        (
-            r#"font-family="Microsoft YaHei""#,
-            r#"font-family="Microsoft YaHei, 微软雅黑, PingFang SC, Noto Sans CJK SC, sans-serif""#,
-        ),
-        (
-            r#"font-family="MicrosoftYaHei""#,
-            r#"font-family="Microsoft YaHei, 微软雅黑, PingFang SC, Noto Sans CJK SC, sans-serif""#,
-        ),
-        (
-            r#"font-family="Times New Roman""#,
-            r#"font-family="Times New Roman, Tinos, Times, Georgia, Songti SC, serif""#,
-        ),
-        (
-            r#"font-family="Calibri""#,
-            r#"font-family="Calibri, Carlito, Helvetica Neue, Arial, PingFang SC, sans-serif""#,
-        ),
-        (
-            r#"font-family="Cambria""#,
-            r#"font-family="Cambria, Caladea, Times New Roman, Tinos, Songti SC, serif""#,
-        ),
-    ];
-
-    for (from, to) in replacements {
-        if out.contains(from) {
-            out = out.replace(from, to);
-        }
+    // Dynamically expand any single-family `font-family="..."` attribute with its smart fallback chain
+    // while keeping the original declared family first so exact matches always win.
+    if let Ok(re_attr) = Regex::new(r#"font-family="([^",]+)""#) {
+        out = re_attr
+            .replace_all(&out, |caps: &regex::Captures<'_>| {
+                let declared = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+                if declared.is_empty() {
+                    return format!(r#"font-family="{fallback_stack}""#);
+                }
+                let key = font_key(declared);
+                let base = base_font_key(declared);
+                let candidates = if !substitutes_for(&key).is_empty() {
+                    substitutes_for(&key)
+                } else if !substitutes_for(&base).is_empty() {
+                    substitutes_for(&base)
+                } else {
+                    heuristic_substitutes_for(declared)
+                };
+                let mut chain: Vec<&str> = Vec::with_capacity(candidates.len() + 3);
+                chain.push(declared);
+                for c in candidates.iter().take(5) {
+                    if !c.eq_ignore_ascii_case(declared) && !chain.contains(c) {
+                        chain.push(c);
+                    }
+                }
+                if !preferred_cjk_font.is_empty() && !chain.contains(&preferred_cjk_font) {
+                    chain.push(preferred_cjk_font);
+                }
+                chain.push("sans-serif");
+                format!(r#"font-family="{}""#, chain.join(", "))
+            })
+            .into_owned();
     }
     out
 }
@@ -156,6 +165,10 @@ pub fn normalize_svg_for_usvg(raw_svg: &str, preferred_cjk_font: &str) -> String
 pub fn convert_svg_to_png(svg_path: &Path, png_path: &Path, settings: &AppSettings) -> AppResult<()> {
     let raw = fs::read_to_string(svg_path)
         .map_err(|e| AppError::Message(format!("读取 SVG 失败（{}）：{e}", svg_path.display())))?;
+    let declared = extract_svg_declared_fonts(&raw);
+    if !declared.is_empty() {
+        let _ = ensure_word_fonts(&declared, settings);
+    }
     let preferred_cjk = detect_svg_cjk_font_family(settings);
     let normalized = normalize_svg_for_usvg(&raw, &preferred_cjk);
 

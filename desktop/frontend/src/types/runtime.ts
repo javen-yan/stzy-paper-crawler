@@ -5,6 +5,9 @@ export interface RuntimeInfo {
   host: string
   port: number
   public_base_url?: string
+  office_engine?: string
+  libreoffice_url?: string
+  output_dir?: string
   capabilities: Record<string, boolean>
   preview: {
     max_pages: number

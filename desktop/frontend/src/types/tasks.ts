@@ -131,4 +131,5 @@ export interface TaskIssue {
   title: string
   detail: string
   recovery: string
+  local_dir?: string
 }

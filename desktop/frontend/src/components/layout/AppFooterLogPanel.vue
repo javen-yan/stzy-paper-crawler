@@ -12,21 +12,26 @@ const {
   footerExpanded,
   footerHeight,
   logAutoScroll,
+  setActiveTaskId,
   setFooterExpanded,
   setLogAutoScroll,
 } = useLayoutState()
-const { selectedTaskId, selectedTask, logs, selectTask, refreshLogs } = useTasks()
+const { tasks, selectedTaskId, selectedTask, logs, selectTask, refreshLogs } = useTasks()
 const logBody = ref<HTMLElement | null>(null)
 const localClearedBefore = ref(0)
 
 const visibleLogs = computed(() => logs.value.filter((line) => line.id > localClearedBefore.value))
 const taskLabel = computed(() => {
-  if (!activeTaskId.value) return '点击任意任务即可绑定实时日志流'
+  if (!activeTaskId.value) return '暂无绑定任务'
   return selectedTask.value ? taskDisplayName(selectedTask.value) : activeTaskId.value
 })
 const taskStatus = computed(() => taskStatusLabel(selectedTask.value))
 
 async function ensureTaskBound() {
+  if (!activeTaskId.value && tasks.value.length) {
+    const running = tasks.value.find((t) => t.status === 'running') || tasks.value[0]
+    if (running) setActiveTaskId(running.id)
+  }
   if (!activeTaskId.value) return
   if (selectedTaskId.value !== activeTaskId.value) {
     await selectTask(activeTaskId.value, { includeLogs: footerExpanded.value, includeResources: false })
@@ -81,7 +86,7 @@ onMounted(() => polling.start())
   <footer
     class="footer-log-panel"
     :class="{ collapsed: !footerExpanded }"
-    :style="{ height: `${footerExpanded ? footerHeight : 40}px` }"
+    :style="{ height: `${footerExpanded ? footerHeight : 36}px` }"
   >
     <div class="footer-log-titlebar">
       <div
@@ -92,8 +97,8 @@ onMounted(() => polling.start())
         @click="setFooterExpanded(!footerExpanded)"
         @keydown.enter="setFooterExpanded(!footerExpanded)"
       >
-        <Terminal :size="14" class="footer-console-icon" />
-        <strong>实时控制台</strong>
+        <Terminal :size="13" class="footer-console-icon" />
+        <strong>运行日志</strong>
         <span class="footer-task-label">{{ taskLabel }}</span>
         <StatusTag v-if="selectedTask" :status="selectedTask.status" :label="taskStatus" />
       </div>
@@ -103,7 +108,7 @@ onMounted(() => polling.start())
           v-if="footerExpanded"
           :model-value="logAutoScroll"
           size="small"
-          active-text="跟随输出"
+          active-text="自动滚动"
           @change="setLogAutoScroll(Boolean($event))"
         />
         <el-button v-if="footerExpanded" size="small" text @click="clearDisplayLogs">
@@ -122,8 +127,8 @@ onMounted(() => polling.start())
     </div>
 
     <div v-show="footerExpanded" ref="logBody" class="footer-log-body" aria-live="polite">
-      <div v-if="!activeTaskId" class="footer-log-empty">在任务中心点击或打开任意任务，即可在此实时追踪执行日志。</div>
-      <div v-else-if="!visibleLogs.length" class="footer-log-empty">等待任务输出实时日志…</div>
+      <div v-if="!activeTaskId" class="footer-log-empty">创建任务后可在此查看运行输出。</div>
+      <div v-else-if="!visibleLogs.length" class="footer-log-empty">暂无日志输出</div>
       <p v-for="line in visibleLogs" v-else :key="line.id" class="footer-log-line" :data-level="line.level">
         <time>{{ line.created_at }}</time>
         <span class="level">{{ (line.level || 'info').toUpperCase() }}</span>

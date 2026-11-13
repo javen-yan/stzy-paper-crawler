@@ -52,7 +52,7 @@ async function handleEnabled(account: Account, enabled: boolean) {
 }
 
 async function handleDelete(account: Account) {
-  await ElMessageBox.confirm(`确认删除账号「${account.name}」？此操作不会删除历史任务。`, '删除账号', {
+  await ElMessageBox.confirm(`确认删除账号「${account.name}」？此操作不会删除已下载文件。`, '删除账号', {
     confirmButtonText: '删除',
     cancelButtonText: '取消',
     type: 'warning',
@@ -67,9 +67,8 @@ onMounted(refresh)
   <div class="page-stack">
     <section class="page-hero">
       <div>
-        <p class="eyebrow">AES-256 加密托管 · 智能轮换</p>
-        <h2>账号池</h2>
-        <p class="hero-subtitle">集中托管登录凭据，自动按 VIP 额度与健康状态分配下载请求。</p>
+        <h2>账号管理</h2>
+        <p class="hero-subtitle">添加官网登录账号，下载任务会自动按可用状态与剩余次数轮换使用。</p>
       </div>
       <div class="hero-actions">
         <AccountEditor :loading="loading" @phone-login="handlePhoneLogin" @import="handleImport" />
@@ -80,18 +79,18 @@ onMounted(refresh)
       <template #header>
         <div class="card-header account-list-header">
           <div class="account-header-meta">
-            <strong>托管账号列表</strong>
+            <strong>已添加账号</strong>
             <span class="meta-pill">共 {{ accounts.length }} 个</span>
             <span class="meta-pill success">可用 {{ usableCount }}</span>
-            <span v-if="vipCount > 0" class="meta-pill accent">含额度/VIP {{ vipCount }}</span>
+            <span v-if="vipCount > 0" class="meta-pill accent">VIP / 有额度 {{ vipCount }}</span>
           </div>
         </div>
       </template>
       <el-skeleton v-if="loading && !accounts.length" :rows="5" animated />
       <EmptyState
         v-else-if="!accounts.length"
-        title="还没有添加采集账号"
-        description="点击右上角「添加账号」，支持手机号一键登录或粘贴 cURL / Token 导入。"
+        title="暂未添加账号"
+        description="点击右上角「添加账号」，可使用手机号登录或导入浏览器凭据。"
       />
       <AccountTable v-else :accounts="accounts" @verify="handleVerify" @enabled="handleEnabled" @delete="handleDelete" />
     </el-card>

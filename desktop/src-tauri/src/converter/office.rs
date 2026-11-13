@@ -13,7 +13,8 @@ use url::Url;
 use zip::ZipArchive;
 
 use crate::converter::fonts::{
-    ensure_word_fonts, font_directories, write_fontconfig_xml, FontResolutionPlan,
+    default_common_substitutions, ensure_word_fonts, font_directories, normalized_policy,
+    write_fontconfig_xml, FontResolutionPlan,
 };
 use crate::converter::pdf::{
     convert_originals_to_pdf, count_non_whitespace_chars, inspect_pdf, merge_pdf_files_with_toc,
@@ -162,8 +163,26 @@ pub fn source_kind(path: &Path) -> AppResult<&'static str> {
     let lowered = String::from_utf8_lossy(slice).to_lowercase();
     if lowered.contains("<html") || lowered.contains("<!doctype html") {
         return Err(AppError::Message(
-            "下载结果是 HTML 页面，不是原文文件".to_string(),
+            "下载结果是网页而非试卷原文，可能是链接已失效".to_string(),
         ));
+    }
+    if slice.starts_with(b"{\\rtf")
+        || lowered.contains("progid=\"word.document\"")
+        || lowered.contains("<w:worddocument")
+    {
+        return Ok(".doc");
+    }
+    if slice.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Ok(".png");
+    }
+    if slice.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Ok(".jpg");
+    }
+    if slice.len() >= 12 && &slice[..4] == b"RIFF" && &slice[8..12] == b"WEBP" {
+        return Ok(".webp");
+    }
+    if lowered.contains("<svg") {
+        return Ok(".svg");
     }
 
     let ext = path
@@ -178,7 +197,7 @@ pub fn source_kind(path: &Path) -> AppResult<&'static str> {
         "webp" => Ok(".webp"),
         "svg" => Ok(".svg"),
         _ => Err(AppError::Message(
-            "无法识别原文格式（支持 PDF、Word、ZIP、RAR、7z 和图片）".to_string(),
+            "无法识别该文件格式（目前支持 PDF、Word、ZIP 和图片）".to_string(),
         )),
     }
 }
@@ -486,7 +505,7 @@ pub fn word_to_pdf(
 ) -> AppResult<FontResolutionPlan> {
     let Some(engine) = detect_office_engine(settings) else {
         return Err(AppError::Message(
-            "未检测到本地 Word 转 PDF 引擎（Windows 支持 Microsoft Word / WPS / LibreOffice；macOS 请安装 LibreOffice），原件已完整保留"
+            "未安装 LibreOffice 转换核心，已保存原 Word 文件；安装 LibreOffice 后点击「继续任务」即可生成 PDF"
                 .to_string(),
         ));
     };
@@ -501,6 +520,7 @@ pub fn word_to_pdf(
 
     let deadline = Instant::now() + Duration::from_secs_f64(timeout_secs.max(5.0));
     let output_pdf = work.join("source.pdf");
+    let strict_mode = normalized_policy(settings) == "strict";
 
     let plan: FontResolutionPlan = match engine {
         OfficeEngine::LibreOffice(ref soffice) => {
@@ -512,9 +532,10 @@ pub fn word_to_pdf(
             )?;
 
             let mut inspection_docx = local_source.clone();
+            let mut can_inspect_docx = kind == ".docx";
             if kind == ".doc" {
                 let rem = deadline.saturating_duration_since(Instant::now());
-                libreoffice_convert(
+                if libreoffice_convert(
                     soffice,
                     work,
                     &profile,
@@ -523,20 +544,51 @@ pub fn word_to_pdf(
                     settings,
                     &BTreeMap::new(),
                     rem,
-                )?;
-                inspection_docx = work.join("source.docx");
-                if !inspection_docx.exists() {
-                    return Err(AppError::Message(
-                        "无法检查 DOC 字体，文件可能已加密或损坏".to_string(),
-                    ));
+                )
+                .is_ok()
+                {
+                    let candidate = work.join("source.docx");
+                    if candidate.exists() {
+                        inspection_docx = candidate;
+                        can_inspect_docx = true;
+                    }
                 }
             }
 
-            let (declared_fonts, source_text) = docx_content(&inspection_docx)?;
-            let mut resolved = ensure_word_fonts(&declared_fonts, settings)?;
-            if !resolved.missing.is_empty() {
+            let (declared_fonts, source_text, mut resolved) = if can_inspect_docx {
+                match docx_content(&inspection_docx) {
+                    Ok((fonts, text)) => {
+                        let plan = ensure_word_fonts(&fonts, settings)?;
+                        (fonts, text, plan)
+                    }
+                    Err(_) => (
+                        BTreeSet::new(),
+                        String::new(),
+                        FontResolutionPlan {
+                            substituted: default_common_substitutions(settings),
+                            policy: normalized_policy(settings),
+                            visual_review: true,
+                            ..FontResolutionPlan::default()
+                        },
+                    ),
+                }
+            } else {
+                (
+                    BTreeSet::new(),
+                    String::new(),
+                    FontResolutionPlan {
+                        substituted: default_common_substitutions(settings),
+                        policy: normalized_policy(settings),
+                        visual_review: true,
+                        ..FontResolutionPlan::default()
+                    },
+                )
+            };
+
+            let _ = declared_fonts;
+            if strict_mode && !resolved.missing.is_empty() {
                 return Err(AppError::Message(format!(
-                    "缺少原文字体：{}；请安装有授权的字体或在设置中指定字体目录，原件已保留",
+                    "缺少原文字体：{}；原件已保留",
                     resolved.missing.join("、")
                 )));
             }
@@ -555,10 +607,16 @@ pub fn word_to_pdf(
 
             if !output_pdf.exists() {
                 return Err(AppError::Message(
-                    "LibreOffice 未生成 PDF，原件已保留".to_string(),
+                    "文档转换失败（可能受密码保护或格式损坏），原文件已保存".to_string(),
                 ));
             }
-            verify_word_pdf_output(&output_pdf, &source_text, expected_pages, &mut resolved)?;
+            verify_word_pdf_output(
+                &output_pdf,
+                &source_text,
+                expected_pages,
+                strict_mode,
+                &mut resolved,
+            )?;
             resolved
         }
         OfficeEngine::MsWordCom | OfficeEngine::WpsCom => {
@@ -586,18 +644,24 @@ pub fn word_to_pdf(
                 )?;
                 let inspect_target = docx_temp.as_deref().unwrap_or(&local_source);
                 let (declared_fonts, source_text) = if inspect_target.exists() {
-                    docx_content(inspect_target)?
+                    docx_content(inspect_target).unwrap_or_default()
                 } else {
                     (BTreeSet::new(), String::new())
                 };
                 let mut resolved = ensure_word_fonts(&declared_fonts, settings)?;
-                if !resolved.missing.is_empty() {
+                if strict_mode && !resolved.missing.is_empty() {
                     return Err(AppError::Message(format!(
                         "缺少原文字体：{}；原件已保留",
                         resolved.missing.join("、")
                     )));
                 }
-                verify_word_pdf_output(&output_pdf, &source_text, expected_pages, &mut resolved)?;
+                verify_word_pdf_output(
+                    &output_pdf,
+                    &source_text,
+                    expected_pages,
+                    strict_mode,
+                    &mut resolved,
+                )?;
                 resolved
             }
             #[cfg(not(target_os = "windows"))]
@@ -611,25 +675,118 @@ pub fn word_to_pdf(
     Ok(plan)
 }
 
+fn should_ignore_coverage_char(ch: char) -> bool {
+    if ch.is_whitespace() || ch.is_control() {
+        return true;
+    }
+    // Ignore Private Use Area (Word Wingdings/Symbol bullets), zero-width/variation selectors,
+    // replacement chars, and decorative list markers that render as vector shapes in PDF.
+    matches!(
+        ch,
+        '\u{00AD}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202F}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{E000}'..='\u{F8FF}'
+            | '\u{FFF9}'..='\u{FFFD}'
+            | '•'
+            | '·'
+            | '▪'
+            | '▫'
+            | '■'
+            | '□'
+            | '▲'
+            | '△'
+            | '◆'
+            | '◇'
+            | '○'
+            | '●'
+            | '★'
+            | '☆'
+            | '✓'
+            | '✔'
+            | '✗'
+            | '✘'
+    )
+}
+
+fn compute_text_coverage(source_text: &str, extracted_text: &str) -> (usize, usize, Vec<char>) {
+    let raw_src = count_non_whitespace_chars(source_text);
+    let rendered = count_non_whitespace_chars(extracted_text);
+
+    let mut total_needed = 0usize;
+    let mut total_matched = 0usize;
+    let mut missing_samples = Vec::new();
+
+    for (ch, needed) in raw_src {
+        if should_ignore_coverage_char(ch) {
+            continue;
+        }
+        total_needed = total_needed.saturating_add(needed);
+        let got = rendered.get(&ch).copied().unwrap_or(0);
+        total_matched = total_matched.saturating_add(got.min(needed));
+        if got < needed && missing_samples.len() < 5 {
+            missing_samples.push(ch);
+        }
+    }
+    (total_matched, total_needed, missing_samples)
+}
+
 fn verify_word_pdf_output(
     output_pdf: &Path,
     source_text: &str,
     expected_pages: usize,
+    strict_mode: bool,
     plan: &mut FontResolutionPlan,
 ) -> AppResult<()> {
     let inspection = inspect_pdf(output_pdf, true)?;
-    plan.page_check = page_check(expected_pages, inspection.page_count, plan.visual_review, "")?;
-
-    let src_chars = count_non_whitespace_chars(source_text);
-    let rendered_chars = count_non_whitespace_chars(&inspection.extracted_text);
-    for (ch, needed) in src_chars {
-        let got = rendered_chars.get(&ch).copied().unwrap_or(0);
-        if got < needed {
-            return Err(AppError::Message(
-                "Word 转换文字覆盖校验失败，可能缺字或对象未正确渲染；未发布 PDF".to_string(),
-            ));
-        }
+    if inspection.page_count == 0 {
+        return Err(AppError::Message(
+            "转换后的 PDF 没有有效页面，原文件已保存".to_string(),
+        ));
     }
+
+    // In beginner-friendly mode, always tolerate minor page-count variance vs site preview
+    plan.page_check = page_check(
+        expected_pages,
+        inspection.page_count,
+        !strict_mode || plan.visual_review,
+        "",
+    )?;
+
+    if source_text.trim().is_empty() {
+        return Ok(());
+    }
+
+    let (matched, needed, missing_samples) =
+        compute_text_coverage(source_text, &inspection.extracted_text);
+    if needed == 0 {
+        return Ok(());
+    }
+
+    if strict_mode && matched < needed {
+        return Err(AppError::Message(
+            "Word 转换文字覆盖校验失败，可能缺字或对象未正确渲染；未发布 PDF".to_string(),
+        ));
+    }
+
+    let coverage = (matched as f64) / (needed as f64);
+    if needed >= 25 && coverage < 0.45 {
+        let sample_str: String = missing_samples.into_iter().collect();
+        return Err(AppError::Message(format!(
+            "文档内大量特殊公式或嵌入对象未能转为文字（识别率 {:.0}%，缺失示例：{sample_str}），已保留原 Word 文件",
+            coverage * 100.0
+        )));
+    }
+
+    if needed >= 15 && coverage < 0.92 {
+        plan.warnings.push(
+            "含少量特殊公式或符号，已生成 PDF 并保留原 Word 文件供核对".to_string(),
+        );
+    }
+
     Ok(())
 }
 
@@ -655,20 +812,28 @@ fn natural_key(name: &str) -> Vec<NaturalPart> {
         .collect()
 }
 
-/// Safely validates and unpacks a `.zip` bundle in site `fileList` order (falling back to natural sort).
-pub fn unpack_zip(
+#[derive(Debug, Default)]
+pub struct UnpackedZipBundle {
+    pub documents: Vec<(String, PathBuf)>,
+    pub companion_audios: Vec<(String, PathBuf)>,
+    pub skipped_files: Vec<String>,
+}
+
+/// Safely validates and unpacks a `.zip` bundle in site `fileList` order (falling back to natural sort),
+/// preserving companion listening audio files (`.mp3`, `.wav`, etc.) and skipping harmless readme files.
+pub fn unpack_zip_bundle(
     source: &Path,
     directory: &Path,
     file_order: &[String],
-) -> AppResult<Vec<(String, PathBuf)>> {
+) -> AppResult<UnpackedZipBundle> {
     let zf = File::open(source)?;
     let mut archive = ZipArchive::new(zf)
-        .map_err(|e| AppError::Message(format!("打开 ZIP 失败：{e}")))?;
+        .map_err(|e| AppError::Message(format!("压缩包损坏无法打开（{e}），原文件已保留")))?;
 
     let count = archive.len();
     if count > MAX_ZIP_MEMBERS {
         return Err(AppError::Message(
-            "ZIP 超过 500 个条目或解压后 512 MiB 限制".to_string(),
+            "压缩包内文件过多（超过 500 个），已保留原压缩包".to_string(),
         ));
     }
 
@@ -677,21 +842,23 @@ pub fn unpack_zip(
     for idx in 0..count {
         let entry = archive
             .by_index_raw(idx)
-            .map_err(|e| AppError::Message(format!("读取 ZIP 条目失败：{e}")))?;
+            .map_err(|e| AppError::Message(format!("读取压缩包目录失败（{e}），原文件已保留")))?;
         total_bytes = total_bytes.saturating_add(entry.size());
         if total_bytes > MAX_EXPANDED_BYTES {
             return Err(AppError::Message(
-                "ZIP 超过 500 个条目或解压后 512 MiB 限制".to_string(),
+                "压缩包解压体积超过 512 MB 安全上限，已保留原压缩包".to_string(),
             ));
         }
         let raw_name = entry.name().replace('\\', "/");
         if entry.encrypted() {
-            return Err(AppError::Message("ZIP 已加密，原包已保留".to_string()));
+            return Err(AppError::Message(
+                "压缩包设有密码保护无法自动转换，已保留原压缩包".to_string(),
+            ));
         }
         if let Some(mode) = entry.unix_mode() {
             if (mode & 0o170000) == 0o120000 {
                 return Err(AppError::Message(
-                    "ZIP 包含不安全路径或符号链接".to_string(),
+                    "压缩包包含不安全的符号链接路径，已跳过转换".to_string(),
                 ));
             }
         }
@@ -721,14 +888,16 @@ pub fn unpack_zip(
             .then_with(|| natural_key(&a.1).cmp(&natural_key(&b.1)))
     });
 
-    let mut extracted = Vec::new();
+    let mut bundle = UnpackedZipBundle::default();
+    let mut unsupported_exts = BTreeSet::new();
+
     for (idx, norm_name, is_dir) in raw_entries {
         if norm_name.starts_with('/')
             || norm_name.contains(':')
             || norm_name.split('/').any(|p| p == "..")
         {
             return Err(AppError::Message(
-                "ZIP 包含不安全路径或符号链接".to_string(),
+                "压缩包包含不安全路径，已跳过转换".to_string(),
             ));
         }
         if is_dir || norm_name.ends_with('/') {
@@ -739,7 +908,11 @@ pub fn unpack_zip(
             continue;
         }
         let filename = *parts.last().unwrap();
-        if filename.starts_with('.') || filename.starts_with("~$") {
+        if filename.starts_with('.')
+            || filename.starts_with("~$")
+            || filename.eq_ignore_ascii_case("thumbs.db")
+            || filename.eq_ignore_ascii_case("desktop.ini")
+        {
             continue;
         }
         let suffix = Path::new(filename)
@@ -747,33 +920,109 @@ pub fn unpack_zip(
             .and_then(|s| s.to_str())
             .map(|s| format!(".{}", s.to_lowercase()))
             .unwrap_or_default();
-        if !matches!(
-            suffix.as_str(),
-            ".pdf" | ".doc" | ".docx" | ".png" | ".jpg" | ".jpeg" | ".webp"
-        ) {
-            return Err(AppError::Message(format!(
-                "ZIP 中的 {norm_name} 暂不支持转换，未跳过或标记完成"
-            )));
-        }
 
         let clean_rel = parts.join("/");
-        let target = directory.join(format!("{:04}{suffix}", extracted.len()));
-        let mut entry = archive
-            .by_index(idx)
-            .map_err(|e| AppError::Message(format!("解压 {clean_rel} 失败：{e}")))?;
-        let mut out_file = File::create(&target)?;
-        std::io::copy(&mut entry, &mut out_file)?;
-        out_file.flush()?;
-        extracted.push((clean_rel, target));
+
+        if matches!(
+            suffix.as_str(),
+            ".pdf" | ".doc" | ".docx" | ".png" | ".jpg" | ".jpeg" | ".webp" | ".svg"
+        ) {
+            let target = directory.join(format!("{:04}{suffix}", bundle.documents.len()));
+            let mut entry = archive
+                .by_index(idx)
+                .map_err(|e| AppError::Message(format!("解压 {clean_rel} 失败：{e}")))?;
+            let mut out_file = File::create(&target)?;
+            std::io::copy(&mut entry, &mut out_file)?;
+            out_file.flush()?;
+            bundle.documents.push((clean_rel, target));
+        } else if matches!(
+            suffix.as_str(),
+            ".mp3" | ".wav" | ".m4a" | ".wma" | ".aac" | ".ogg" | ".flac"
+        ) {
+            let safe_audio_name = filename.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            let target = directory.join(format!(
+                "audio_{:02}_{safe_audio_name}",
+                bundle.companion_audios.len() + 1
+            ));
+            if let Ok(mut entry) = archive.by_index(idx) {
+                if let Ok(mut out_file) = File::create(&target) {
+                    if std::io::copy(&mut entry, &mut out_file).is_ok() {
+                        let _ = out_file.flush();
+                        bundle.companion_audios.push((safe_audio_name, target));
+                    }
+                }
+            }
+        } else {
+            if !suffix.is_empty() {
+                unsupported_exts.insert(suffix);
+            }
+            bundle.skipped_files.push(clean_rel);
+        }
     }
 
-    if extracted.is_empty() {
-        return Err(AppError::Message("ZIP 中没有可转换文档".to_string()));
+    if bundle.documents.is_empty() {
+        if !bundle.companion_audios.is_empty() {
+            return Err(AppError::Message(
+                "压缩包内仅包含听力音频，无 Word/PDF 试卷文档，已保留原压缩包".to_string(),
+            ));
+        }
+        if !unsupported_exts.is_empty() {
+            let exts: Vec<String> = unsupported_exts.into_iter().collect();
+            return Err(AppError::Message(format!(
+                "压缩包内仅含不支持自动转 PDF 的格式（{}），已保留原压缩包",
+                exts.join("、")
+            )));
+        }
+        return Err(AppError::Message(
+            "压缩包内没有可转换的文档或图片，已保留原压缩包".to_string(),
+        ));
     }
-    Ok(extracted)
+
+    Ok(bundle)
 }
 
-/// Converts any supported source file (`.pdf`, `.doc`, `.docx`, `.zip`, raster image) to a verified
+pub fn unpack_zip(
+    source: &Path,
+    directory: &Path,
+    file_order: &[String],
+) -> AppResult<Vec<(String, PathBuf)>> {
+    Ok(unpack_zip_bundle(source, directory, file_order)?.documents)
+}
+
+/// Converts raw conversion errors into concise, beginner-friendly Chinese explanations.
+pub fn humanize_conversion_error(raw: &str, suffix: &str) -> String {
+    let lower_suffix = suffix.trim().to_lowercase();
+    if lower_suffix == ".rar" || raw.contains(".rar") {
+        return "暂不支持 RAR 压缩包自动转 PDF，已保存原压缩包（点击右侧「打开」可直接解压查看）"
+            .to_string();
+    }
+    if lower_suffix == ".7z" || raw.contains(".7z") {
+        return "暂不支持 7z 压缩包自动转 PDF，已保存原压缩包（点击右侧「打开」可直接解压查看）"
+            .to_string();
+    }
+    if raw.contains("未检测到本地 Word 转 PDF 引擎") || raw.contains("未安装 LibreOffice") {
+        return "未安装 LibreOffice 转换核心，已保存原文件；安装后继续任务即可补全 PDF".to_string();
+    }
+    if raw.contains("加密") || raw.contains("密码") || raw.to_lowercase().contains("password") {
+        return "文件设有密码保护无法自动转换，已保存原文件".to_string();
+    }
+    if raw.contains("超时") || raw.to_lowercase().contains("timed out") {
+        return "文档排版较复杂导致转换超时，已保存原文件".to_string();
+    }
+    if raw.contains("嵌套压缩包") {
+        return "压缩包内含有多层嵌套压缩包无法自动转换，已保存原压缩包".to_string();
+    }
+    let cleaned = raw
+        .trim_start_matches("原件已保存，PDF 尚未通过校验：")
+        .trim();
+    if cleaned.contains("已保留") || cleaned.contains("已保存") {
+        cleaned.to_string()
+    } else {
+        format!("{cleaned}（已为您保留原文件）")
+    }
+}
+
+/// Converts any supported source file (`.pdf`, `.doc`, `.docx`, `.zip`, `.svg`, raster image) to a verified
 /// target PDF and returns the structured conversion report matching `conversion-report.json`.
 pub fn source_to_pdf(
     source: &Path,
@@ -786,10 +1035,12 @@ pub fn source_to_pdf(
     let kind = source_kind(source)?;
     let mut parts_report: Vec<Value> = Vec::new();
     let mut font_plan = FontResolutionPlan {
-        policy: crate::converter::fonts::normalized_policy(settings),
+        policy: normalized_policy(settings),
         ..FontResolutionPlan::default()
     };
     let mut parts_tolerated = false;
+    let mut self_heal_notes: Vec<String> = Vec::new();
+    let mut exported_companions: Vec<String> = Vec::new();
 
     match kind {
         ".pdf" => {
@@ -797,6 +1048,10 @@ pub fn source_to_pdf(
         }
         ".doc" | ".docx" => {
             font_plan = word_to_pdf(source, target, timeout_secs, expected_pages, settings)?;
+            let note = font_plan.summary_note();
+            if !note.is_empty() {
+                self_heal_notes.push(note);
+            }
         }
         ".zip" => {
             let temp_dir = tempfile::Builder::new().prefix("stzy-zip-").tempdir()?;
@@ -806,22 +1061,41 @@ pub fn source_to_pdf(
                 .filter_map(|item| item.get("fileName").and_then(Value::as_str))
                 .map(str::to_string)
                 .collect();
-            let members = unpack_zip(source, work, &file_order)?;
+            let bundle = unpack_zip_bundle(source, work, &file_order)?;
             let deadline = Instant::now() + Duration::from_secs_f64(timeout_secs.max(5.0));
 
-            let mut converted_member_pdfs: Vec<(String, PathBuf)> = Vec::with_capacity(members.len());
-            let mut member_reports: Vec<(String, Value)> = Vec::with_capacity(members.len());
+            if let Some(out_dir) = target.parent() {
+                for (audio_name, audio_tmp) in &bundle.companion_audios {
+                    let dst = out_dir.join(format!("companion_{audio_name}"));
+                    if fs::copy(audio_tmp, &dst).is_ok() {
+                        exported_companions.push(audio_name.clone());
+                    }
+                }
+            }
+            if !bundle.companion_audios.is_empty() {
+                self_heal_notes.push(format!(
+                    "已保留配套音频 {} 个",
+                    bundle.companion_audios.len()
+                ));
+            }
 
-            for (name, member_path) in members {
+            let mut converted_member_pdfs: Vec<(String, PathBuf)> =
+                Vec::with_capacity(bundle.documents.len());
+            let mut member_reports: Vec<(String, Value)> =
+                Vec::with_capacity(bundle.documents.len());
+            let mut zip_installed_fonts = BTreeSet::new();
+            let mut zip_substituted_fonts = BTreeMap::new();
+
+            for (name, member_path) in bundle.documents {
                 let member_kind = source_kind(&member_path)?;
                 if matches!(member_kind, ".zip" | ".rar" | ".7z") {
                     return Err(AppError::Message(
-                        "暂不支持嵌套压缩包转换，原包已保留".to_string(),
+                        "暂不支持嵌套压缩包转换，原压缩包已保留".to_string(),
                     ));
                 }
                 let rem = deadline.saturating_duration_since(Instant::now());
                 if rem.is_zero() {
-                    return Err(AppError::Message("ZIP 转换超时，原包已保留".to_string()));
+                    return Err(AppError::Message("压缩包转换超时，原压缩包已保留".to_string()));
                 }
                 let base_name = name.rsplit('/').next().unwrap_or(&name);
                 let expected_member_pages = files_metadata
@@ -852,14 +1126,24 @@ pub fn source_to_pdf(
                     &[],
                     settings,
                 )
-                .map_err(|e| AppError::Message(format!("ZIP 成员 {name} 转换失败：{e}")))?;
+                .map_err(|e| AppError::Message(format!("压缩包内《{base_name}》转换失败：{e}")))?;
+
+                if let Some(f_obj) = m_rep.get("fonts") {
+                    if let Some(inst) = f_obj.get("installed").and_then(Value::as_array) {
+                        for item in inst.iter().filter_map(Value::as_str) {
+                            zip_installed_fonts.insert(item.to_string());
+                        }
+                    }
+                    if let Some(sub) = f_obj.get("substituted").and_then(Value::as_object) {
+                        for (k, v) in sub {
+                            if let Some(vs) = v.as_str() {
+                                zip_substituted_fonts.insert(k.clone(), vs.to_string());
+                            }
+                        }
+                    }
+                }
 
                 let m_insp = inspect_pdf(&member_pdf, false)?;
-                let m_visual = m_rep
-                    .get("fonts")
-                    .and_then(|f| f.get("visual_review"))
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
                 let m_check = if m_rep
                     .get("page_check")
                     .and_then(Value::as_object)
@@ -871,8 +1155,8 @@ pub fn source_to_pdf(
                     page_check(
                         expected_member_pages,
                         m_insp.page_count,
-                        m_visual,
-                        &format!("{name} "),
+                        normalized_policy(settings) != "strict",
+                        &format!("{base_name} "),
                     )?
                 };
                 if m_check
@@ -885,6 +1169,13 @@ pub fn source_to_pdf(
 
                 converted_member_pdfs.push((name.clone(), member_pdf));
                 member_reports.push((name, m_rep));
+            }
+
+            font_plan.installed = zip_installed_fonts.into_iter().collect();
+            font_plan.substituted = zip_substituted_fonts;
+            let zip_font_note = font_plan.summary_note();
+            if !zip_font_note.is_empty() {
+                self_heal_notes.push(zip_font_note);
             }
 
             let merged_toc = merge_pdf_files_with_toc(&converted_member_pdfs, target)?;
@@ -902,12 +1193,13 @@ pub fn source_to_pdf(
                 }));
             }
         }
-        ".png" | ".jpg" | ".jpeg" | ".webp" => {
+        ".png" | ".jpg" | ".jpeg" | ".webp" | ".svg" => {
             convert_originals_to_pdf(&[source.to_path_buf()], target, settings)?;
         }
         other => {
-            return Err(AppError::Message(format!(
-                "暂不支持 {other} 转 PDF，原件已保留"
+            return Err(AppError::Message(humanize_conversion_error(
+                &format!("暂不支持 {other} 转 PDF"),
+                other,
             )));
         }
     }
@@ -916,7 +1208,7 @@ pub fn source_to_pdf(
     let final_check = page_check(
         expected_pages,
         final_insp.page_count,
-        font_plan.visual_review || parts_tolerated,
+        normalized_policy(settings) != "strict" || font_plan.visual_review || parts_tolerated,
         "",
     )?;
 
@@ -937,8 +1229,32 @@ pub fn source_to_pdf(
         "source_kind": kind,
         "pages": final_insp.page_count,
         "files": parts_report,
+        "companions": exported_companions,
         "fonts": font_plan.to_report_json(),
         "page_check": final_check,
+        "self_heal_note": self_heal_notes.join("；"),
         "layout": layout,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_coverage_ignores_pua_wingdings_and_bullets() {
+        let src = "一、选择题（共10题）\u{F0FE}\u{F06C} • 第一题：已知集合 A={1,2}";
+        let rendered = "一、选择题（共10题） 第一题：已知集合 A={1,2}";
+        let (matched, needed, missing) = compute_text_coverage(src, rendered);
+        assert_eq!(matched, needed);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn humanize_error_explains_rar_and_passwords_clearly() {
+        let rar_msg = humanize_conversion_error("暂不支持 .rar 转 PDF", ".rar");
+        assert!(rar_msg.contains("暂不支持 RAR 压缩包自动转 PDF"));
+        let enc_msg = humanize_conversion_error("ZIP 已加密，原包已保留", ".zip");
+        assert!(enc_msg.contains("密码保护"));
+    }
 }

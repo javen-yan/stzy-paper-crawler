@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
-use crate::converter::office::source_kind;
+use crate::converter::office::{humanize_conversion_error, source_kind};
 use crate::converter::pdf::pdf_file_looks_valid;
 use crate::converter::DocumentConverter;
 use crate::crawler::account_scheduler::AccountScheduler;
@@ -414,7 +414,7 @@ impl DownloadService {
         }
 
         (self.on_log)(format!(
-            "资源进度：{} - 校验原文并生成 PDF 和图片",
+            "资源进度：{} - 自动处理排版与字体并生成 PDF 和图片",
             record.resource_id
         ));
         match self
@@ -422,19 +422,23 @@ impl DownloadService {
             .convert_source_and_publish(&original, &directory, expected_pages, &files_meta)
             .await
         {
-            Ok((converted, added)) => {
+            Ok((converted, added, self_heal_note)) => {
                 if let Value::Object(ref mut map) = record.raw {
                     map.entry("sourcePageNum".to_string())
                         .or_insert_with(|| Value::from(record.page_count));
                 }
                 record.page_count = converted;
-                Ok(Self::result_from_count(
+                let mut res = Self::result_from_count(
                     converted,
                     converted,
                     "original_pdf",
                     dir_str,
                     added,
-                ))
+                );
+                if res.status == ResourceStatus::Completed && !self_heal_note.is_empty() {
+                    res.error = self_heal_note;
+                }
+                Ok(res)
             }
             Err(AppError::Cancelled) => Err(AppError::Cancelled),
             Err(exc) => Ok(DownloadResult {
@@ -443,7 +447,7 @@ impl DownloadService {
                 expected_pages,
                 source: "original".to_string(),
                 local_dir: dir_str,
-                error: format!("原件已保存，PDF 尚未通过校验：{exc}"),
+                error: humanize_conversion_error(&exc.to_string(), suffix),
                 images_added: 0,
                 paid_unavailable: 0,
             }),

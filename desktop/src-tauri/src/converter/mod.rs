@@ -158,7 +158,7 @@ impl DocumentConverter {
         directory: &Path,
         expected_pages: usize,
         files_metadata: &[Value],
-    ) -> AppResult<(usize, usize)> {
+    ) -> AppResult<(usize, usize, String)> {
         let existing = Self::saved_picture_count_from_dir(directory);
         let artifacts = ResourceArtifacts::new(directory.to_path_buf());
 
@@ -195,7 +195,7 @@ impl DocumentConverter {
                 .unwrap_or(0) as usize;
             if rendered_count == 0 || rendered_count != report_pages {
                 return Err(AppError::Message(
-                    "PDF 图片页数校验失败，未发布".to_string(),
+                    "PDF 页面图片生成异常，已保留原文件".to_string(),
                 ));
             }
 
@@ -205,7 +205,7 @@ impl DocumentConverter {
 
             artifacts.publish_pdf(&converted_pdf)?;
 
-            // Atomically swap 练习*.png pages
+            // Atomically swap 练习*.png pages & publish any companion audio files
             if let Ok(entries) = fs::read_dir(&dir_buf) {
                 for entry in entries.flatten() {
                     let p = entry.path();
@@ -221,6 +221,10 @@ impl DocumentConverter {
                         if let Some(name) = p.file_name() {
                             fs::rename(&p, dir_buf.join(name))?;
                         }
+                    } else if let Some(name_str) = p.file_name().and_then(|s| s.to_str()) {
+                        if let Some(clean_audio) = name_str.strip_prefix("companion_") {
+                            let _ = fs::rename(&p, dir_buf.join(clean_audio));
+                        }
                     }
                 }
             }
@@ -230,8 +234,14 @@ impl DocumentConverter {
         .await
         .map_err(|e| AppError::Message(format!("源文件转换线程异常：{e}")))??;
 
+        let self_heal_note = report
+            .get("self_heal_note")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
         self.log_font_report(&report);
-        Ok((count, count.saturating_sub(existing)))
+        Ok((count, count.saturating_sub(existing), self_heal_note))
     }
 
     pub fn log_font_report(&self, report: &Value) {

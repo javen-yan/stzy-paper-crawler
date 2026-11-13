@@ -26,18 +26,21 @@ jobs:
             rust_target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
             pdfium_target: mac-arm64
+            arch_suffix: aarch64
             artifact_name: macos-arm64
             run_tests: true
           - platform: macos-latest
             rust_target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin
             pdfium_target: mac-x64
+            arch_suffix: x64
             artifact_name: macos-x64
             run_tests: false
           - platform: windows-latest
             rust_target: x86_64-pc-windows-msvc
             args: --target x86_64-pc-windows-msvc
             pdfium_target: win-x64
+            arch_suffix: x64
             artifact_name: windows-x64
             run_tests: true
 
@@ -89,14 +92,33 @@ jobs:
         run: cargo test --lib --target ${{ matrix.rust_target }}
 
       - name: Build Tauri Desktop Bundles
-        uses: tauri-apps/tauri-action@v0
+        working-directory: desktop
+        shell: bash
         env:
           STZY_SKIP_FRONTEND_BUILD: "1"
-        with:
-          projectPath: desktop
-          args: ${{ matrix.args }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          EXTRA_ARGS=()
+          if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "Signing key detected: enabling Tauri updater artifacts (.sig)"
+            EXTRA_ARGS+=(--config '{"bundle":{"createUpdaterArtifacts":true}}')
+          fi
+          npx tauri build ${{ matrix.args }} "${EXTRA_ARGS[@]}"
 
-      - name: Upload macOS Installer Artifacts (.dmg)
+      - name: Rename macOS updater bundle with architecture suffix
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          MAC_DIR="desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos"
+          if [ -f "${MAC_DIR}/STZY Paper Crawler.app.tar.gz" ]; then
+            cp -v "${MAC_DIR}/STZY Paper Crawler.app.tar.gz" "${MAC_DIR}/STZY.Paper.Crawler_${{ matrix.arch_suffix }}.app.tar.gz"
+          fi
+          if [ -f "${MAC_DIR}/STZY Paper Crawler.app.tar.gz.sig" ]; then
+            cp -v "${MAC_DIR}/STZY Paper Crawler.app.tar.gz.sig" "${MAC_DIR}/STZY.Paper.Crawler_${{ matrix.arch_suffix }}.app.tar.gz.sig"
+          fi
+
+      - name: Upload macOS Installer & Updater Artifacts
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
@@ -104,8 +126,10 @@ jobs:
           if-no-files-found: error
           path: |
             desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg/*.dmg
+            desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/STZY.Paper.Crawler_*.app.tar.gz
+            desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/STZY.Paper.Crawler_*.app.tar.gz.sig
 
-      - name: Upload Windows Installer Artifacts (.exe & .msi)
+      - name: Upload Windows Installer & Updater Artifacts
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
@@ -113,33 +137,113 @@ jobs:
           if-no-files-found: error
           path: |
             desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis/*-setup.exe
+            desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis/*-setup.exe.sig
             desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/msi/*.msi
 
   publish-release:
-    name: Publish GitHub Release
+    name: Publish GitHub Release & Updater Manifest
     if: ${{ startsWith(github.ref, 'refs/tags/') }}
     needs: build-desktop
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download all platform installer artifacts
+      - name: Download all platform installer and updater artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
 
-      - name: Collect and verify all platform installers
+      - name: Normalize filenames and generate latest.json & latest-mirror.json
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          REPO_SLUG: ${{ github.repository }}
         run: |
-          mkdir -p release-dist
-          find release-assets -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.msi' \) -exec cp -v {} release-dist/ \;
-          ls -lh release-dist
-          test -n "$(find release-dist -maxdepth 1 -name '*_aarch64.dmg')"
-          test -n "$(find release-dist -maxdepth 1 -name '*_x64.dmg')"
-          test -n "$(find release-dist -maxdepth 1 -name '*-setup.exe')"
-          test -n "$(find release-dist -maxdepth 1 -name '*.msi')"
+          python3 - <<'PY'
+          import datetime
+          import glob
+          import json
+          import os
+          import pathlib
+          import shutil
 
-      - name: Create GitHub Release and upload installers
+          src_root = pathlib.Path("release-assets")
+          dist_dir = pathlib.Path("release-dist")
+          dist_dir.mkdir(parents=True, exist_ok=True)
+
+          allowed_suffixes = (".dmg", ".exe", ".msi", ".app.tar.gz", ".sig")
+          for path in sorted(src_root.rglob("*")):
+              if not path.is_file():
+                  continue
+              if not any(path.name.endswith(sfx) for sfx in allowed_suffixes):
+                  continue
+              clean_name = path.name.replace(" ", ".")
+              shutil.copy2(path, dist_dir / clean_name)
+              print(f"Copied {path.name} -> {clean_name}")
+
+          def require_one(pattern: str) -> pathlib.Path:
+              matches = sorted(dist_dir.glob(pattern))
+              if not matches:
+                  raise SystemExit(f"Missing expected release artifact matching: {pattern}")
+              return matches[0]
+
+          require_one("*_aarch64.dmg")
+          require_one("*_x64.dmg")
+          win_exe = require_one("*-setup.exe")
+          require_one("*.msi")
+
+          mac_arm_tar = require_one("*_aarch64.app.tar.gz")
+          mac_arm_sig = require_one("*_aarch64.app.tar.gz.sig")
+          mac_x64_tar = require_one("*_x64.app.tar.gz")
+          mac_x64_sig = require_one("*_x64.app.tar.gz.sig")
+          win_exe_sig = require_one("*-setup.exe.sig")
+
+          tag = os.environ["TAG_NAME"]
+          repo = os.environ["REPO_SLUG"]
+          version = tag
+          for prefix in ("desktop-v", "v"):
+              if version.startswith(prefix):
+                  version = version[len(prefix):]
+                  break
+
+          pub_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+          gh_base = f"https://github.com/{repo}/releases/download/{tag}"
+          mirror_base = f"https://ghfast.top/{gh_base}"
+
+          def build_manifest(base_url: str) -> dict:
+              return {
+                  "version": version,
+                  "notes": f"STZY Paper Crawler {tag} 在线升级包（包含最新转换与交互优化）",
+                  "pub_date": pub_date,
+                  "platforms": {
+                      "darwin-aarch64": {
+                          "signature": mac_arm_sig.read_text(encoding="utf-8").strip(),
+                          "url": f"{base_url}/{mac_arm_tar.name}",
+                      },
+                      "darwin-x86_64": {
+                          "signature": mac_x64_sig.read_text(encoding="utf-8").strip(),
+                          "url": f"{base_url}/{mac_x64_tar.name}",
+                      },
+                      "windows-x86_64": {
+                          "signature": win_exe_sig.read_text(encoding="utf-8").strip(),
+                          "url": f"{base_url}/{win_exe.name}",
+                      },
+                  },
+              }
+
+          (dist_dir / "latest.json").write_text(
+              json.dumps(build_manifest(gh_base), ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          (dist_dir / "latest-mirror.json").write_text(
+              json.dumps(build_manifest(mirror_base), ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          print("Generated latest.json and latest-mirror.json successfully for version:", version)
+          PY
+          ls -lh release-dist
+
+      - name: Create GitHub Release and upload installers & updater manifests
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -151,7 +255,7 @@ jobs:
           body: |
             ## STZY Paper Crawler ${{ github.ref_name }} · 原生桌面客户端 (`Rust + Tauri v2`)
 
-            完全重写的跨平台原生桌面版本，无需安装 Python 或启动外部本地服务端。
+            跨平台原生桌面客户端，支持客户端内一键检查更新与在线升级。
 
             ### 安装包选择指南
             - **macOS（Apple Silicon M1/M2/M3/M4）**：下载 `*_aarch64.dmg`
@@ -159,9 +263,9 @@ jobs:
             - **Windows 10 / 11（64 位）**：下载 `*_x64-setup.exe`（推荐）或 `*_x64_en-US.msi`
 
             ### macOS 首次打开提示「“STZY Paper Crawler”已损坏，无法打开」解决方法
-            由于安装包采用开源社区构建（未附加付费 Apple Developer ID 公证），浏览器下载后会携带 macOS 隔离属性（`com.apple.quarantine`）：
-            1. 打开 `.dmg` 后，**先将 `STZY Paper Crawler.app` 拖入 `Applications`（应用程序）文件夹**（不要直接在磁盘映像窗口内双击运行）。
-            2. 打开「终端（Terminal）」，执行以下命令移除隔离标记即可正常打开：
+            首次手动安装 `.dmg` 时，浏览器下载会附带 macOS 隔离标记（`com.apple.quarantine`）：
+            1. 打开 `.dmg` 后，**先将 `STZY Paper Crawler.app` 拖入 `Applications`（应用程序）文件夹**。
+            2. 打开「终端（Terminal）」，执行以下命令即可正常打开（后续应用内在线更新无需重复执行）：
                ```bash
                xattr -cr "/Applications/STZY Paper Crawler.app"
                ```
@@ -169,3 +273,7 @@ jobs:
             release-dist/*.dmg
             release-dist/*.exe
             release-dist/*.msi
+            release-dist/*.app.tar.gz
+            release-dist/*.sig
+            release-dist/latest.json
+            release-dist/latest-mirror.json

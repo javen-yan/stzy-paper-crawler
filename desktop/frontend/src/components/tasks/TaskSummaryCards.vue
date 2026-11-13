@@ -1,40 +1,47 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Activity, AlertTriangle, CheckCircle2, Clock } from 'lucide-vue-next'
+import { Activity, AlertTriangle, CheckCircle2, Layers } from 'lucide-vue-next'
 import type { Task } from '../../types/tasks'
 
-const props = defineProps<{ tasks: Task[] }>()
+export type TaskQuickFilter = 'all' | 'active' | 'completed' | 'attention' | 'archived'
+
+const props = defineProps<{
+  tasks: Task[]
+  modelValue?: TaskQuickFilter
+}>()
+
+const emit = defineEmits<{
+  'update:modelValue': [value: TaskQuickFilter]
+}>()
 
 const cards = computed(() => [
   {
-    key: 'running',
-    label: '正在运行',
-    caption: '实时并发下载中',
-    value: props.tasks.filter((task) => task.status === 'running').length,
+    key: 'all' as TaskQuickFilter,
+    label: '全部任务',
+    value: props.tasks.length,
+    icon: Layers,
+    tone: 'idle',
+  },
+  {
+    key: 'active' as TaskQuickFilter,
+    label: '进行中 / 排队',
+    value: props.tasks.filter((task) => ['running', 'queued', 'pausing'].includes(task.status)).length,
     icon: Activity,
     tone: 'active',
   },
   {
-    key: 'queued',
-    label: '等待调度',
-    caption: '队列中待启动',
-    value: props.tasks.filter((task) => task.status === 'queued').length,
-    icon: Clock,
-    tone: 'idle',
-  },
-  {
-    key: 'completed',
+    key: 'completed' as TaskQuickFilter,
     label: '已完成',
-    caption: '已转换并归档本地',
     value: props.tasks.filter((task) => task.status === 'completed').length,
     icon: CheckCircle2,
     tone: 'success',
   },
   {
-    key: 'attention',
-    label: '需关注',
-    caption: '异常或部分完成',
-    value: props.tasks.filter((task) => ['failed', 'auth_expired', 'interrupted', 'partial_completed'].includes(task.status)).length,
+    key: 'attention' as TaskQuickFilter,
+    label: '异常 / 已暂停',
+    value: props.tasks.filter((task) =>
+      ['failed', 'auth_expired', 'interrupted', 'partial_completed', 'paused'].includes(task.status),
+    ).length,
     icon: AlertTriangle,
     tone: 'danger',
   },
@@ -43,16 +50,23 @@ const cards = computed(() => [
 
 <template>
   <div class="summary-grid">
-    <article v-for="card in cards" :key="card.key" class="summary-card" :data-tone="card.tone">
+    <button
+      v-for="card in cards"
+      :key="card.key"
+      type="button"
+      class="summary-card"
+      :class="{ 'is-active': modelValue === card.key }"
+      :data-tone="card.tone"
+      @click="emit('update:modelValue', card.key)"
+    >
       <div class="summary-card-top">
         <span class="summary-label">{{ card.label }}</span>
         <span class="summary-icon">
-          <component :is="card.icon" :size="18" />
+          <component :is="card.icon" :size="16" />
         </span>
       </div>
       <strong class="summary-value">{{ card.value }}</strong>
-      <small class="summary-caption">{{ card.caption }}</small>
-    </article>
+    </button>
   </div>
 </template>
 
@@ -62,34 +76,28 @@ const cards = computed(() => [
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 18px 20px;
+  padding: 14px 16px;
   border-radius: var(--app-radius);
   border: 1px solid var(--app-border);
-  background: linear-gradient(165deg, rgba(24, 34, 56, 0.82) 0%, rgba(15, 22, 36, 0.92) 100%);
-  box-shadow: var(--app-card-shadow);
+  background: linear-gradient(165deg, rgba(24, 34, 56, 0.78) 0%, rgba(15, 22, 36, 0.9) 100%);
+  text-align: left;
+  cursor: pointer;
   overflow: hidden;
-  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), border-color 180ms ease, box-shadow 180ms ease;
-}
-
-.summary-card::after {
-  content: "";
-  position: absolute;
-  top: -36px;
-  right: -36px;
-  width: 110px;
-  height: 110px;
-  border-radius: 999px;
-  background: radial-gradient(circle, rgba(129, 140, 248, 0.14), transparent 70%);
-  pointer-events: none;
+  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
 }
 
 .summary-card:hover {
-  transform: translateY(-2px);
+  transform: translateY(-1px);
   border-color: var(--app-border-strong);
-  box-shadow: var(--app-glow-soft);
+}
+
+.summary-card.is-active {
+  border-color: rgba(129, 140, 248, 0.72);
+  box-shadow: 0 0 0 1px rgba(129, 140, 248, 0.28), var(--app-card-shadow);
 }
 
 .summary-card-top {
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -98,14 +106,14 @@ const cards = computed(() => [
 
 .summary-label {
   color: var(--app-muted);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 550;
 }
 
 .summary-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
   display: grid;
   place-items: center;
   border: 1px solid rgba(129, 140, 248, 0.25);
@@ -114,29 +122,16 @@ const cards = computed(() => [
 }
 
 .summary-value {
-  font-size: 30px;
+  font-size: 26px;
   font-weight: 700;
   line-height: 1.08;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
   color: var(--app-text);
 }
 
-.summary-caption {
-  color: var(--app-faint);
-  font-size: 12px;
-}
-
-.summary-card[data-tone="active"] {
-  border-color: rgba(99, 102, 241, 0.28);
-}
-
 .summary-card[data-tone="active"] .summary-value {
   color: #a5b4fc;
-}
-
-.summary-card[data-tone="success"]::after {
-  background: radial-gradient(circle, rgba(16, 185, 129, 0.14), transparent 70%);
 }
 
 .summary-card[data-tone="success"] .summary-icon {
@@ -147,10 +142,6 @@ const cards = computed(() => [
 
 .summary-card[data-tone="success"] .summary-value {
   color: var(--app-accent);
-}
-
-.summary-card[data-tone="danger"]::after {
-  background: radial-gradient(circle, rgba(244, 63, 94, 0.14), transparent 70%);
 }
 
 .summary-card[data-tone="danger"] .summary-icon {
