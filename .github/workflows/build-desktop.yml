@@ -129,8 +129,15 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Verify downloaded installer files
-        run: ls -lh release-assets
+      - name: Collect and verify all platform installers
+        run: |
+          mkdir -p release-dist
+          find release-assets -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.msi' \) -exec cp -v {} release-dist/ \;
+          ls -lh release-dist
+          test -n "$(find release-dist -maxdepth 1 -name '*_aarch64.dmg')"
+          test -n "$(find release-dist -maxdepth 1 -name '*_x64.dmg')"
+          test -n "$(find release-dist -maxdepth 1 -name '*-setup.exe')"
+          test -n "$(find release-dist -maxdepth 1 -name '*.msi')"
 
       - name: Create GitHub Release and upload installers
         uses: softprops/action-gh-release@v2
@@ -140,6 +147,7 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+          fail_on_unmatched_files: true
           body: |
             ## STZY Paper Crawler ${{ github.ref_name }} · 原生桌面客户端 (`Rust + Tauri v2`)
 
@@ -149,7 +157,15 @@ jobs:
             - **macOS（Apple Silicon M1/M2/M3/M4）**：下载 `*_aarch64.dmg`
             - **macOS（Intel 芯片）**：下载 `*_x64.dmg`
             - **Windows 10 / 11（64 位）**：下载 `*_x64-setup.exe`（推荐）或 `*_x64_en-US.msi`
+
+            ### macOS 首次打开提示「“STZY Paper Crawler”已损坏，无法打开」解决方法
+            由于安装包采用开源社区构建（未附加付费 Apple Developer ID 公证），浏览器下载后会携带 macOS 隔离属性（`com.apple.quarantine`）：
+            1. 打开 `.dmg` 后，**先将 `STZY Paper Crawler.app` 拖入 `Applications`（应用程序）文件夹**（不要直接在磁盘映像窗口内双击运行）。
+            2. 打开「终端（Terminal）」，执行以下命令移除隔离标记即可正常打开：
+               ```bash
+               xattr -cr "/Applications/STZY Paper Crawler.app"
+               ```
           files: |
-            release-assets/*.dmg
-            release-assets/*.exe
-            release-assets/*.msi
+            release-dist/*.dmg
+            release-dist/*.exe
+            release-dist/*.msi

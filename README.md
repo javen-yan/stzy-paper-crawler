@@ -10,6 +10,24 @@
 
 ---
 
+## 直接下载安装（GitHub Releases）
+
+前往 [**Releases 页面**](https://github.com/javen-yan/stzy-paper-crawler/releases) 下载对应系统的安装包：
+
+- **macOS（Apple Silicon M1/M2/M3/M4）**：`STZY.Paper.Crawler_<版本>_aarch64.dmg`
+- **macOS（Intel 芯片）**：`STZY.Paper.Crawler_<版本>_x64.dmg`
+- **Windows 10 / 11（64 位）**：`STZY.Paper.Crawler_<版本>_x64-setup.exe`（推荐）或 `*_x64_en-US.msi`
+
+> **macOS 首次打开提示「“STZY Paper Crawler”已损坏，无法打开」说明**：
+> 由于安装包由 GitHub Actions 自动构建（未附加付费 Apple Developer ID 公证），通过浏览器下载后会被 macOS 自动标记 `com.apple.quarantine` 隔离属性。
+> 1. 双击打开 `.dmg`，**先将 `STZY Paper Crawler.app` 拖入 `Applications`（应用程序）文件夹**（不要直接在磁盘映像内双击打开）。
+> 2. 在「终端（Terminal）」执行以下命令清除隔离属性后即可正常启动：
+>    ```bash
+>    xattr -cr "/Applications/STZY Paper Crawler.app"
+>    ```
+
+---
+
 ## 核心特性
 
 1. **零服务端纯本地架构**
