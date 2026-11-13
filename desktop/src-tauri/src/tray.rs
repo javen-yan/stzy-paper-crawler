@@ -44,33 +44,17 @@ pub fn hide_window_to_tray(window: &Window) {
 
 fn load_tray_icon(app: &AppHandle) -> Option<Image<'static>> {
     #[cfg(target_os = "macos")]
-    {
-        let _ = app;
-        let bytes = include_bytes!("../icons/tray-macos.png");
-        if let Ok(decoded) = image::load_from_memory(bytes) {
-            let rgba = decoded.to_rgba8();
-            let (width, height) = rgba.dimensions();
-            return Some(Image::new_owned(rgba.into_raw(), width, height));
-        }
-    }
-
+    let bytes: &[u8] = include_bytes!("../icons/tray-macos.png");
     #[cfg(not(target_os = "macos"))]
-    {
-        let bytes = include_bytes!("../icons/32x32.png");
-        if let Ok(decoded) = image::load_from_memory(bytes) {
-            let rgba = decoded.to_rgba8();
-            let (width, height) = rgba.dimensions();
-            return Some(Image::new_owned(rgba.into_raw(), width, height));
-        }
-        if let Some(default_icon) = app.default_window_icon() {
-            return Some(default_icon.clone().to_owned());
-        }
+    let bytes: &[u8] = include_bytes!("../icons/32x32.png");
+
+    if let Ok(decoded) = image::load_from_memory(bytes) {
+        let rgba = decoded.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        return Some(Image::new_owned(rgba.into_raw(), width, height));
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        app.default_window_icon().map(|ic| ic.clone().to_owned())
-    }
+    app.default_window_icon().map(|ic| ic.clone().to_owned())
 }
 
 pub fn refresh_tray_state(app: &AppHandle) {

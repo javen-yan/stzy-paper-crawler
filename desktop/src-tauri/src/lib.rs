@@ -151,8 +151,11 @@ pub fn run() {
             commands::install_app_update,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building STZY Desktop application")
+        .expect("error while building PaperDesk application")
         .run(|app_handle, event| {
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app_handle, &event);
+
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 if let Some(win) = app_handle.get_webview_window("main") {
