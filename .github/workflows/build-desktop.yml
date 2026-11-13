@@ -69,10 +69,15 @@ jobs:
         shell: bash
         run: bash desktop/scripts/fetch_pdfium.sh ${{ matrix.pdfium_target }}
 
-      - name: Install Tauri CLI & frontend dependencies
+      - name: Install Tauri CLI
+        working-directory: desktop
         run: |
-          npm --prefix desktop install --no-package-lock
-          npm --prefix desktop/frontend ci
+          npm install --include=dev --no-package-lock
+          npx tauri --version
+
+      - name: Install frontend dependencies
+        working-directory: desktop/frontend
+        run: npm ci
 
       - name: Verify frontend TypeScript & Vite build
         working-directory: desktop/frontend
