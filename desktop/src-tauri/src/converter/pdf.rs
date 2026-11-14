@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use image::{ImageBuffer, Rgb};
 use lopdf::{dictionary, Document as LoPdfDocument, Object, ObjectId, Stream, StringFormat};
@@ -15,11 +15,11 @@ use crate::models::{ensure_directory, AppSettings, ResourceArtifacts};
 static PDFIUM_RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 struct SafePdfiumHolder(Pdfium);
-// SAFETY: Every access to `SafePdfiumHolder` goes through `PDFIUM_INSTANCE`'s `parking_lot::Mutex`,
+// SAFETY: Every access to `SafePdfiumHolder` goes through `SAFE_PDFIUM`'s `parking_lot::Mutex`,
 // guaranteeing serialized single-threaded access to the underlying PDFium library bindings.
 unsafe impl Send for SafePdfiumHolder {}
 
-static SAFE_PDFIUM: OnceLock<Result<Mutex<SafePdfiumHolder>, String>> = OnceLock::new();
+static SAFE_PDFIUM: Mutex<Option<Arc<Mutex<SafePdfiumHolder>>>> = Mutex::new(None);
 
 /// Optionally registers the Tauri app's resolved resource directory at startup so bundled
 /// `libpdfium.dylib` / `pdfium.dll` / `libpdfium.so` is found first in packaged builds.
@@ -73,12 +73,59 @@ fn platform_pdfium_filename() -> &'static str {
     }
 }
 
-fn bind_pdfium_once() -> Result<Mutex<SafePdfiumHolder>, String> {
+#[cfg(target_os = "macos")]
+fn try_self_heal_macos_pdfium(source_dylib: &Path) -> Option<Box<dyn PdfiumLibraryBindings>> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let cache_root = dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("com.stzy.desktop")
+        .join("runtime-libs");
+    let _ = fs::create_dir_all(&cache_root);
+
+    let healed_path = cache_root.join("libpdfium.dylib");
+    let src_len = fs::metadata(source_dylib).map(|m| m.len()).unwrap_or(0);
+    let need_refresh = match fs::metadata(&healed_path) {
+        Ok(meta) => meta.len() != src_len || src_len == 0,
+        Err(_) => true,
+    };
+
+    if !need_refresh {
+        if let Ok(bindings) = Pdfium::bind_to_library(&healed_path) {
+            return Some(bindings);
+        }
+    }
+
+    let tmp_path = cache_root.join(format!("libpdfium.dylib.tmp.{}", std::process::id()));
+    fs::copy(source_dylib, &tmp_path).ok()?;
+    if let Ok(meta) = fs::metadata(&tmp_path) {
+        let mut perms = meta.permissions();
+        perms.set_mode(0o755);
+        let _ = fs::set_permissions(&tmp_path, perms);
+    }
+
+    let _ = Command::new("/usr/bin/xattr").arg("-cr").arg(&tmp_path).output();
+    let status = Command::new("/usr/bin/codesign")
+        .args(["--force", "--sign", "-"])
+        .arg(&tmp_path)
+        .status()
+        .ok()?;
+    if !status.success() {
+        let _ = fs::remove_file(&tmp_path);
+        return None;
+    }
+
+    let _ = fs::rename(&tmp_path, &healed_path);
+    Pdfium::bind_to_library(&healed_path).ok()
+}
+
+fn bind_pdfium_once() -> Result<Arc<Mutex<SafePdfiumHolder>>, String> {
     if let Ok(explicit) = std::env::var("STZY_PDFIUM_PATH") {
         let p = PathBuf::from(explicit.trim());
         if p.is_file() {
             if let Ok(bindings) = Pdfium::bind_to_library(&p) {
-                return Ok(Mutex::new(SafePdfiumHolder(Pdfium::new(bindings))));
+                return Ok(Arc::new(Mutex::new(SafePdfiumHolder(Pdfium::new(bindings)))));
             }
         }
     }
@@ -87,19 +134,42 @@ fn bind_pdfium_once() -> Result<Mutex<SafePdfiumHolder>, String> {
         let lib_path = dir.join(platform_pdfium_filename());
         if lib_path.exists() {
             match Pdfium::bind_to_library(&lib_path) {
-                Ok(bindings) => return Ok(Mutex::new(SafePdfiumHolder(Pdfium::new(bindings)))),
+                Ok(bindings) => {
+                    return Ok(Arc::new(Mutex::new(SafePdfiumHolder(Pdfium::new(bindings)))))
+                }
                 Err(err) => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(healed_bindings) = try_self_heal_macos_pdfium(&lib_path) {
+                        tracing::info!(
+                            "已自动修复 macOS Pdfium 动态库签名并成功加载: {}",
+                            lib_path.display()
+                        );
+                        return Ok(Arc::new(Mutex::new(SafePdfiumHolder(Pdfium::new(
+                            healed_bindings,
+                        )))));
+                    }
                     candidate_errors.push(format!("{}: {err}", lib_path.display()));
                 }
             }
         }
     }
     match Pdfium::bind_to_system_library() {
-        Ok(bindings) => Ok(Mutex::new(SafePdfiumHolder(Pdfium::new(bindings)))),
-        Err(err) => Err(format!(
-            "未能加载 Pdfium 动态库（候选错误：{}；系统库：{err}）",
-            candidate_errors.join(" | ")
-        )),
+        Ok(bindings) => Ok(Arc::new(Mutex::new(SafePdfiumHolder(Pdfium::new(bindings))))),
+        Err(err) => {
+            tracing::error!(
+                "Pdfium 动态库加载失败: candidates=[{}], system={err}",
+                candidate_errors.join(" | ")
+            );
+            let hint = if candidate_errors
+                .iter()
+                .any(|e| e.contains("no cdhash") || e.contains("code signature"))
+            {
+                "PDF 渲染组件签名校验未通过，请在软件内点击「检查更新」升级至最新版或重新安装"
+            } else {
+                "PDF 渲染组件加载失败，请确认安装包完整后重试"
+            };
+            Err(hint.to_string())
+        }
     }
 }
 
@@ -107,14 +177,18 @@ fn with_pdfium<T, F>(f: F) -> AppResult<T>
 where
     F: FnOnce(&Pdfium) -> AppResult<T>,
 {
-    let res = SAFE_PDFIUM.get_or_init(bind_pdfium_once);
-    match res {
-        Ok(mutex) => {
-            let guard = mutex.lock();
-            f(&guard.0)
+    let holder = {
+        let mut slot = SAFE_PDFIUM.lock();
+        if let Some(existing) = slot.as_ref() {
+            existing.clone()
+        } else {
+            let initialized = bind_pdfium_once().map_err(AppError::Message)?;
+            *slot = Some(initialized.clone());
+            initialized
         }
-        Err(msg) => Err(AppError::Message(msg.clone())),
-    }
+    };
+    let guard = holder.lock();
+    f(&guard.0)
 }
 
 pub fn pdf_file_looks_valid(path: &Path) -> bool {

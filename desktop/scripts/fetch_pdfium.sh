@@ -52,6 +52,14 @@ rm -f "${RES_DIR}/libpdfium.dylib" "${RES_DIR}/pdfium.dll" "${RES_DIR}/libpdfium
 if [ -f "${TMP_DIR}/lib/libpdfium.dylib" ]; then
   cp -f "${TMP_DIR}/lib/libpdfium.dylib" "${RES_DIR}/libpdfium.dylib"
   chmod 755 "${RES_DIR}/libpdfium.dylib"
+  if command -v xattr >/dev/null 2>&1; then
+    xattr -cr "${RES_DIR}/libpdfium.dylib" || true
+  fi
+  if command -v codesign >/dev/null 2>&1; then
+    echo "==> Ad-hoc signing ${RES_DIR}/libpdfium.dylib (required on macOS hardened dyld)"
+    codesign --force --sign - "${RES_DIR}/libpdfium.dylib"
+    codesign --verify --verbose=2 "${RES_DIR}/libpdfium.dylib"
+  fi
   echo "==> Installed ${RES_DIR}/libpdfium.dylib"
 elif [ -f "${TMP_DIR}/bin/pdfium.dll" ]; then
   cp -f "${TMP_DIR}/bin/pdfium.dll" "${RES_DIR}/pdfium.dll"

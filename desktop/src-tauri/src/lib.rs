@@ -20,6 +20,7 @@ use tauri::{Emitter, Manager};
 
 use crate::artifacts::ArtifactService;
 use crate::commands::AppState;
+use crate::converter::fonts::register_bundled_fonts_dir;
 use crate::converter::pdf::register_pdfium_resource_dir;
 use crate::models::{ensure_directory, AppSettings};
 use crate::store::SqliteStore;
@@ -70,7 +71,7 @@ pub fn run() {
             let handle = app.handle().clone();
             if let Ok(res_dir) = app.path().resource_dir() {
                 register_pdfium_resource_dir(res_dir.clone());
-                register_pdfium_resource_dir(res_dir.join("resources"));
+                register_bundled_fonts_dir(res_dir);
             }
 
             let (data_dir, default_output_dir) = resolve_default_dirs(&handle);

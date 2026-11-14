@@ -270,6 +270,27 @@ pre,
   font-variant-numeric: tabular-nums;
 }
 
+/* 暗色主题下 Element Plus Tooltip / 表格溢出提示（消除刺眼大白块并限制宽度） */
+html.dark .el-popper.is-dark,
+html.dark .el-popper.is-light {
+  max-width: min(440px, 78vw) !important;
+  padding: 9px 13px !important;
+  border-radius: 10px !important;
+  background: rgba(15, 23, 42, 0.96) !important;
+  border: 1px solid rgba(148, 163, 184, 0.28) !important;
+  color: #f1f5f9 !important;
+  font-size: 12.5px !important;
+  line-height: 1.55 !important;
+  word-break: break-word !important;
+  box-shadow: 0 14px 36px rgba(2, 6, 23, 0.65) !important;
+}
+
+html.dark .el-popper.is-dark .el-popper__arrow::before,
+html.dark .el-popper.is-light .el-popper__arrow::before {
+  background: rgba(15, 23, 42, 0.96) !important;
+  border-color: rgba(148, 163, 184, 0.28) !important;
+}
+
 /* 精致暗色滚动条 */
 ::-webkit-scrollbar {
   width: 8px;

@@ -400,6 +400,40 @@ fn run_command_with_timeout(mut cmd: Command, timeout: Duration) -> AppResult<st
     }
 }
 
+fn stage_profile_fonts(profile_dir: &Path, font_dirs: &[PathBuf]) {
+    let user_fonts = profile_dir.join("user").join("fonts");
+    if fs::create_dir_all(&user_fonts).is_err() {
+        return;
+    }
+    for dir in font_dirs {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let src = entry.path();
+            let Some(ext) = src.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            if !matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "ttf" | "otf" | "ttc" | "otc"
+            ) {
+                continue;
+            }
+            let Some(name) = src.file_name() else {
+                continue;
+            };
+            let dst = user_fonts.join(name);
+            if dst.exists() {
+                continue;
+            }
+            if fs::hard_link(&src, &dst).is_err() {
+                let _ = fs::copy(&src, &dst);
+            }
+        }
+    }
+}
+
 fn libreoffice_convert(
     soffice: &Path,
     work_dir: &Path,
@@ -411,6 +445,7 @@ fn libreoffice_convert(
     timeout: Duration,
 ) -> AppResult<()> {
     let dirs = font_directories(settings)?;
+    stage_profile_fonts(profile_dir, &dirs);
     let font_conf = write_fontconfig_xml(work_dir, &dirs, aliases)?;
     let profile_uri = Url::from_directory_path(profile_dir)
         .or_else(|_| Url::from_file_path(profile_dir))

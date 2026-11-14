@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
 use chrono::Local;
@@ -15,6 +15,52 @@ use crate::error::{AppError, AppResult};
 use crate::models::{ensure_directory, expand_tilde, AppSettings};
 
 static SAMPLE_FILE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static BUNDLED_FONT_RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
+static FAILED_ONLINE_FONT_FAMILIES: LazyLock<Mutex<BTreeSet<String>>> =
+    LazyLock::new(|| Mutex::new(BTreeSet::new()));
+
+/// Registers Tauri's resolved resource directory at startup so bundled offline open-source
+/// replacement fonts (`resources/fonts/*.ttf`) are discovered immediately with zero network I/O.
+pub fn register_bundled_fonts_dir(dir: PathBuf) {
+    let _ = BUNDLED_FONT_RESOURCE_DIR.set(dir);
+}
+
+pub fn candidate_bundled_font_dirs() -> Vec<PathBuf> {
+    let mut raw_candidates = Vec::new();
+    if let Some(reg) = BUNDLED_FONT_RESOURCE_DIR.get() {
+        raw_candidates.push(reg.join("fonts"));
+        raw_candidates.push(reg.join("resources").join("fonts"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            raw_candidates.push(exe_dir.join("fonts"));
+            raw_candidates.push(exe_dir.join("resources").join("fonts"));
+            if let Some(macos_contents) = exe_dir.parent() {
+                raw_candidates.push(macos_contents.join("Resources").join("fonts"));
+                raw_candidates.push(
+                    macos_contents
+                        .join("Resources")
+                        .join("resources")
+                        .join("fonts"),
+                );
+            }
+        }
+    }
+    raw_candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("resources").join("fonts"));
+
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for dir in raw_candidates {
+        if !dir.is_dir() {
+            continue;
+        }
+        let key = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if seen.insert(key) {
+            out.push(dir);
+        }
+    }
+    out
+}
 
 pub const FONT_ALIAS_GROUPS: &[&[&str]] = &[
     &["simsun", "宋体", "nsimsun", "新宋体", "simsun-extb"],
@@ -152,8 +198,8 @@ pub fn open_fonts_catalog() -> BTreeMap<&'static str, Vec<OpenFontAsset>> {
             "STIX Two Math",
             vec![OpenFontAsset {
                 filename: "STIXTwoMath-Regular.ttf",
-                rel_url: "stixtwotext/STIXTwoMath-Regular.ttf",
-                sha256: "",
+                rel_url: "stixtwomath/STIXTwoMath-Regular.ttf",
+                sha256: "562551b15b836e6e01d1b7350909baf3c8c8d83260c1190fbf4544333e6936de",
             }],
         ),
     ])
@@ -500,8 +546,13 @@ pub fn font_directories(settings: &AppSettings) -> AppResult<Vec<PathBuf>> {
             dirs.push(p);
         }
     }
+    for bundled in candidate_bundled_font_dirs() {
+        if !dirs.contains(&bundled) {
+            dirs.push(bundled);
+        }
+    }
     let managed = managed_font_dir(settings);
-    if ensure_directory(&managed).is_ok() {
+    if ensure_directory(&managed).is_ok() && !dirs.contains(&managed) {
         dirs.push(managed);
     }
     Ok(dirs)
@@ -789,61 +840,94 @@ pub fn install_open_font_family(family: &str, install_dir: &Path) -> AppResult<V
     };
     ensure_directory(install_dir)?;
 
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| AppError::Message(format!("创建字体下载客户端失败：{e}")))?;
+    if FAILED_ONLINE_FONT_FAMILIES.lock().contains(family) {
+        return Err(AppError::Message(format!(
+            "{family} 在线补齐已跳过（当前网络较慢），自动使用内置或系统相近字体"
+        )));
+    }
 
+    let bundled_dirs = candidate_bundled_font_dirs();
     let mirrors = [
+        "https://ghfast.top/https://raw.githubusercontent.com/google/fonts/main/ofl",
         "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl",
         "https://raw.githubusercontent.com/google/fonts/main/ofl",
-        "https://github.com/google/fonts/raw/main/ofl",
     ];
 
+    let mut client: Option<reqwest::blocking::Client> = None;
     let mut written = Vec::new();
     for asset in assets {
         let target = install_dir.join(asset.filename);
         if !font_file_valid(&target, asset.sha256) {
-            let tmp = target.with_extension("ttf.part");
-            let mut last_err = "网络不可达".to_string();
-            let mut ok = false;
-
-            for base in mirrors {
-                let url = format!("{base}/{}", asset.rel_url);
-                match client.get(&url).send().and_then(|r| r.error_for_status()) {
-                    Ok(resp) => match resp.bytes() {
-                        Ok(bytes) => {
-                            let valid = if !asset.sha256.is_empty() {
-                                let mut hasher = Sha256::new();
-                                hasher.update(&bytes);
-                                format!("{:x}", hasher.finalize()) == asset.sha256
-                                    || looks_like_valid_font_bytes(&bytes)
-                            } else {
-                                looks_like_valid_font_bytes(&bytes)
-                            };
-                            if valid {
-                                if fs::write(&tmp, &bytes).is_ok()
-                                    && fs::rename(&tmp, &target).is_ok()
-                                {
-                                    ok = true;
-                                    break;
-                                }
-                            } else {
-                                last_err = "返回数据不是有效字体文件".to_string();
-                            }
-                        }
-                        Err(e) => last_err = e.to_string(),
-                    },
-                    Err(e) => last_err = e.to_string(),
+            // 1. Prefer offline bundled font resource first (0ms, zero network traffic)
+            let mut copied_from_bundle = false;
+            for bdir in &bundled_dirs {
+                let candidate = bdir.join(asset.filename);
+                if font_file_valid(&candidate, asset.sha256) && fs::copy(&candidate, &target).is_ok()
+                {
+                    copied_from_bundle = true;
+                    break;
                 }
             }
-            let _ = fs::remove_file(&tmp);
-            if !ok {
-                return Err(AppError::Message(format!(
-                    "{} 自动下载失败（{}），将回退使用系统相近字体",
-                    asset.filename, last_err
-                )));
+
+            if !copied_from_bundle {
+                let http = match &client {
+                    Some(c) => c,
+                    None => {
+                        let built = reqwest::blocking::Client::builder()
+                            .connect_timeout(Duration::from_secs(4))
+                            .timeout(Duration::from_secs(8))
+                            .build()
+                            .map_err(|e| {
+                                AppError::Message(format!("创建字体下载客户端失败：{e}"))
+                            })?;
+                        client = Some(built);
+                        client.as_ref().expect("client just initialized")
+                    }
+                };
+
+                let tmp = target.with_extension("ttf.part");
+                let mut last_err = "网络不可达".to_string();
+                let mut ok = false;
+
+                for base in mirrors {
+                    let url = format!("{base}/{}", asset.rel_url);
+                    match http.get(&url).send().and_then(|r| r.error_for_status()) {
+                        Ok(resp) => match resp.bytes() {
+                            Ok(bytes) => {
+                                let valid = if !asset.sha256.is_empty() {
+                                    let mut hasher = Sha256::new();
+                                    hasher.update(&bytes);
+                                    format!("{:x}", hasher.finalize()) == asset.sha256
+                                        || looks_like_valid_font_bytes(&bytes)
+                                } else {
+                                    looks_like_valid_font_bytes(&bytes)
+                                };
+                                if valid {
+                                    if fs::write(&tmp, &bytes).is_ok()
+                                        && fs::rename(&tmp, &target).is_ok()
+                                    {
+                                        ok = true;
+                                        break;
+                                    }
+                                } else {
+                                    last_err = "返回数据不是有效字体文件".to_string();
+                                }
+                            }
+                            Err(e) => last_err = e.to_string(),
+                        },
+                        Err(e) => last_err = e.to_string(),
+                    }
+                }
+                let _ = fs::remove_file(&tmp);
+                if !ok {
+                    FAILED_ONLINE_FONT_FAMILIES
+                        .lock()
+                        .insert(family.to_string());
+                    return Err(AppError::Message(format!(
+                        "{} 在线下载超时或不可达（{}），已回退使用系统相近字体",
+                        asset.filename, last_err
+                    )));
+                }
             }
         }
         written.push(asset.filename.to_string());
@@ -1121,6 +1205,7 @@ pub fn repair_fonts(
     families: Option<&BTreeSet<String>>,
     office_label: &str,
 ) -> AppResult<Value> {
+    FAILED_ONLINE_FONT_FAMILIES.lock().clear();
     let directories = font_directories(settings)?;
     let available = available_font_keys(settings);
     let catalog = open_fonts_catalog();
@@ -1197,5 +1282,32 @@ mod tests {
         let declared = BTreeSet::from(["方正小标宋简体".to_string()]);
         let plan = resolve_fonts(&declared, &available, false, "strict");
         assert_eq!(plan.missing, vec!["方正小标宋简体".to_string()]);
+    }
+
+    #[test]
+    fn bundled_open_fonts_satisfy_all_catalog_families_offline() {
+        let bundled = candidate_bundled_font_dirs();
+        if bundled.is_empty() {
+            return;
+        }
+        let mut settings = AppSettings::default();
+        settings.data_dir = std::env::temp_dir().join("paperdesk-font-test");
+        let available = available_font_keys(&settings);
+        for family in open_fonts_catalog().keys() {
+            assert!(
+                available.contains(&font_key(family)),
+                "expected bundled font family {family} to be available offline"
+            );
+        }
+        let declared = BTreeSet::from([
+            "Calibri".to_string(),
+            "Cambria".to_string(),
+            "Cambria Math".to_string(),
+        ]);
+        let targets = download_targets_for_declared(&declared, &available);
+        assert!(
+            targets.is_empty(),
+            "expected zero online download targets when bundled fonts exist, got {targets:?}"
+        );
     }
 }

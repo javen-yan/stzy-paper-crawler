@@ -38,3 +38,4 @@ desktop/src-tauri/gen/
 desktop/src-tauri/resources/*.dylib
 desktop/src-tauri/resources/*.dll
 desktop/src-tauri/resources/*.so
+desktop/src-tauri/resources/fonts/

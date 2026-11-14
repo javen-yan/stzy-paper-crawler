@@ -67,6 +67,10 @@ jobs:
         shell: bash
         run: bash desktop/scripts/fetch_pdfium.sh ${{ matrix.pdfium_target }}
 
+      - name: Fetch bundled open-source replacement fonts
+        shell: bash
+        run: bash desktop/scripts/fetch_open_fonts.sh
+
       - name: Install Tauri CLI
         working-directory: desktop
         run: |
@@ -101,11 +105,22 @@ jobs:
           fi
           npx tauri build ${{ matrix.args }} "${EXTRA_ARGS[@]}"
 
-      - name: Rename macOS updater bundle with architecture suffix
+      - name: Verify macOS Pdfium signature & rename updater bundle
         if: runner.os == 'macOS'
         shell: bash
         run: |
           MAC_DIR="desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos"
+          BUNDLED_PDFIUM="${MAC_DIR}/PaperDesk.app/Contents/Resources/resources/libpdfium.dylib"
+          if [ ! -f "${BUNDLED_PDFIUM}" ]; then
+            echo "Error: missing bundled Pdfium at ${BUNDLED_PDFIUM}" >&2
+            exit 1
+          fi
+          codesign --verify --verbose=2 "${BUNDLED_PDFIUM}"
+          BUNDLED_FONT="${MAC_DIR}/PaperDesk.app/Contents/Resources/resources/fonts/Carlito-Regular.ttf"
+          if [ ! -f "${BUNDLED_FONT}" ]; then
+            echo "Error: missing bundled fonts at ${BUNDLED_FONT}" >&2
+            exit 1
+          fi
           if [ -f "${MAC_DIR}/PaperDesk.app.tar.gz" ]; then
             cp -v "${MAC_DIR}/PaperDesk.app.tar.gz" "${MAC_DIR}/PaperDesk_${{ matrix.arch_suffix }}.app.tar.gz"
           fi

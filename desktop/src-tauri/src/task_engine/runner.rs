@@ -644,7 +644,7 @@ impl CrawlRunner {
                 }
                 Err(exc) => {
                     record.status = ResourceStatus::Failed;
-                    record.error = exc.to_string();
+                    record.error = humanize_resource_error(&exc.to_string());
                     self.stats.lock().failed += 1;
                     (self.on_log)(format!("资源失败：{} - {exc}", record.resource_id));
                 }
@@ -743,4 +743,33 @@ enum ComboOutcome {
     Completed,
     Stopped,
     Failed,
+}
+
+fn humanize_resource_error(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "处理失败，请重试".to_string();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("407") || lower.contains("proxy authentication") {
+        return "代理节点鉴权失败（407），请检查代理提取链接或账号密码配置".to_string();
+    }
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return "网络或短效代理连接超时，点击「继续任务」可自动换节点重试".to_string();
+    }
+    if lower.contains("error sending request for url")
+        || lower.contains("connection closed")
+        || lower.contains("connection reset")
+        || lower.contains("connect error")
+        || lower.contains("broken pipe")
+        || lower.contains("eof")
+        || lower.contains("dns error")
+        || lower.contains("hyper::error")
+    {
+        return "网络或短效代理节点连接中断，点击「继续任务」可自动换节点重试".to_string();
+    }
+    if lower.contains("no cdhash") || lower.contains("loadlibraryerror") {
+        return "PDF 渲染组件签名校验未通过，请在软件内点击「检查更新」升级至最新版".to_string();
+    }
+    trimmed.to_string()
 }
