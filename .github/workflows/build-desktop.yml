@@ -116,6 +116,11 @@ jobs:
             exit 1
           fi
           codesign --verify --verbose=2 "${BUNDLED_PDFIUM}"
+          codesign -dv --entitlements - "${MAC_DIR}/PaperDesk.app" 2>&1 | tee /tmp/paperdesk_codesign.txt
+          if grep -q "flags=.*runtime" /tmp/paperdesk_codesign.txt && ! grep -q "disable-library-validation" /tmp/paperdesk_codesign.txt; then
+            echo "Error: Hardened Runtime enabled without com.apple.security.cs.disable-library-validation!" >&2
+            exit 1
+          fi
           BUNDLED_FONT="${MAC_DIR}/PaperDesk.app/Contents/Resources/resources/fonts/Carlito-Regular.ttf"
           if [ ! -f "${BUNDLED_FONT}" ]; then
             echo "Error: missing bundled fonts at ${BUNDLED_FONT}" >&2
