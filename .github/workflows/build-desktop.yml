@@ -287,12 +287,27 @@ jobs:
       - name: Upload release assets sequentially with retry
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          for file in release-dist/*.dmg release-dist/*.exe release-dist/*.msi release-dist/*.app.tar.gz release-dist/*.sig release-dist/latest.json release-dist/latest-mirror.json; do
+          shopt -s nullglob
+          files=(
+            release-dist/*.dmg
+            release-dist/*.exe
+            release-dist/*.msi
+            release-dist/*.app.tar.gz
+            release-dist/*.sig
+            release-dist/latest.json
+            release-dist/latest-mirror.json
+          )
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No release files found in release-dist/" >&2
+            exit 1
+          fi
+          for file in "${files[@]}"; do
             echo "==> Uploading ${file}"
             for attempt in 1 2 3 4; do
-              if gh release upload "${TAG_NAME}" "${file}" --clobber; then
+              if gh release upload "${TAG_NAME}" "${file}" --repo "${GH_REPO}" --clobber; then
                 echo "Uploaded ${file}"
                 break
               fi
