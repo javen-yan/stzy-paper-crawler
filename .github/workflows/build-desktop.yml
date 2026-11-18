@@ -258,7 +258,7 @@ jobs:
           PY
           ls -lh release-dist
 
-      - name: Create GitHub Release and upload installers & updater manifests
+      - name: Create or update GitHub Release metadata
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -266,7 +266,6 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          fail_on_unmatched_files: true
           body: |
             ## PaperDesk ${{ github.ref_name }} · 试卷下载器桌面客户端 (`Rust + Tauri v2`)
 
@@ -284,11 +283,23 @@ jobs:
                ```bash
                xattr -cr "/Applications/PaperDesk.app"
                ```
-          files: |
-            release-dist/*.dmg
-            release-dist/*.exe
-            release-dist/*.msi
-            release-dist/*.app.tar.gz
-            release-dist/*.sig
-            release-dist/latest.json
-            release-dist/latest-mirror.json
+
+      - name: Upload release assets sequentially with retry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          for file in release-dist/*.dmg release-dist/*.exe release-dist/*.msi release-dist/*.app.tar.gz release-dist/*.sig release-dist/latest.json release-dist/latest-mirror.json; do
+            echo "==> Uploading ${file}"
+            for attempt in 1 2 3 4; do
+              if gh release upload "${TAG_NAME}" "${file}" --clobber; then
+                echo "Uploaded ${file}"
+                break
+              fi
+              if [ "${attempt}" -eq 4 ]; then
+                echo "Failed to upload ${file} after 4 attempts" >&2
+                exit 1
+              fi
+              sleep $((attempt * 3))
+            done
+          done
