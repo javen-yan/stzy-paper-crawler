@@ -26,6 +26,7 @@ pub struct StzyHttpClient {
     pub proxy_pool: Arc<ProxyPool>,
     pub cancel: CancellationToken,
     clients: Arc<Mutex<HashMap<String, reqwest::Client>>>,
+    download_clients: Arc<Mutex<HashMap<String, reqwest::Client>>>,
     on_proxy: Arc<dyn Fn(String) + Send + Sync>,
 }
 
@@ -44,8 +45,39 @@ impl StzyHttpClient {
             proxy_pool: pool,
             cancel: cancel.unwrap_or_default(),
             clients: Arc::new(Mutex::new(HashMap::new())),
+            download_clients: Arc::new(Mutex::new(HashMap::new())),
             on_proxy: on_proxy.unwrap_or_else(|| Arc::new(|_| {})),
         }
+    }
+
+    fn download_client_for_proxy(&self, proxy_url: &str) -> AppResult<reqwest::Client> {
+        {
+            let map = self.download_clients.lock();
+            if let Some(existing) = map.get(proxy_url) {
+                return Ok(existing.clone());
+            }
+        }
+        let connect_dur = Duration::from_secs_f64(self.settings.connect_timeout.max(5.0));
+        // Binary file downloads (.zip / .pdf / .docx) must NOT carry a fixed 35s total wall-clock cap,
+        // otherwise large ZIP bundles hit reqwest's body deadline and fail with `error decoding response body`.
+        // Per-chunk idle timeouts are enforced in `download()` instead.
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(connect_dur)
+            .tcp_keepalive(Duration::from_secs(30))
+            .no_gzip()
+            .pool_max_idle_per_host(8);
+        if proxy_url.is_empty() {
+            builder = builder.no_proxy();
+        } else {
+            let proxy = reqwest::Proxy::all(proxy_url)
+                .map_err(|e| AppError::Validation(format!("代理地址格式不合法 ({proxy_url}): {e}")))?;
+            builder = builder.proxy(proxy);
+        }
+        let client = builder.build()?;
+        self.download_clients
+            .lock()
+            .insert(proxy_url.to_string(), client.clone());
+        Ok(client)
     }
 
     fn client_for_proxy(&self, proxy_url: &str) -> AppResult<reqwest::Client> {
@@ -568,6 +600,76 @@ impl StzyHttpClient {
             .await
     }
 
+    async fn send_download_once(
+        &self,
+        url: &str,
+        extra_headers: &BTreeMap<String, String>,
+        resource_name: &str,
+    ) -> AppResult<(reqwest::Response, String)> {
+        if self.cancel.is_cancelled() {
+            return Err(AppError::RequestStopped);
+        }
+        let proxy = tokio::select! {
+            _ = self.cancel.cancelled() => return Err(AppError::RequestStopped),
+            res = self.proxy_pool.acquire_proxy(resource_name) => res?,
+        };
+        let client = match self.download_client_for_proxy(&proxy) {
+            Ok(c) => c,
+            Err(e) => {
+                self.proxy_pool.record_failure(&proxy);
+                return Err(e);
+            }
+        };
+
+        let mut merged_headers = BTreeMap::from([
+            ("accept".to_string(), "*/*".to_string()),
+            ("accept-encoding".to_string(), "identity".to_string()),
+            ("origin".to_string(), self.settings.site_base_url.clone()),
+            (
+                "referer".to_string(),
+                format!("{}/layout/paper-lib", self.settings.site_base_url),
+            ),
+            ("user-agent".to_string(), self.settings.user_agent.clone()),
+        ]);
+        for (k, v) in extra_headers {
+            merged_headers.insert(k.to_lowercase(), v.clone());
+        }
+        let header_map = to_header_map(&merged_headers);
+        let header_timeout = Duration::from_secs_f64(
+            (self.settings.connect_timeout + self.settings.read_timeout).max(20.0),
+        );
+
+        let send_res = tokio::select! {
+            _ = self.cancel.cancelled() => {
+                if !proxy.is_empty() {
+                    self.proxy_pool.record_success(&proxy);
+                }
+                return Err(AppError::RequestStopped);
+            }
+            r = tokio::time::timeout(header_timeout, client.get(url).headers(header_map).send()) => r,
+        };
+
+        let resp = match send_res {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                self.proxy_pool.record_failure(&proxy);
+                return Err(AppError::Http(e));
+            }
+            Err(_) => {
+                self.proxy_pool.record_failure(&proxy);
+                return Err(AppError::InvalidDownloadContent(
+                    "连接下载源响应超时".to_string(),
+                ));
+            }
+        };
+
+        let status = resp.status().as_u16();
+        if matches!(status, 403 | 407 | 429 | 500 | 502 | 503 | 504) {
+            self.proxy_pool.record_failure(&proxy);
+        }
+        Ok((resp, proxy))
+    }
+
     pub async fn download(
         &self,
         url: &str,
@@ -577,37 +679,52 @@ impl StzyHttpClient {
     ) -> AppResult<u64> {
         let resolved_headers = match headers {
             Some(h) => h.clone(),
-            None => self.default_auth_headers().await?,
+            None => BTreeMap::new(),
         };
         let attempts = if self.proxy_pool.proxy_mode() == "off" {
-            1
+            self.settings.max_retries.max(3)
         } else {
-            self.settings.proxy_max_failures.max(1) + 1
+            (self.settings.proxy_max_failures + 1)
+                .max(self.settings.max_retries)
+                .max(4)
         };
         if let Some(parent) = target.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         let partial = target.with_file_name(format!(
-            "{}.download",
+            "{}.part",
             target
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("temp")
         ));
+        let chunk_idle_timeout = Duration::from_secs_f64(self.settings.read_timeout.max(45.0));
 
         let mut last_err: Option<AppError> = None;
-        for _ in 0..attempts {
+        for attempt in 0..attempts {
+            if self.cancel.is_cancelled() {
+                return Err(AppError::RequestStopped);
+            }
             let _ = tokio::fs::remove_file(&partial).await;
-            let (resp, proxy) = self
-                .send_once(
-                    reqwest::Method::GET,
-                    url,
-                    None,
-                    &resolved_headers,
-                    resource_name,
-                    false,
-                )
-                .await?;
+
+            let (resp, proxy) = match self
+                .send_download_once(url, &resolved_headers, resource_name)
+                .await
+            {
+                Ok(pair) => pair,
+                Err(AppError::RequestStopped) | Err(AppError::Cancelled) => {
+                    return Err(AppError::RequestStopped)
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    if attempt + 1 < attempts {
+                        self.backoff_sleep(attempt).await?;
+                        continue;
+                    }
+                    break;
+                }
+            };
+
             let status_u16 = resp.status().as_u16();
             let already_released = matches!(status_u16, 403 | 407 | 429 | 500 | 502 | 503 | 504);
 
@@ -617,22 +734,36 @@ impl StzyHttpClient {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("")
                 .to_lowercase();
+            let expected_len = resp.content_length().unwrap_or(0);
 
             let stream_res: AppResult<u64> = async {
                 let resp = resp.error_for_status()?;
                 let mut file = tokio::fs::File::create(&partial).await?;
                 let mut written = 0u64;
                 let mut stream = resp.bytes_stream();
-                while let Some(chunk_res) = tokio::select! {
-                    _ = self.cancel.cancelled() => return Err(AppError::RequestStopped),
-                    item = stream.next() => item,
-                } {
-                    let chunk = chunk_res?;
+                loop {
+                    let next_item = tokio::select! {
+                        _ = self.cancel.cancelled() => return Err(AppError::RequestStopped),
+                        timed = tokio::time::timeout(chunk_idle_timeout, stream.next()) => {
+                            timed.map_err(|_| AppError::InvalidDownloadContent("文件数据流读取超时".to_string()))?
+                        }
+                    };
+                    let Some(chunk_res) = next_item else {
+                        break;
+                    };
+                    let chunk = chunk_res.map_err(|e| {
+                        AppError::InvalidDownloadContent(format!("文件传输流中断（{e}）"))
+                    })?;
                     file.write_all(&chunk).await?;
                     written += chunk.len() as u64;
                 }
                 file.flush().await?;
                 drop(file);
+                if expected_len > 0 && written != expected_len {
+                    return Err(AppError::InvalidDownloadContent(format!(
+                        "文件下载未完整结束（已收 {written}/{expected_len} 字节）"
+                    )));
+                }
                 validate_downloaded_file(&partial, target, url, &content_type).await?;
                 Ok(written)
             }
@@ -647,30 +778,49 @@ impl StzyHttpClient {
                     }
                     return Ok(written);
                 }
-                Err(AppError::InvalidDownloadContent(msg)) => {
+                Err(AppError::RequestStopped) | Err(AppError::Cancelled) => {
+                    if !already_released && !proxy.is_empty() {
+                        self.proxy_pool.record_success(&proxy);
+                    }
+                    let _ = tokio::fs::remove_file(&partial).await;
+                    return Err(AppError::RequestStopped);
+                }
+                Err(err) => {
                     if !already_released && !proxy.is_empty() {
                         self.proxy_pool.record_failure(&proxy);
                     }
                     let _ = tokio::fs::remove_file(&partial).await;
-                    last_err = Some(AppError::InvalidDownloadContent(msg));
-                    continue;
-                }
-                Err(err) => {
-                    if !already_released && !proxy.is_empty() {
-                        if matches!(err, AppError::RequestStopped) {
-                            self.proxy_pool.record_success(&proxy);
-                        } else {
-                            self.proxy_pool.record_failure(&proxy);
-                        }
+                    last_err = Some(err);
+                    if attempt + 1 < attempts {
+                        self.backoff_sleep(attempt).await?;
+                        continue;
                     }
-                    let _ = tokio::fs::remove_file(&partial).await;
-                    return Err(err);
                 }
             }
         }
         Err(last_err
             .unwrap_or_else(|| AppError::InvalidDownloadContent("下载内容异常".to_string())))
     }
+}
+
+fn effective_download_suffix(target: &Path, url: &str) -> String {
+    let target_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .trim_end_matches(".part")
+        .trim_end_matches(".download");
+    if let Some(ext) = Path::new(target_name).extension().and_then(|e| e.to_str()) {
+        if !ext.is_empty() {
+            return format!(".{}", ext.to_lowercase());
+        }
+    }
+    let clean = url.split('?').next().unwrap_or(url);
+    Path::new(clean)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| format!(".{}", s.to_lowercase()))
+        .unwrap_or_default()
 }
 
 async fn validate_downloaded_file(
@@ -699,23 +849,34 @@ async fn validate_downloaded_file(
         ));
     }
 
-    let suffix = target
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| format!(".{}", s.to_lowercase()))
-        .or_else(|| {
-            let clean = url.split('?').next().unwrap_or(url);
-            Path::new(clean)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|s| format!(".{}", s.to_lowercase()))
-        })
-        .unwrap_or_default();
+    let suffix = effective_download_suffix(target, url);
 
     if suffix == ".pdf" || content_type.contains("application/pdf") {
         if !head.starts_with(b"%PDF") {
             return Err(AppError::InvalidDownloadContent(
                 "PDF 下载内容异常，已尝试切换代理".to_string(),
+            ));
+        }
+    } else if matches!(suffix.as_str(), ".zip" | ".docx")
+        || content_type.contains("application/zip")
+    {
+        if !(head.starts_with(b"PK\x03\x04") || head.starts_with(b"PK\x05\x06")) {
+            return Err(AppError::InvalidDownloadContent(
+                "压缩包或文档头不完整，已尝试切换代理重试".to_string(),
+            ));
+        }
+        let check_path = partial.to_path_buf();
+        let archive_ok = tokio::task::spawn_blocking(move || {
+            std::fs::File::open(&check_path)
+                .ok()
+                .and_then(|f| zip::ZipArchive::new(f).ok())
+                .is_some()
+        })
+        .await
+        .unwrap_or(false);
+        if !archive_ok {
+            return Err(AppError::InvalidDownloadContent(
+                "压缩包尾目录不完整（可能传输中断），正在重试".to_string(),
             ));
         }
     } else if (suffix == ".svg" || content_type.contains("image/svg"))

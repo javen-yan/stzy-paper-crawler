@@ -757,6 +757,9 @@ fn humanize_resource_error(raw: &str) -> String {
     if lower.contains("timed out") || lower.contains("timeout") {
         return "网络或短效代理连接超时，点击「继续任务」可自动换节点重试".to_string();
     }
+    if lower.contains("decoding response body") || lower.contains("传输流中断") {
+        return "大文件下载流被代理节点中断，点击「继续任务」可自动换节点重试".to_string();
+    }
     if lower.contains("error sending request for url")
         || lower.contains("connection closed")
         || lower.contains("connection reset")

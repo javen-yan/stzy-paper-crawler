@@ -78,10 +78,10 @@ const statusPills = computed(() =>
           <StatusTag :status="row.status || 'unknown'" :label="resourceStatusLabel(row.status)" />
         </template>
       </el-table-column>
-      <el-table-column prop="subject" label="学科" width="90" />
-      <el-table-column prop="grade" label="年级" width="90" />
-      <el-table-column prop="province" label="地区" width="90" />
-      <el-table-column prop="image_count" label="页数" width="80" />
+      <el-table-column prop="subject" label="学科" width="90" show-overflow-tooltip />
+      <el-table-column prop="grade" label="年级" width="90" show-overflow-tooltip />
+      <el-table-column prop="province" label="地区" width="100" show-overflow-tooltip />
+      <el-table-column prop="image_count" label="页数" width="80" class-name="mono" />
       <el-table-column label="处理说明 / 原因" min-width="240" show-overflow-tooltip>
         <template #default="{ row }">
           <span v-if="!row.error" class="reason-empty">-</span>

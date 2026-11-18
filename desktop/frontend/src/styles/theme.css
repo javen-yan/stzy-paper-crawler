@@ -129,6 +129,30 @@ select,
     color 160ms ease;
 }
 
+.el-button + .el-button {
+  margin-left: 0;
+}
+
+.el-button--small {
+  min-height: 28px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.el-button.is-link,
+.el-button.is-text {
+  min-height: 28px;
+  height: auto;
+}
+
+.el-message-box__btns {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .el-button:not(.is-disabled):not(.is-text):not(.is-link):active {
   transform: scale(0.985);
 }

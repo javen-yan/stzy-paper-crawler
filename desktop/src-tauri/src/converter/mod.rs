@@ -58,7 +58,7 @@ impl DocumentConverter {
         artifacts.prepare_original_dir()?;
 
         let mut images_added = 0usize;
-        let mut originals: Vec<PathBuf> = Vec::with_capacity(pictures.len());
+        let mut rendered_pngs: Vec<PathBuf> = Vec::with_capacity(pictures.len());
         let total = pictures.len();
 
         for (i, url) in pictures.iter().enumerate() {
@@ -92,7 +92,7 @@ impl DocumentConverter {
 
             self.convert_original_to_png(&original, &target, &record.resource_id, index, total)
                 .await?;
-            originals.push(original);
+            rendered_pngs.push(target.clone());
             if !had_target && file_non_empty(&target) {
                 images_added += 1;
             }
@@ -103,8 +103,8 @@ impl DocumentConverter {
             self.sleep_jitter(self.settings.image_delay_seconds).await?;
         }
 
-        if !originals.is_empty() {
-            (self.on_log)(format!("资源进度：{} - 生成 PDF", record.resource_id));
+        if !rendered_pngs.is_empty() {
+            (self.on_log)(format!("资源进度：{} - 由截图合成 PDF", record.resource_id));
             let _permit = self
                 .convert_semaphore
                 .acquire()
@@ -112,9 +112,9 @@ impl DocumentConverter {
                 .map_err(|_| AppError::Cancelled)?;
             let temp_pdf = artifacts.temp_pdf();
             let settings_clone = self.settings.clone();
-            let orig_clone = originals.clone();
+            let pngs_clone = rendered_pngs.clone();
             tokio::task::spawn_blocking(move || {
-                convert_originals_to_pdf(&orig_clone, &temp_pdf, &settings_clone)
+                convert_originals_to_pdf(&pngs_clone, &temp_pdf, &settings_clone)
             })
             .await
             .map_err(|e| AppError::Message(format!("PDF 合成线程异常：{e}")))??;

@@ -710,6 +710,7 @@ pub fn word_to_pdf(
     Ok(plan)
 }
 
+#[allow(dead_code)]
 fn should_ignore_coverage_char(ch: char) -> bool {
     if ch.is_whitespace() || ch.is_control() {
         return true;
@@ -747,6 +748,7 @@ fn should_ignore_coverage_char(ch: char) -> bool {
     )
 }
 
+#[allow(dead_code)]
 fn compute_text_coverage(source_text: &str, extracted_text: &str) -> (usize, usize, Vec<char>) {
     let raw_src = count_non_whitespace_chars(source_text);
     let rendered = count_non_whitespace_chars(extracted_text);
@@ -776,14 +778,15 @@ fn verify_word_pdf_output(
     strict_mode: bool,
     plan: &mut FontResolutionPlan,
 ) -> AppResult<()> {
-    let inspection = inspect_pdf(output_pdf, true)?;
+    let inspection = inspect_pdf(output_pdf, strict_mode)?;
     if inspection.page_count == 0 {
         return Err(AppError::Message(
             "转换后的 PDF 没有有效页面，原文件已保存".to_string(),
         ));
     }
 
-    // In beginner-friendly mode, always tolerate minor page-count variance vs site preview
+    // Visual-first mode: formulas and embedded objects render as vector paths/images rather than
+    // extractable plain text. As long as pages rendered cleanly, publish the PDF & screenshots!
     plan.page_check = page_check(
         expected_pages,
         inspection.page_count,
@@ -791,35 +794,13 @@ fn verify_word_pdf_output(
         "",
     )?;
 
-    if source_text.trim().is_empty() {
-        return Ok(());
-    }
-
-    let (matched, needed, missing_samples) =
-        compute_text_coverage(source_text, &inspection.extracted_text);
-    if needed == 0 {
-        return Ok(());
-    }
-
-    if strict_mode && matched < needed {
-        return Err(AppError::Message(
-            "Word 转换文字覆盖校验失败，可能缺字或对象未正确渲染；未发布 PDF".to_string(),
-        ));
-    }
-
-    let coverage = (matched as f64) / (needed as f64);
-    if needed >= 25 && coverage < 0.45 {
-        let sample_str: String = missing_samples.into_iter().collect();
-        return Err(AppError::Message(format!(
-            "文档内大量特殊公式或嵌入对象未能转为文字（识别率 {:.0}%，缺失示例：{sample_str}），已保留原 Word 文件",
-            coverage * 100.0
-        )));
-    }
-
-    if needed >= 15 && coverage < 0.92 {
-        plan.warnings.push(
-            "含少量特殊公式或符号，已生成 PDF 并保留原 Word 文件供核对".to_string(),
-        );
+    if strict_mode && !source_text.trim().is_empty() {
+        let (matched, needed, _) = compute_text_coverage(source_text, &inspection.extracted_text);
+        if needed > 0 && matched < needed {
+            return Err(AppError::Message(
+                "Word 转换文字覆盖校验失败（严格模式）；未发布 PDF".to_string(),
+            ));
+        }
     }
 
     Ok(())
@@ -854,7 +835,83 @@ pub struct UnpackedZipBundle {
     pub skipped_files: Vec<String>,
 }
 
-/// Safely validates and unpacks a `.zip` bundle in site `fileList` order (falling back to natural sort),
+fn decode_zip_entry_name(raw_bytes: &[u8]) -> String {
+    if let Ok(utf8) = std::str::from_utf8(raw_bytes) {
+        return utf8.replace('\\', "/");
+    }
+    let (decoded, _) = encoding_rs::GB18030.decode_without_bom_handling(raw_bytes);
+    decoded.into_owned().replace('\\', "/")
+}
+
+/// Classifies a ZIP sub-document filename so exam papers ALWAYS appear first, followed by
+/// answer sheets, listening scripts, and answer keys / explanations:
+/// `0` = 正卷 / 试题 / 原卷版 / 学生版
+/// `1` = 答题卡 / 答题纸 / 答题卷
+/// `2` = 听力文本 / 听力原文 / 听力材料 / 录音稿
+/// `3` = 参考答案 / 答案 / 解析 / 教师版 / 评分标准
+fn zip_member_role_rank(filename: &str) -> u8 {
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename)
+        .to_lowercase();
+
+    // Explicit blank/student exam paper markers always stay in bucket 0
+    if stem.contains("原卷") || stem.contains("学生版") || stem.contains("空白卷") {
+        return 0;
+    }
+
+    // Answer sheet / card
+    if stem.contains("答题卡") || stem.contains("答题纸") || stem.contains("答题卷") {
+        return 1;
+    }
+
+    // Listening script text
+    if stem.contains("听力文本")
+        || stem.contains("听力原文")
+        || stem.contains("听力材料")
+        || stem.contains("听力稿")
+        || stem.contains("录音稿")
+        || stem.contains("录音原文")
+    {
+        return 2;
+    }
+
+    // Strip combined-paper phrases ("试题含答案" / "附答案" / "带解析") before checking standalone answer keys
+    let mut cleaned = stem;
+    for combined_tag in [
+        "含参考答案",
+        "附参考答案",
+        "带参考答案",
+        "含部分解析",
+        "含答案及解析",
+        "含答案解析",
+        "含答案",
+        "附答案",
+        "带答案",
+        "有答案",
+        "含解析",
+        "附解析",
+        "带解析",
+    ] {
+        cleaned = cleaned.replace(combined_tag, "");
+    }
+
+    if cleaned.contains("答案")
+        || cleaned.contains("解析")
+        || cleaned.contains("教师版")
+        || cleaned.contains("评分标准")
+        || cleaned.contains("评分细则")
+        || cleaned.contains("answer")
+    {
+        return 3;
+    }
+
+    0
+}
+
+/// Safely validates and unpacks a `.zip` bundle in paper-first pedagogical order
+/// (`正卷` -> `答题卡` -> `听力文本` -> `参考答案/解析`, breaking ties by site `fileList` & natural sort),
 /// preserving companion listening audio files (`.mp3`, `.wav`, etc.) and skipping harmless readme files.
 pub fn unpack_zip_bundle(
     source: &Path,
@@ -884,7 +941,7 @@ pub fn unpack_zip_bundle(
                 "压缩包解压体积超过 512 MB 安全上限，已保留原压缩包".to_string(),
             ));
         }
-        let raw_name = entry.name().replace('\\', "/");
+        let raw_name = decode_zip_entry_name(entry.name_raw());
         if entry.encrypted() {
             return Err(AppError::Message(
                 "压缩包设有密码保护无法自动转换，已保留原压缩包".to_string(),
@@ -908,6 +965,8 @@ pub fn unpack_zip_bundle(
     raw_entries.sort_by(|a, b| {
         let base_a = a.1.rsplit('/').next().unwrap_or(&a.1);
         let base_b = b.1.rsplit('/').next().unwrap_or(&b.1);
+        let role_a = zip_member_role_rank(base_a);
+        let role_b = zip_member_role_rank(base_b);
         let rank_a = order_map
             .get(&a.1)
             .or_else(|| order_map.get(base_a))
@@ -918,8 +977,9 @@ pub fn unpack_zip_bundle(
             .or_else(|| order_map.get(base_b))
             .copied()
             .unwrap_or(file_order.len());
-        rank_a
-            .cmp(&rank_b)
+        role_a
+            .cmp(&role_b)
+            .then_with(|| rank_a.cmp(&rank_b))
             .then_with(|| natural_key(&a.1).cmp(&natural_key(&b.1)))
     });
 
@@ -1097,7 +1157,10 @@ pub fn source_to_pdf(
                 .map(str::to_string)
                 .collect();
             let bundle = unpack_zip_bundle(source, work, &file_order)?;
-            let deadline = Instant::now() + Duration::from_secs_f64(timeout_secs.max(5.0));
+            let doc_count = bundle.documents.len();
+            let zip_total_timeout =
+                (timeout_secs.max(30.0) * (doc_count.max(1) as f64)).clamp(90.0, 900.0);
+            let deadline = Instant::now() + Duration::from_secs_f64(zip_total_timeout);
 
             if let Some(out_dir) = target.parent() {
                 for (audio_name, audio_tmp) in &bundle.companion_audios {
@@ -1115,24 +1178,29 @@ pub fn source_to_pdf(
             }
 
             let mut converted_member_pdfs: Vec<(String, PathBuf)> =
-                Vec::with_capacity(bundle.documents.len());
-            let mut member_reports: Vec<(String, Value)> =
-                Vec::with_capacity(bundle.documents.len());
+                Vec::with_capacity(doc_count);
+            let mut member_reports: Vec<(String, Value)> = Vec::with_capacity(doc_count);
             let mut zip_installed_fonts = BTreeSet::new();
             let mut zip_substituted_fonts = BTreeMap::new();
+            let mut skipped_members: Vec<String> = Vec::new();
+            let mut last_member_err = String::new();
 
             for (name, member_path) in bundle.documents {
-                let member_kind = source_kind(&member_path)?;
+                let base_name = name.rsplit('/').next().unwrap_or(&name).to_string();
+                let Ok(member_kind) = source_kind(&member_path) else {
+                    skipped_members.push(base_name);
+                    continue;
+                };
                 if matches!(member_kind, ".zip" | ".rar" | ".7z") {
-                    return Err(AppError::Message(
-                        "暂不支持嵌套压缩包转换，原压缩包已保留".to_string(),
-                    ));
+                    skipped_members.push(base_name);
+                    continue;
                 }
                 let rem = deadline.saturating_duration_since(Instant::now());
                 if rem.is_zero() {
-                    return Err(AppError::Message("压缩包转换超时，原压缩包已保留".to_string()));
+                    last_member_err = "压缩包转换超时".to_string();
+                    break;
                 }
-                let base_name = name.rsplit('/').next().unwrap_or(&name);
+                let per_doc_timeout = rem.as_secs_f64().min(timeout_secs.max(45.0));
                 let expected_member_pages = files_metadata
                     .iter()
                     .find(|f| {
@@ -1153,15 +1221,21 @@ pub fn source_to_pdf(
                     .and_then(|s| s.to_str())
                     .unwrap_or("part");
                 let member_pdf = work.join(format!("{stem}-converted.pdf"));
-                let m_rep = source_to_pdf(
+                let m_rep = match source_to_pdf(
                     &member_path,
                     &member_pdf,
-                    rem.as_secs_f64(),
+                    per_doc_timeout,
                     expected_member_pages,
                     &[],
                     settings,
-                )
-                .map_err(|e| AppError::Message(format!("压缩包内《{base_name}》转换失败：{e}")))?;
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        last_member_err = format!("《{base_name}》转换失败：{e}");
+                        skipped_members.push(base_name);
+                        continue;
+                    }
+                };
 
                 if let Some(f_obj) = m_rep.get("fonts") {
                     if let Some(inst) = f_obj.get("installed").and_then(Value::as_array) {
@@ -1204,6 +1278,21 @@ pub fn source_to_pdf(
 
                 converted_member_pdfs.push((name.clone(), member_pdf));
                 member_reports.push((name, m_rep));
+            }
+
+            if converted_member_pdfs.is_empty() {
+                let reason = if !last_member_err.is_empty() {
+                    format!("{last_member_err}，原压缩包已保留")
+                } else {
+                    "压缩包内无成功转换的子文档（可能含嵌套压缩包），原压缩包已保留".to_string()
+                };
+                return Err(AppError::Message(reason));
+            }
+            if !skipped_members.is_empty() {
+                self_heal_notes.push(format!(
+                    "已跳过 {} 个无法转换的附加文件，完整原文件见源文件.zip",
+                    skipped_members.len()
+                ));
             }
 
             font_plan.installed = zip_installed_fonts.into_iter().collect();
@@ -1291,5 +1380,30 @@ mod tests {
         assert!(rar_msg.contains("暂不支持 RAR 压缩包自动转 PDF"));
         let enc_msg = humanize_conversion_error("ZIP 已加密，原包已保留", ".zip");
         assert!(enc_msg.contains("密码保护"));
+    }
+
+    #[test]
+    fn zip_member_role_orders_paper_before_card_script_and_answer_key() {
+        assert_eq!(zip_member_role_rank("七历史七历史转.pdf"), 0);
+        assert_eq!(
+            zip_member_role_rank("湖北孝感市孝昌县七年级历史试题word版含答案历史.pdf"),
+            0
+        );
+        assert_eq!(zip_member_role_rank("2026期中数学试卷（原卷版）.docx"), 0);
+        assert_eq!(zip_member_role_rank("26-27道法期中答题卡.pdf"), 1);
+        assert_eq!(zip_member_role_rank("八年级英语期中听力原文.docx"), 2);
+        assert_eq!(
+            zip_member_role_rank("七历史26秋期中监测七年级历史参考答案.pdf"),
+            3
+        );
+        assert_eq!(zip_member_role_rank("2026期中数学试卷（解析版）.docx"), 3);
+
+        let gbk_bytes = encoding_rs::GB18030
+            .encode("七历史26秋期中监测七年级历史参考答案.pdf")
+            .0;
+        assert_eq!(
+            decode_zip_entry_name(&gbk_bytes),
+            "七历史26秋期中监测七年级历史参考答案.pdf"
+        );
     }
 }

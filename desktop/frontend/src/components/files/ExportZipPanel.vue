@@ -23,9 +23,9 @@ async function revealZip() {
 <template>
   <el-card shadow="never" class="zip-panel">
     <template #header>
-      <div class="card-header">
+      <div class="card-header zip-card-header">
         <span>批量导出 ZIP</span>
-        <el-button type="primary" :icon="Package" :disabled="disabled" :loading="loading" @click="$emit('create')">另存为 ZIP</el-button>
+        <el-button type="primary" size="small" :icon="Package" :disabled="disabled" :loading="loading" @click="$emit('create')">另存为 ZIP</el-button>
       </div>
     </template>
     <el-alert
@@ -38,9 +38,28 @@ async function revealZip() {
       <el-tag :type="exportJob.status === 'completed' ? 'success' : exportJob.status === 'failed' ? 'danger' : 'warning'">
         {{ exportJob.status === 'completed' ? '已保存' : exportJob.status }}
       </el-tag>
-      <span>{{ exportJob.file_path || exportJob.display_name || exportJob.id }}</span>
-      <el-button v-if="exportJob.status === 'completed' && exportJob.file_path" :icon="FolderOpen" @click="revealZip">在文件管理器中显示</el-button>
+      <span class="zip-path">{{ exportJob.file_path || exportJob.display_name || exportJob.id }}</span>
+      <el-button v-if="exportJob.status === 'completed' && exportJob.file_path" size="small" :icon="FolderOpen" @click="revealZip">在文件管理器中显示</el-button>
       <el-alert v-if="exportJob.status === 'failed'" :title="exportJob.error || 'ZIP 生成失败'" type="error" show-icon :closable="false" />
     </div>
   </el-card>
 </template>
+
+<style scoped>
+.zip-card-header {
+  justify-content: space-between;
+}
+
+.zip-status {
+  margin-top: 12px;
+}
+
+.zip-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--app-muted);
+  font-size: 13px;
+}
+</style>

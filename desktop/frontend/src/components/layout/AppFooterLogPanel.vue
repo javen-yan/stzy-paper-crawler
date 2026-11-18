@@ -86,7 +86,7 @@ onMounted(() => polling.start())
   <footer
     class="footer-log-panel"
     :class="{ collapsed: !footerExpanded }"
-    :style="{ height: `${footerExpanded ? footerHeight : 36}px` }"
+    :style="{ height: `${footerExpanded ? footerHeight : 40}px` }"
   >
     <div class="footer-log-titlebar">
       <div

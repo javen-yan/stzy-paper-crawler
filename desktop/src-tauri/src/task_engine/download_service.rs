@@ -77,12 +77,19 @@ impl DownloadService {
             .trim_start_matches('.')
             .to_lowercase();
 
-        if matches!(raw_suffix.as_str(), "doc" | "docx" | "zip" | "rar" | "7z") {
+        // Archive bundles (.zip / .rar / .7z) contain multiple sub-documents and optional audio:
+        // always download the archive, merge all sub-documents into one big PDF, screenshot every page,
+        // and preserve `源文件.zip` alongside `合并文档.pdf` and `练习1..N.png`.
+        if matches!(raw_suffix.as_str(), "zip" | "rar" | "7z") {
             return self
                 .download_other_source(record, &format!(".{raw_suffix}"))
                 .await;
         }
 
+        // Single documents (pdf / doc / docx / image):
+        // - `<= 10` pages: prefer site preview images first -> render `练习1..N.png` -> stitch `合并文档.pdf`
+        //   directly from screenshots (avoids LibreOffice font/formula issues and saves VIP download quota).
+        // - `> 10` pages (or incomplete preview): download source -> build `合并文档.pdf` -> screenshot pages.
         if record.page_count > 10 {
             let saved_count = DocumentConverter::saved_picture_count_from_dir(&directory);
             if expected_pages > 0 && saved_count >= expected_pages {

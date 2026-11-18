@@ -189,25 +189,27 @@ async function copyScript() {
     </el-tabs>
 
     <template #footer>
-      <el-button @click="close">取消</el-button>
-      <el-button
-        v-if="activeTab === 'phone'"
-        type="primary"
-        :loading="loading"
-        :disabled="!canPhoneLogin"
-        @click="submitPhoneLogin"
-      >
-        登录并保存
-      </el-button>
-      <el-button
-        v-else
-        type="primary"
-        :loading="loading"
-        :disabled="!canImport"
-        @click="submitCredentialImport"
-      >
-        导入并保存
-      </el-button>
+      <div class="drawer-footer-actions">
+        <el-button @click="close">取消</el-button>
+        <el-button
+          v-if="activeTab === 'phone'"
+          type="primary"
+          :loading="loading"
+          :disabled="!canPhoneLogin"
+          @click="submitPhoneLogin"
+        >
+          登录并保存
+        </el-button>
+        <el-button
+          v-else
+          type="primary"
+          :loading="loading"
+          :disabled="!canImport"
+          @click="submitCredentialImport"
+        >
+          导入并保存
+        </el-button>
+      </div>
     </template>
   </el-dialog>
 </template>

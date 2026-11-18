@@ -126,6 +126,25 @@ function statusFor(account: Account) {
   display: none;
 }
 
+.account-cell {
+  min-width: 0;
+}
+
+.account-cell strong,
+.account-cell small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-cell small {
+  margin-top: 2px;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
 @media (max-width: 760px) {
   .account-desktop-table {
     display: none;
@@ -151,24 +170,6 @@ function statusFor(account: Account) {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 10px;
     align-items: start;
-  }
-
-  .account-cell {
-    min-width: 0;
-  }
-
-  .account-cell strong,
-  .account-cell small {
-    display: block;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .account-cell small {
-    margin-top: 3px;
-    color: var(--app-muted);
   }
 
   .account-mobile-meta {

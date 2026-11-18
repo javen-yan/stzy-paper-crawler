@@ -43,9 +43,11 @@ onMounted(scrollToBottom)
 <template>
   <el-card shadow="never" class="task-logs-card">
     <template #header>
-      <div class="card-header">
-        <span>运行日志</span>
-        <span class="log-count mono">最近 {{ logs.length }} 条</span>
+      <div class="card-header log-card-header">
+        <div class="log-header-left">
+          <span>运行日志</span>
+          <span class="log-count mono">最近 {{ logs.length }} 条</span>
+        </div>
         <el-button size="small" @click="refreshAndFollow">刷新</el-button>
       </div>
     </template>
@@ -61,6 +63,16 @@ onMounted(scrollToBottom)
 </template>
 
 <style scoped>
+.log-card-header {
+  justify-content: space-between;
+}
+
+.log-header-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .log-count {
   color: var(--app-primary);
   font-size: 12px;

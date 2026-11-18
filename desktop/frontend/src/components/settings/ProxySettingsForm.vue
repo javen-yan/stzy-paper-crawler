@@ -386,9 +386,17 @@ async function bindLocalIp() {
 </template>
 
 <style scoped>
-.secret-label-row {
-  display: inline-flex;
+.proxy-settings-card :deep(.el-form-item__label) {
+  display: flex;
   align-items: center;
+  width: 100%;
+  padding-right: 0;
+}
+
+.secret-label-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
   gap: 8px;
   flex-wrap: wrap;
 }
@@ -418,9 +426,16 @@ async function bindLocalIp() {
 }
 
 .secret-actions {
+  margin-left: auto;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
+}
+
+.secret-actions :deep(.el-button.is-link) {
+  min-height: 20px;
+  height: 20px;
+  padding: 0 2px;
 }
 
 .mono-input :deep(input),

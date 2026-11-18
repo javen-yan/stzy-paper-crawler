@@ -600,6 +600,8 @@ watch(
 
 .detail-title h2 {
   margin: 0;
+  min-width: 0;
+  max-width: 100%;
   font-size: 18px;
   line-height: 1.3;
   overflow: hidden;

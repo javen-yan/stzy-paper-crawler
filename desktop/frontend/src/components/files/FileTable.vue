@@ -94,7 +94,10 @@ function formatSize(value?: number | null) {
 function formatTime(value?: number | null) {
   if (!value) return '-'
   const millis = value > 10_000_000_000 ? value : value * 1000
-  return new Date(millis).toLocaleString()
+  const d = new Date(millis)
+  if (Number.isNaN(d.getTime())) return '-'
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 function ensureTreeNode(path: string, label: string, parentPath = ROOT_PATH) {
@@ -325,32 +328,36 @@ onMounted(() => {
           @selection-change="handleSelectionChange"
           @row-dblclick="openRow"
         >
-          <el-table-column type="selection" width="42" :selectable="(row: ArtifactBrowserEntry) => row.item_type === 'file'" />
-          <el-table-column label="名称" min-width="320" show-overflow-tooltip>
+          <el-table-column type="selection" width="38" :selectable="(row: ArtifactBrowserEntry) => row.item_type === 'file'" />
+          <el-table-column label="名称" min-width="260" show-overflow-tooltip>
             <template #default="{ row }">
               <button class="artifact-name-button" type="button" @click="openRow(row)">
-                <component :is="iconFor(row)" :size="18" />
+                <component :is="iconFor(row)" :size="17" />
                 <span>{{ row.name }}</span>
               </button>
             </template>
           </el-table-column>
-          <el-table-column label="类型" width="100">
+          <el-table-column label="类型" width="68">
             <template #default="{ row }">{{ displayType(row) }}</template>
           </el-table-column>
-          <el-table-column label="大小" width="110">
+          <el-table-column label="大小" width="88" class-name="mono">
             <template #default="{ row }">{{ formatSize(row.size_bytes) }}</template>
           </el-table-column>
-          <el-table-column label="更新时间" width="190">
+          <el-table-column label="更新时间" width="144" class-name="mono">
             <template #default="{ row }">{{ formatTime(row.modified_at) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="248" fixed="right">
+          <el-table-column label="操作" width="192" fixed="right" align="right">
             <template #default="{ row }">
-              <el-button v-if="row.item_type === 'folder'" size="small" :icon="Folder" @click="openRow(row)">打开</el-button>
-              <template v-else>
-                <el-button size="small" :icon="Eye" @click="openPreview(row)">预览</el-button>
-                <el-button size="small" :icon="Download" @click="handleSaveAs(row)">另存为</el-button>
-                <el-button size="small" :icon="FolderOpen" @click="handleRevealInOs(row)">位置</el-button>
-              </template>
+              <div class="artifact-row-actions">
+                <button v-if="row.item_type === 'folder'" type="button" class="artifact-action-pill is-primary" @click="openRow(row)">
+                  打开目录
+                </button>
+                <template v-else>
+                  <button type="button" class="artifact-action-pill is-primary" @click="openPreview(row)">预览</button>
+                  <button type="button" class="artifact-action-pill" @click="handleSaveAs(row)">另存为</button>
+                  <button type="button" class="artifact-action-pill" title="在系统文件夹中定位" @click="handleRevealInOs(row)">位置</button>
+                </template>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -413,7 +420,7 @@ onMounted(() => {
 .artifact-browser-layout {
   min-height: 560px;
   display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  grid-template-columns: minmax(168px, 204px) minmax(0, 1fr);
   border: 1px solid var(--app-border);
   border-radius: 8px;
   overflow: hidden;
@@ -440,11 +447,59 @@ onMounted(() => {
   min-width: 0;
 }
 
+.artifact-tree-node svg,
+.artifact-name-button svg {
+  flex: 0 0 auto;
+}
+
 .artifact-tree-node span,
 .artifact-name-button span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.artifact-row-actions {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.artifact-action-pill {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(30, 42, 68, 0.55);
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 24px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease;
+}
+
+.artifact-action-pill:hover {
+  color: var(--app-text);
+  background: rgba(51, 65, 95, 0.85);
+  border-color: rgba(148, 163, 184, 0.34);
+}
+
+.artifact-action-pill.is-primary {
+  color: #a5b4fc;
+  background: rgba(99, 102, 241, 0.14);
+  border-color: rgba(129, 140, 248, 0.28);
+}
+
+.artifact-action-pill.is-primary:hover {
+  color: #ffffff;
+  background: rgba(99, 102, 241, 0.32);
+  border-color: rgba(129, 140, 248, 0.55);
 }
 
 .artifact-content-panel {

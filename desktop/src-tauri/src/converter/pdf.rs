@@ -336,7 +336,17 @@ pub fn image_to_single_pdf_bytes(image_path: &Path) -> AppResult<Vec<u8>> {
     let _ = img_stream.compress();
     let img_id = doc.add_object(img_stream);
 
-    let content_ops = format!("q {} 0 0 {} 0 0 cm /Im0 Do Q\n", width, height).into_bytes();
+    // Normalize page dimensions to standard A4 width (595.28pt) when high-DPI screenshots are used,
+    // while keeping full raster pixel resolution inside the embedded XObject image.
+    let (pt_w, pt_h) = if width > 900 {
+        let target_w = 595.28_f64;
+        let target_h = (target_w * (height as f64) / (width as f64)).max(1.0);
+        (target_w, target_h)
+    } else {
+        (width as f64, height as f64)
+    };
+
+    let content_ops = format!("q {:.2} 0 0 {:.2} 0 0 cm /Im0 Do Q\n", pt_w, pt_h).into_bytes();
     let content_id = doc.add_object(Stream::new(dictionary! {}, content_ops));
 
     let resources_id = doc.add_object(dictionary! {
@@ -348,7 +358,7 @@ pub fn image_to_single_pdf_bytes(image_path: &Path) -> AppResult<Vec<u8>> {
     let page_id = doc.add_object(dictionary! {
         "Type" => "Page",
         "Parent" => pages_id,
-        "MediaBox" => vec![0.into(), 0.into(), (width as i64).into(), (height as i64).into()],
+        "MediaBox" => vec![0.into(), 0.into(), (pt_w as f32).into(), (pt_h as f32).into()],
         "Contents" => content_id,
         "Resources" => resources_id,
     });
