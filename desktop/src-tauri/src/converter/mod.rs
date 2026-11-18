@@ -12,7 +12,7 @@ use rand::Rng;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
-use crate::converter::office::source_to_pdf;
+use crate::converter::office::render_source_to_pages_and_pdf;
 use crate::converter::pdf::{convert_originals_to_pdf, convert_pdf_to_pngs, pdf_file_looks_valid};
 use crate::converter::svg::{
     convert_image_to_png, convert_svg_to_png, detect_svg_cjk_font_family, svg_needs_font_fallback,
@@ -156,7 +156,7 @@ impl DocumentConverter {
         &self,
         original: &Path,
         directory: &Path,
-        expected_pages: usize,
+        _expected_pages: usize,
         files_metadata: &[Value],
     ) -> AppResult<(usize, usize, String)> {
         let existing = Self::saved_picture_count_from_dir(directory);
@@ -179,27 +179,21 @@ impl DocumentConverter {
                 .tempdir_in(&dir_buf)?;
             let staging = staging_dir.path();
             let converted_pdf = staging.join("converted.pdf");
-            let report = source_to_pdf(
+            let (rendered_count, report) = render_source_to_pages_and_pdf(
                 &orig_buf,
+                staging,
                 &converted_pdf,
                 settings_clone.document_timeout_seconds as f64,
-                expected_pages,
                 &files_clone,
                 &settings_clone,
             )?;
-
-            let rendered_count = convert_pdf_to_pngs(&converted_pdf, staging, &settings_clone)?;
-            let report_pages = report
-                .get("pages")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as usize;
-            if rendered_count == 0 || rendered_count != report_pages {
+            if rendered_count == 0 {
                 return Err(AppError::Message(
-                    "PDF 页面图片生成异常，已保留原文件".to_string(),
+                    "页面图片生成异常，已保留原文件".to_string(),
                 ));
             }
 
-            let report_path = staging.join("conversion-report.json");
+            let report_path = staging.join(".conversion-report.json");
             let pretty = serde_json::to_string_pretty(&report)?;
             fs::write(&report_path, pretty)?;
 
@@ -228,7 +222,8 @@ impl DocumentConverter {
                     }
                 }
             }
-            fs::rename(&report_path, dir_buf.join("conversion-report.json"))?;
+            let _ = fs::remove_file(dir_buf.join("conversion-report.json"));
+            fs::rename(&report_path, dir_buf.join(".conversion-report.json"))?;
             Ok((rendered_count, report))
         })
         .await
@@ -240,56 +235,7 @@ impl DocumentConverter {
             .unwrap_or("")
             .trim()
             .to_string();
-        self.log_font_report(&report);
         Ok((count, count.saturating_sub(existing), self_heal_note))
-    }
-
-    pub fn log_font_report(&self, report: &Value) {
-        let Some(fonts) = report.get("fonts") else {
-            return;
-        };
-        let substituted = fonts
-            .get("substituted")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        let tolerated = report
-            .get("page_check")
-            .and_then(|c| c.get("tolerated"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if substituted.is_empty() && !tolerated {
-            return;
-        }
-        let mut parts = Vec::new();
-        if !substituted.is_empty() {
-            let pairs: Vec<String> = substituted
-                .iter()
-                .map(|(k, v)| format!("{k}→{}", v.as_str().unwrap_or("")))
-                .collect();
-            parts.push(format!("使用替代字体：{}", pairs.join("、")));
-        }
-        if let Some(inst) = fonts.get("installed").and_then(Value::as_array) {
-            let names: Vec<&str> = inst.iter().filter_map(Value::as_str).collect();
-            if !names.is_empty() {
-                parts.push(format!("自动下载字体：{}", names.join("、")));
-            }
-        }
-        if tolerated {
-            if let Some(note) = report
-                .get("page_check")
-                .and_then(|c| c.get("note"))
-                .and_then(Value::as_str)
-            {
-                if !note.is_empty() {
-                    parts.push(note.to_string());
-                }
-            }
-            parts.push("PDF 已按实际页数发布，排版请人工核对".to_string());
-        }
-        if !parts.is_empty() {
-            (self.on_log)(format!("字体提示：{}", parts.join("；")));
-        }
     }
 
     async fn convert_original_to_png(
@@ -446,7 +392,7 @@ fn is_practice_png(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::converter::office::{docx_content, source_kind};
+    use crate::converter::office::{detect_office_engine, source_kind};
     use crate::converter::pdf::inspect_pdf;
     use tempfile::tempdir;
 
@@ -500,37 +446,66 @@ mod tests {
     }
 
     #[test]
-    fn merges_real_zip_fixture_and_inspects_docx_fixture() {
+    fn unified_pipeline_renders_zip_and_docx_fixtures() {
         let dir = tempdir().unwrap();
         let mut settings = AppSettings::default();
         settings.data_dir = dir.path().join("data");
         settings.output_dir = dir.path().join("out");
 
-        // 1. Real ZIP sample (3 PDFs -> 13 pages with TOC bookmarks)
+        // 1. Real ZIP sample (3 PDFs -> 13 continuous print PNGs + print PDF with TOC bookmarks, paper first!)
         let repo_zip = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../output/format-validation/originals/zip-sample-773614591691493376.zip");
         if repo_zip.exists() {
             assert_eq!(source_kind(&repo_zip).unwrap(), ".zip");
+            let zip_pages_dir = dir.path().join("zip_pages");
             let merged_pdf = dir.path().join("merged.pdf");
-            let report = source_to_pdf(&repo_zip, &merged_pdf, 60.0, 13, &[], &settings).unwrap();
+            let (count, report) = render_source_to_pages_and_pdf(
+                &repo_zip,
+                &zip_pages_dir,
+                &merged_pdf,
+                60.0,
+                &[],
+                &settings,
+            )
+            .unwrap();
+            assert_eq!(count, 13);
             assert_eq!(report["pages"].as_u64().unwrap(), 13);
-            assert_eq!(report["layout"].as_str().unwrap(), "source_pdf_pages");
-            assert_eq!(report["files"].as_array().unwrap().len(), 3);
+            assert_eq!(report["layout"].as_str().unwrap(), "rendered_print_pages");
+            let files = report["files"].as_array().unwrap();
+            assert_eq!(files.len(), 3);
+            assert_eq!(files[0]["name"].as_str().unwrap(), "26-27道法期中试卷.pdf");
+            assert_eq!(files[1]["name"].as_str().unwrap(), "26-27道法期中答题卡.pdf");
+            assert_eq!(files[2]["name"].as_str().unwrap(), "26-27道法期中答案.pdf");
+            assert!(file_non_empty(&zip_pages_dir.join("练习1.png")));
+            assert!(file_non_empty(&zip_pages_dir.join("练习13.png")));
 
-            // Verify lopdf wrote Outlines into the merged PDF
             let lo = lopdf::Document::load(&merged_pdf).unwrap();
             let catalog = lo.catalog().unwrap();
             assert!(catalog.has(b"Outlines"));
         }
 
-        // 2. Real DOCX XML font & text extraction
+        // 2. Real DOCX fixture -> single-pass print pages + print PDF (when local Office engine exists)
         let repo_docx = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../output/format-validation/originals/word-sample-773569953530155008.docx");
         if repo_docx.exists() {
             assert_eq!(source_kind(&repo_docx).unwrap(), ".docx");
-            let (fonts, text) = docx_content(&repo_docx).unwrap();
-            assert!(!fonts.is_empty());
-            assert!(text.chars().count() > 50);
+            if detect_office_engine(&settings).is_some() {
+                let word_pages_dir = dir.path().join("word_pages");
+                let word_pdf = dir.path().join("word.pdf");
+                let (count, _) = render_source_to_pages_and_pdf(
+                    &repo_docx,
+                    &word_pages_dir,
+                    &word_pdf,
+                    60.0,
+                    &[],
+                    &settings,
+                )
+                .unwrap();
+                assert_eq!(count, 11);
+                assert!(file_non_empty(&word_pages_dir.join("练习1.png")));
+                assert!(file_non_empty(&word_pages_dir.join("练习11.png")));
+                assert!(file_non_empty(&word_pdf));
+            }
         }
     }
 }

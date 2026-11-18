@@ -7,8 +7,7 @@ use image::{ImageBuffer, Rgb};
 use regex::Regex;
 
 use crate::converter::fonts::{
-    base_font_key, build_font_database, ensure_word_fonts, font_key, heuristic_substitutes_for,
-    substitutes_for,
+    base_font_key, build_font_database, font_key, heuristic_substitutes_for, substitutes_for,
 };
 use crate::error::{AppError, AppResult};
 use crate::models::{ensure_directory, AppSettings};
@@ -165,10 +164,6 @@ pub fn normalize_svg_for_usvg(raw_svg: &str, preferred_cjk_font: &str) -> String
 pub fn convert_svg_to_png(svg_path: &Path, png_path: &Path, settings: &AppSettings) -> AppResult<()> {
     let raw = fs::read_to_string(svg_path)
         .map_err(|e| AppError::Message(format!("读取 SVG 失败（{}）：{e}", svg_path.display())))?;
-    let declared = extract_svg_declared_fonts(&raw);
-    if !declared.is_empty() {
-        let _ = ensure_word_fonts(&declared, settings);
-    }
     let preferred_cjk = detect_svg_cjk_font_family(settings);
     let normalized = normalize_svg_for_usvg(&raw, &preferred_cjk);
 

@@ -87,9 +87,9 @@ onMounted(refresh)
 
           <el-tab-pane name="fonts">
             <template #label>
-              <span class="tab-label"><el-icon><Document /></el-icon>转换核心与字体</span>
+              <span class="tab-label"><el-icon><Document /></el-icon>文档渲染环境</span>
             </template>
-            <FontSettingsForm />
+            <FontSettingsForm :settings="settings" :saving="saving" @save="save" />
           </el-tab-pane>
 
           <el-tab-pane name="about">

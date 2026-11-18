@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
-import { Download, Eye, File, FileImage, FileText, Folder, FolderOpen, RefreshCw, Search } from 'lucide-vue-next'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { ChevronLeft, ChevronRight, Download, Eye, ExternalLink, File, FileImage, FileText, Folder, FolderOpen, RefreshCw, Search } from 'lucide-vue-next'
 import { ApiError } from '../../api/client'
 import { openLocalPath } from '../../api/local'
 import {
@@ -43,14 +43,17 @@ const treeData = ref<TreeNode[]>([{ id: ROOT_PATH, label: ROOT_LABEL, path: ROOT
 const loadedDirs = new Set<string>()
 const nodeMap = new Map<string, TreeNode>([[ROOT_PATH, treeData.value[0]]])
 
+const HIDDEN_INTERNAL_FILES = new Set(['conversion-report.json', '.conversion-report.json'])
+
 const visibleFiles = computed(() => {
+  const base = currentFiles.value.filter((item) => !HIDDEN_INTERNAL_FILES.has(item.name))
   const needle = searchText.value.trim().toLowerCase()
   const files = needle
-    ? currentFiles.value.filter((item) => `${item.name} ${item.extension || ''}`.toLowerCase().includes(needle))
-    : currentFiles.value
+    ? base.filter((item) => `${item.name} ${item.extension || ''}`.toLowerCase().includes(needle))
+    : base
   return [...files].sort((a, b) => {
     if (a.item_type !== b.item_type) return a.item_type === 'folder' ? -1 : 1
-    return a.name.localeCompare(b.name, 'zh-Hans-CN')
+    return a.name.localeCompare(b.name, 'zh-Hans-CN', { numeric: true, sensitivity: 'base' })
   })
 })
 
@@ -69,6 +72,48 @@ const selectedCount = computed(() => selectedRows.value.length)
 const previewUrl = computed(() => (previewItem.value ? artifactPreviewUrl(previewItem.value.relative_path, props.taskId) : ''))
 const previewMime = computed(() => previewItem.value?.media_type || '')
 const canPreview = computed(() => previewMime.value.startsWith('image/') || previewMime.value === 'application/pdf')
+
+function canInlinePreview(row: ArtifactBrowserEntry) {
+  const mime = row.media_type || ''
+  return mime.startsWith('image/') || mime === 'application/pdf'
+}
+
+const previewableFiles = computed(() => visibleFiles.value.filter((row) => row.item_type === 'file' && canInlinePreview(row)))
+const previewIndex = computed(() =>
+  previewItem.value ? previewableFiles.value.findIndex((item) => item.relative_path === previewItem.value?.relative_path) : -1,
+)
+const hasPrevPreview = computed(() => previewIndex.value > 0)
+const hasNextPreview = computed(() => previewIndex.value >= 0 && previewIndex.value < previewableFiles.value.length - 1)
+
+function stepPreview(delta: number) {
+  const nextIdx = previewIndex.value + delta
+  if (nextIdx >= 0 && nextIdx < previewableFiles.value.length) {
+    previewItem.value = previewableFiles.value[nextIdx]
+  }
+}
+
+function handlePreviewKeydown(event: KeyboardEvent) {
+  if (!previewVisible.value) return
+  if (event.key === 'ArrowLeft' && hasPrevPreview.value) {
+    event.preventDefault()
+    stepPreview(-1)
+  } else if (event.key === 'ArrowRight' && hasNextPreview.value) {
+    event.preventDefault()
+    stepPreview(1)
+  }
+}
+
+watch(previewVisible, (open) => {
+  if (open) {
+    window.addEventListener('keydown', handlePreviewKeydown)
+  } else {
+    window.removeEventListener('keydown', handlePreviewKeydown)
+  }
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handlePreviewKeydown)
+})
 
 function iconFor(row: ArtifactBrowserEntry) {
   if (row.item_type === 'folder') return Folder
@@ -171,14 +216,27 @@ async function runDeepSearch() {
 function openRow(row: ArtifactBrowserEntry) {
   if (row.item_type === 'folder') {
     loadDirectory(row.relative_path)
-  } else {
+  } else if (canInlinePreview(row)) {
     openPreview(row)
+  } else {
+    openWithSystemApp(row)
   }
 }
 
 function openPreview(row: ArtifactBrowserEntry) {
   previewItem.value = row
   previewVisible.value = true
+}
+
+async function openWithSystemApp(row: ArtifactBrowserEntry) {
+  try {
+    await openLocalPath(row.relative_path, {
+      taskId: props.taskId,
+      reveal: false,
+    })
+  } catch (err) {
+    toast.error(err, '调用系统程序打开失败')
+  }
 }
 
 async function handleSaveAs(row: ArtifactBrowserEntry) {
@@ -309,7 +367,8 @@ onMounted(() => {
               />
               <el-button v-if="row.item_type === 'folder'" size="small" :icon="Folder" @click="openRow(row)">打开</el-button>
               <template v-else>
-                <el-button size="small" :icon="Eye" @click="openPreview(row)">预览</el-button>
+                <el-button v-if="canInlinePreview(row)" size="small" :icon="Eye" @click="openPreview(row)">预览</el-button>
+                <el-button v-else size="small" :icon="ExternalLink" @click="openWithSystemApp(row)">打开</el-button>
                 <el-button size="small" :icon="Download" @click="handleSaveAs(row)">另存为</el-button>
                 <el-button size="small" :icon="FolderOpen" @click="handleRevealInOs(row)">位置</el-button>
               </template>
@@ -353,7 +412,23 @@ onMounted(() => {
                   打开目录
                 </button>
                 <template v-else>
-                  <button type="button" class="artifact-action-pill is-primary" @click="openPreview(row)">预览</button>
+                  <button
+                    v-if="canInlinePreview(row)"
+                    type="button"
+                    class="artifact-action-pill is-primary"
+                    @click="openPreview(row)"
+                  >
+                    预览
+                  </button>
+                  <button
+                    v-else
+                    type="button"
+                    class="artifact-action-pill is-primary"
+                    title="调用系统默认软件打开"
+                    @click="openWithSystemApp(row)"
+                  >
+                    打开
+                  </button>
                   <button type="button" class="artifact-action-pill" @click="handleSaveAs(row)">另存为</button>
                   <button type="button" class="artifact-action-pill" title="在系统文件夹中定位" @click="handleRevealInOs(row)">位置</button>
                 </template>
@@ -364,16 +439,47 @@ onMounted(() => {
       </section>
     </div>
 
-    <el-dialog v-model="previewVisible" class="artifact-preview-dialog" width="82vw" top="5vh" append-to-body>
+    <el-dialog v-model="previewVisible" class="artifact-preview-dialog" width="84vw" top="4vh" append-to-body>
       <template #header>
-        <span class="artifact-preview-title">{{ previewItem?.name }}</span>
+        <div class="artifact-preview-header">
+          <div class="artifact-preview-title-wrap">
+            <span class="artifact-preview-title">{{ previewItem?.name }}</span>
+            <small v-if="previewIndex >= 0 && previewableFiles.length > 1" class="artifact-preview-counter mono">
+              {{ previewIndex + 1 }} / {{ previewableFiles.length }}
+            </small>
+          </div>
+          <div v-if="previewItem" class="artifact-preview-toolbar">
+            <template v-if="previewableFiles.length > 1">
+              <button
+                type="button"
+                class="artifact-action-pill"
+                :disabled="!hasPrevPreview"
+                title="上一项 (←)"
+                @click="stepPreview(-1)"
+              >
+                <ChevronLeft :size="14" />上一项
+              </button>
+              <button
+                type="button"
+                class="artifact-action-pill"
+                :disabled="!hasNextPreview"
+                title="下一项 (→)"
+                @click="stepPreview(1)"
+              >
+                下一项<ChevronRight :size="14" />
+              </button>
+            </template>
+            <button type="button" class="artifact-action-pill" @click="handleSaveAs(previewItem)">另存为</button>
+            <button type="button" class="artifact-action-pill" @click="handleRevealInOs(previewItem)">位置</button>
+          </div>
+        </div>
       </template>
       <div v-if="previewItem && canPreview" class="artifact-preview-frame">
         <img v-if="previewMime.startsWith('image/')" :src="previewUrl" :alt="previewItem.name" />
         <iframe v-else :src="previewUrl" title="文件预览" />
       </div>
-      <el-empty v-else description="该文件不支持在线预览">
-        <el-button v-if="previewItem" type="primary" :icon="Download" @click="handleSaveAs(previewItem)">另存为文件</el-button>
+      <el-empty v-else description="正在使用系统软件打开或另存文件">
+        <el-button v-if="previewItem" type="primary" :icon="ExternalLink" @click="openWithSystemApp(previewItem)">用系统软件打开</el-button>
       </el-empty>
     </el-dialog>
   </div>
@@ -470,6 +576,9 @@ onMounted(() => {
 
 .artifact-action-pill {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   height: 26px;
   padding: 0 9px;
   border-radius: 6px;
@@ -482,6 +591,11 @@ onMounted(() => {
   cursor: pointer;
   white-space: nowrap;
   transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease;
+}
+
+.artifact-action-pill:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .artifact-action-pill:hover {
@@ -563,12 +677,45 @@ onMounted(() => {
   margin-bottom: 2px;
 }
 
+.artifact-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-right: 28px;
+  min-width: 0;
+}
+
+.artifact-preview-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
 .artifact-preview-title {
   display: block;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 600;
+}
+
+.artifact-preview-counter {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.16);
+  color: #a5b4fc;
+  font-size: 12px;
+}
+
+.artifact-preview-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
 }
 
 .artifact-preview-frame {

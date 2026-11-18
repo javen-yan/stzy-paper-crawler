@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -241,23 +240,34 @@ pub fn convert_pdf_to_pngs(
     directory: &Path,
     settings: &AppSettings,
 ) -> AppResult<usize> {
+    append_pdf_to_pngs(pdf_path, directory, 1, settings)
+}
+
+/// Renders all pages of `pdf_path` into `练习{start_index}.png ..` inside `directory` at 180 DPI,
+/// returning the number of pages rendered from this PDF.
+pub fn append_pdf_to_pngs(
+    pdf_path: &Path,
+    directory: &Path,
+    start_index: usize,
+    settings: &AppSettings,
+) -> AppResult<usize> {
     if !pdf_file_looks_valid(pdf_path) {
         return Ok(0);
     }
     ensure_directory(directory)?;
     let artifacts = ResourceArtifacts::new(directory.to_path_buf());
+    let base_idx = start_index.max(1);
     let max_pages = settings.preview_max_pages.max(1);
     let max_pixels = settings.preview_max_pixels.max(1_000_000);
 
-    // Render pages to DynamicImages while holding the Pdfium lock, then encode PNGs outside or inline.
     let rendered_images: Vec<(usize, image::DynamicImage)> = with_pdfium(|pdfium| {
         let doc = pdfium
             .load_pdf_from_file(pdf_path, None)
             .map_err(|e| AppError::Message(format!("读取 PDF 失败：{e}")))?;
         let total = doc.pages().len() as usize;
-        if total > max_pages {
+        if base_idx.saturating_add(total).saturating_sub(1) > max_pages {
             return Err(AppError::Message(format!(
-                "PDF 页数（{total}）超过安全上限（{max_pages}）"
+                "累计渲染页数超过安全上限（{max_pages}）"
             )));
         }
         let mut out = Vec::with_capacity(total);
@@ -280,7 +290,7 @@ pub fn convert_pdf_to_pngs(
             let bitmap = page
                 .render_with_config(&config)
                 .map_err(|e| AppError::Message(format!("渲染第 {} 页失败：{e}", idx + 1)))?;
-            out.push((idx + 1, bitmap.as_image()));
+            out.push((base_idx + idx, bitmap.as_image()));
         }
         Ok(out)
     })?;
@@ -293,8 +303,11 @@ pub fn convert_pdf_to_pngs(
     Ok(count)
 }
 
-/// Builds a single-page PDF byte buffer from a raster image (`.png`, `.jpg`, `.jpeg`, `.webp`).
-pub fn image_to_single_pdf_bytes(image_path: &Path) -> AppResult<Vec<u8>> {
+fn append_raster_page_to_doc(
+    doc: &mut LoPdfDocument,
+    pages_id: ObjectId,
+    image_path: &Path,
+) -> AppResult<ObjectId> {
     let dyn_img = image::open(image_path)
         .map_err(|e| AppError::Message(format!("读取图片失败（{}）：{e}", image_path.display())))?;
     let rgba = dyn_img.to_rgba8();
@@ -319,10 +332,13 @@ pub fn image_to_single_pdf_bytes(image_path: &Path) -> AppResult<Vec<u8>> {
         }
     }
 
-    let mut doc = LoPdfDocument::with_version("1.5");
-    let pages_id = doc.new_object_id();
+    let mut jpeg_bytes = Vec::with_capacity((width as usize) * (height as usize) / 4);
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, 92);
+    encoder
+        .encode(&rgb_raw, width, height, image::ExtendedColorType::Rgb8)
+        .map_err(|e| AppError::Message(format!("编码打印页图像失败：{e}")))?;
 
-    let mut img_stream = Stream::new(
+    let img_stream = Stream::new(
         dictionary! {
             "Type" => "XObject",
             "Subtype" => "Image",
@@ -330,10 +346,10 @@ pub fn image_to_single_pdf_bytes(image_path: &Path) -> AppResult<Vec<u8>> {
             "Height" => height as i64,
             "ColorSpace" => "DeviceRGB",
             "BitsPerComponent" => 8_i64,
+            "Filter" => "DCTDecode",
         },
-        rgb_raw,
+        jpeg_bytes,
     );
-    let _ = img_stream.compress();
     let img_id = doc.add_object(img_stream);
 
     // Normalize page dimensions to standard A4 width (595.28pt) when high-DPI screenshots are used,
@@ -355,14 +371,20 @@ pub fn image_to_single_pdf_bytes(image_path: &Path) -> AppResult<Vec<u8>> {
         },
     });
 
-    let page_id = doc.add_object(dictionary! {
+    Ok(doc.add_object(dictionary! {
         "Type" => "Page",
         "Parent" => pages_id,
         "MediaBox" => vec![0.into(), 0.into(), (pt_w as f32).into(), (pt_h as f32).into()],
         "Contents" => content_id,
         "Resources" => resources_id,
-    });
+    }))
+}
 
+/// Builds a single-page PDF byte buffer from a raster image (`.png`, `.jpg`, `.jpeg`, `.webp`).
+pub fn image_to_single_pdf_bytes(image_path: &Path) -> AppResult<Vec<u8>> {
+    let mut doc = LoPdfDocument::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let page_id = append_raster_page_to_doc(&mut doc, pages_id, image_path)?;
     doc.objects.insert(
         pages_id,
         Object::Dictionary(dictionary! {
@@ -371,7 +393,6 @@ pub fn image_to_single_pdf_bytes(image_path: &Path) -> AppResult<Vec<u8>> {
             "Count" => 1_i64,
         }),
     );
-
     let catalog_id = doc.add_object(dictionary! {
         "Type" => "Catalog",
         "Pages" => pages_id,
@@ -384,6 +405,43 @@ pub fn image_to_single_pdf_bytes(image_path: &Path) -> AppResult<Vec<u8>> {
     Ok(out)
 }
 
+/// Directly packs a sequence of raster page images into one compact, A4 print-ready PDF.
+pub fn images_to_print_pdf(image_paths: &[PathBuf], pdf_path: &Path) -> AppResult<()> {
+    if image_paths.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = pdf_path.parent() {
+        ensure_directory(parent)?;
+    }
+    let mut doc = LoPdfDocument::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let mut kids: Vec<Object> = Vec::with_capacity(image_paths.len());
+    for img_path in image_paths {
+        let page_id = append_raster_page_to_doc(&mut doc, pages_id, img_path)?;
+        kids.push(page_id.into());
+    }
+    let count = kids.len() as i64;
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => kids,
+            "Count" => count,
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+
+    let tmp = pdf_path.with_extension("pdf.tmp");
+    doc.save(&tmp)
+        .map_err(|e| AppError::Message(format!("写入打印 PDF 失败：{e}")))?;
+    fs::rename(&tmp, pdf_path)?;
+    Ok(())
+}
+
 /// Combines preview original files (`.svg` vector pages + `.png`/`.jpg`/`.webp` raster pages)
 /// into a single sibling PDF file.
 pub fn convert_originals_to_pdf(
@@ -393,6 +451,15 @@ pub fn convert_originals_to_pdf(
 ) -> AppResult<()> {
     if originals.is_empty() {
         return Ok(());
+    }
+    let has_svg = originals.iter().any(|p| {
+        p.extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("svg"))
+            .unwrap_or(false)
+    });
+    if !has_svg {
+        return images_to_print_pdf(originals, pdf_path);
     }
     if let Some(parent) = pdf_path.parent() {
         ensure_directory(parent)?;
@@ -434,60 +501,6 @@ pub fn convert_originals_to_pdf(
     fs::write(&tmp, &merged_bytes)?;
     fs::rename(&tmp, pdf_path)?;
     Ok(())
-}
-
-/// Losslessly appends multiple PDF files into `target_pdf` and writes top-level Chinese/UTF-16BE
-/// bookmarks (`Outlines`) corresponding to `(title, 1-based start page)`.
-pub fn merge_pdf_files_with_toc(
-    member_pdfs: &[(String, PathBuf)],
-    target_pdf: &Path,
-) -> AppResult<Vec<(String, usize, usize)>> {
-    if member_pdfs.is_empty() {
-        return Err(AppError::Message("没有可合并的 PDF 成员".to_string()));
-    }
-    if let Some(parent) = target_pdf.parent() {
-        ensure_directory(parent)?;
-    }
-
-    let mut toc_entries: Vec<(String, usize, usize)> = Vec::with_capacity(member_pdfs.len());
-    let merged_bytes = with_pdfium(|pdfium| {
-        let mut merged = pdfium
-            .create_new_pdf()
-            .map_err(|e| AppError::Message(format!("创建目标 PDF 失败：{e}")))?;
-        for (name, path) in member_pdfs {
-            let doc = pdfium
-                .load_pdf_from_file(path, None)
-                .map_err(|e| AppError::Message(format!("{name} 是加密或损坏的 PDF：{e}")))?;
-            let count = doc.pages().len() as usize;
-            if count == 0 {
-                return Err(AppError::Message(format!("{name} 是空 PDF")));
-            }
-            let first_page = (merged.pages().len() as usize) + 1;
-            merged
-                .pages_mut()
-                .append(&doc)
-                .map_err(|e| AppError::Message(format!("合并 {name} 失败：{e}")))?;
-            toc_entries.push((name.clone(), first_page, count));
-        }
-        merged
-            .save_to_bytes()
-            .map_err(|e| AppError::Message(format!("保存合并 PDF 失败：{e}")))
-    })?;
-
-    let tmp = target_pdf.with_extension("pdf.tmp");
-    fs::write(&tmp, &merged_bytes)?;
-
-    // Attach top-level Outlines (TOC bookmarks) using lopdf
-    let toc_pairs: Vec<(String, usize)> = toc_entries
-        .iter()
-        .map(|(title, first, _)| (title.clone(), *first))
-        .collect();
-    if let Err(err) = attach_pdf_outlines(&tmp, &toc_pairs) {
-        tracing::warn!("Failed attaching PDF outlines (merged pages remain intact): {err}");
-    }
-
-    fs::rename(&tmp, target_pdf)?;
-    Ok(toc_entries)
 }
 
 fn encode_pdf_utf16be(text: &str) -> Vec<u8> {
@@ -553,17 +566,6 @@ pub fn attach_pdf_outlines(pdf_path: &Path, toc: &[(String, usize)]) -> AppResul
     doc.save(pdf_path)
         .map_err(|e| AppError::Message(format!("保存 PDF 书签失败：{e}")))?;
     Ok(())
-}
-
-/// Counts non-whitespace Unicode characters for Word text-coverage verification.
-pub fn count_non_whitespace_chars(text: &str) -> HashMap<char, usize> {
-    let mut counts = HashMap::new();
-    for ch in text.chars() {
-        if !ch.is_whitespace() {
-            *counts.entry(ch).or_insert(0) += 1;
-        }
-    }
-    counts
 }
 
 // Keep unused-import lint clean for ImageBuffer/Rgb if referenced across helpers

@@ -5,22 +5,21 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use quick_xml::events::Event;
-use quick_xml::Reader;
 use regex::Regex;
 use serde_json::{json, Value};
 use url::Url;
 use zip::ZipArchive;
 
 use crate::converter::fonts::{
-    default_common_substitutions, ensure_word_fonts, font_directories, normalized_policy,
-    write_fontconfig_xml, FontResolutionPlan,
+    default_common_substitutions, font_directories, write_fontconfig_xml,
+    write_libreoffice_registry_xcu,
 };
 use crate::converter::pdf::{
-    convert_originals_to_pdf, count_non_whitespace_chars, inspect_pdf, merge_pdf_files_with_toc,
+    append_pdf_to_pngs, attach_pdf_outlines, convert_originals_to_pdf,
 };
+use crate::converter::svg::{convert_image_to_png, convert_svg_to_png};
 use crate::error::{AppError, AppResult};
-use crate::models::AppSettings;
+use crate::models::{ensure_directory, AppSettings, ResourceArtifacts};
 
 pub const MAX_ZIP_MEMBERS: usize = 500;
 pub const MAX_EXPANDED_BYTES: u64 = 512 * 1024 * 1024;
@@ -42,7 +41,8 @@ impl OfficeEngine {
     }
 }
 
-/// Auto-detects the best local Office-to-PDF engine without bundling heavy runtimes.
+/// Auto-detects the best local Office-to-PDF engine (Windows prefers native Word / WPS COM first;
+/// macOS & Linux use LibreOffice headless).
 pub fn detect_office_engine(settings: &AppSettings) -> Option<OfficeEngine> {
     let explicit = std::env::var("STZY_SOFFICE_PATH")
         .ok()
@@ -148,7 +148,6 @@ pub fn source_kind(path: &Path) -> AppResult<&'static str> {
         return Ok(".7z");
     }
 
-    // Check if valid ZIP / DOCX
     if slice.starts_with(b"PK\x03\x04") || slice.starts_with(b"PK\x05\x06") {
         let zf = File::open(path)?;
         if let Ok(archive) = ZipArchive::new(zf) {
@@ -202,173 +201,10 @@ pub fn source_kind(path: &Path) -> AppResult<&'static str> {
     }
 }
 
-/// Pure Rust `.docx` XML inspector: extracts all declared `w:rFonts` + `theme1.xml` typefaces
-/// and concatenates body text (`w:t`) for post-conversion character coverage verification.
-pub fn docx_content(path: &Path) -> AppResult<(BTreeSet<String>, String)> {
-    let file = File::open(path)?;
-    let mut archive = ZipArchive::new(file)
-        .map_err(|e| AppError::Message(format!("打开 DOCX 压缩结构失败：{e}")))?;
-
-    let mut total_uncompressed: u64 = 0;
-    for i in 0..archive.len() {
-        let entry = archive
-            .by_index_raw(i)
-            .map_err(|e| AppError::Message(format!("读取 DOCX 目录项失败：{e}")))?;
-        total_uncompressed = total_uncompressed.saturating_add(entry.size());
-    }
-    if total_uncompressed > MAX_EXPANDED_BYTES {
-        return Err(AppError::Message(
-            "Word 解压体积超过 512 MiB，原件已保留".to_string(),
-        ));
-    }
-
-    let mut fonts = BTreeSet::new();
-    let mut body_text = String::new();
-
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| AppError::Message(format!("读取 DOCX XML 失败：{e}")))?;
-        let name = entry.name().to_string();
-        if name == "word/theme/theme1.xml" {
-            let mut xml = String::new();
-            let _ = entry.read_to_string(&mut xml);
-            extract_theme_fonts(&xml, &mut fonts);
-            continue;
-        }
-        if !name.starts_with("word/") || !name.ends_with(".xml") {
-            continue;
-        }
-        let mut xml = String::new();
-        let _ = entry.read_to_string(&mut xml);
-        let is_document = name == "word/document.xml";
-        extract_word_xml_fonts_and_text(&xml, is_document, &mut fonts, &mut body_text);
-    }
-
-    Ok((fonts, body_text))
-}
-
-fn local_tag_name(raw: &[u8]) -> &[u8] {
-    match raw.iter().rposition(|&b| b == b':') {
-        Some(pos) => &raw[pos + 1..],
-        None => raw,
-    }
-}
-
-fn extract_word_xml_fonts_and_text(
-    xml: &str,
-    collect_text: bool,
-    fonts: &mut BTreeSet<String>,
-    body_text: &mut String,
-) {
-    let mut reader = Reader::from_str(xml);
-    let mut in_wt = false;
-
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(ref e)) => {
-                let qname = e.name();
-                let local = local_tag_name(qname.as_ref());
-                if local == b"rFonts" {
-                    collect_rfonts_attrs(e, fonts);
-                } else if collect_text && local == b"t" {
-                    in_wt = true;
-                }
-            }
-            Ok(Event::Empty(ref e)) => {
-                let qname = e.name();
-                let local = local_tag_name(qname.as_ref());
-                if local == b"rFonts" {
-                    collect_rfonts_attrs(e, fonts);
-                }
-            }
-            Ok(Event::Text(ref t)) if in_wt => {
-                if let Ok(decoded) = t.unescape() {
-                    body_text.push_str(&decoded);
-                }
-            }
-            Ok(Event::End(ref e)) => {
-                if collect_text && local_tag_name(e.name().as_ref()) == b"t" {
-                    in_wt = false;
-                }
-            }
-            Ok(Event::Eof) | Err(_) => break,
-            _ => {}
-        }
-    }
-}
-
-fn collect_rfonts_attrs(e: &quick_xml::events::BytesStart<'_>, fonts: &mut BTreeSet<String>) {
-    for attr in e.attributes().flatten() {
-        let key = local_tag_name(attr.key.as_ref());
-        if matches!(key, b"ascii" | b"hAnsi" | b"eastAsia" | b"cs") {
-            if let Ok(val) = attr.unescape_value() {
-                let trimmed = val.trim();
-                if !trimmed.is_empty() {
-                    fonts.insert(trimmed.to_string());
-                }
-            }
-        }
-    }
-}
-
-fn extract_theme_fonts(xml: &str, fonts: &mut BTreeSet<String>) {
-    let mut reader = Reader::from_str(xml);
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                let qname = e.name();
-                let local = local_tag_name(qname.as_ref());
-                let mut is_target = matches!(local, b"latin" | b"ea" | b"cs");
-                let mut typeface = String::new();
-                for attr in e.attributes().flatten() {
-                    let k = local_tag_name(attr.key.as_ref());
-                    if k == b"script" {
-                        if let Ok(v) = attr.unescape_value() {
-                            if v.trim() == "Hans" {
-                                is_target = true;
-                            }
-                        }
-                    } else if k == b"typeface" {
-                        if let Ok(v) = attr.unescape_value() {
-                            typeface = v.trim().to_string();
-                        }
-                    }
-                }
-                if is_target && !typeface.is_empty() {
-                    fonts.insert(typeface);
-                }
-            }
-            Ok(Event::Eof) | Err(_) => break,
-            _ => {}
-        }
-    }
-}
-
-pub fn page_check(expected: usize, actual: usize, tolerant: bool, label: &str) -> AppResult<Value> {
-    if expected == 0 || actual == expected {
-        return Ok(json!({
-            "expected": expected,
-            "actual": actual,
-            "tolerated": false,
-            "note": "",
-        }));
-    }
-    let note = format!("{label}页数与站点预览不一致：{actual}/{expected}");
-    if !tolerant {
-        return Err(AppError::Message(format!(
-            "{note}，需核对字体和排版；未发布 PDF"
-        )));
-    }
-    Ok(json!({
-        "expected": expected,
-        "actual": actual,
-        "tolerated": true,
-        "note": format!("{note}；使用了替代字体，按实际页数发布"),
-    }))
-}
-
-fn run_command_with_timeout(mut cmd: Command, timeout: Duration) -> AppResult<std::process::Output> {
+fn run_command_with_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+) -> AppResult<std::process::Output> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -434,71 +270,15 @@ fn stage_profile_fonts(profile_dir: &Path, font_dirs: &[PathBuf]) {
     }
 }
 
-fn libreoffice_convert(
-    soffice: &Path,
-    work_dir: &Path,
-    profile_dir: &Path,
-    input_path: &Path,
-    format_spec: &str,
-    settings: &AppSettings,
-    aliases: &BTreeMap<String, String>,
-    timeout: Duration,
-) -> AppResult<()> {
-    let dirs = font_directories(settings)?;
-    stage_profile_fonts(profile_dir, &dirs);
-    let font_conf = write_fontconfig_xml(work_dir, &dirs, aliases)?;
-    let profile_uri = Url::from_directory_path(profile_dir)
-        .or_else(|_| Url::from_file_path(profile_dir))
-        .map(|u| u.to_string())
-        .unwrap_or_else(|_| format!("file://{}", profile_dir.display()));
-
-    let mut cmd = Command::new(soffice);
-    cmd.arg(format!("-env:UserInstallation={}", profile_uri.trim_end_matches('/')))
-        .arg("--headless")
-        .arg("--norestore")
-        .arg("--convert-to")
-        .arg(format_spec)
-        .arg("--outdir")
-        .arg(work_dir)
-        .arg(input_path)
-        .env("FONTCONFIG_FILE", &font_conf);
-
-    if !dirs.is_empty() {
-        let joined = std::env::join_paths(&dirs)
-            .map(|os| os.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if !joined.is_empty() {
-            cmd.env("SAL_FONTPATH", joined);
-        }
-    }
-
-    let output = run_command_with_timeout(cmd, timeout)?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppError::Message(format!(
-            "LibreOffice 转换失败（{}），原件已保留",
-            stderr.trim()
-        )));
-    }
-    Ok(())
-}
-
 #[cfg(target_os = "windows")]
 fn windows_com_convert_to_pdf(
     prog_id: &str,
     source_path: &Path,
     pdf_path: &Path,
-    to_docx_first: Option<&Path>,
     timeout: Duration,
 ) -> AppResult<()> {
     let src = source_path.to_string_lossy().replace('\'', "''");
     let dst = pdf_path.to_string_lossy().replace('\'', "''");
-    let docx_step = if let Some(docx_out) = to_docx_first {
-        let dx = docx_out.to_string_lossy().replace('\'', "''");
-        format!("$doc.SaveAs([ref]'{dx}', [ref]16); ")
-    } else {
-        String::new()
-    };
 
     let script = format!(
         "$ErrorActionPreference = 'Stop'; \
@@ -508,7 +288,6 @@ fn windows_com_convert_to_pdf(
            $app.DisplayAlerts = 0; \
            $doc = $app.Documents.Open('{src}', $false, $true); \
            try {{ \
-             {docx_step}\
              $doc.ExportAsFixedFormat('{dst}', 17); \
            }} finally {{ \
              $doc.Close($false); \
@@ -531,13 +310,15 @@ fn windows_com_convert_to_pdf(
     Ok(())
 }
 
-pub fn word_to_pdf(
+/// Thin single-pass adapter that delegates `.doc` / `.docx` visual rendering to the best installed
+/// local Office engine (WPS / Word COM on Windows; LibreOffice with full system + bundled fonts on macOS/Linux)
+/// without any XML scraping, online font fetching, or text-extraction gates.
+fn convert_word_to_temp_pdf(
     source: &Path,
-    target: &Path,
+    target_pdf: &Path,
     timeout_secs: f64,
-    expected_pages: usize,
     settings: &AppSettings,
-) -> AppResult<FontResolutionPlan> {
+) -> AppResult<()> {
     let Some(engine) = detect_office_engine(settings) else {
         return Err(AppError::Message(
             "未安装 LibreOffice 转换核心，已保存原 Word 文件；安装 LibreOffice 后点击「继续任务」即可生成 PDF"
@@ -553,106 +334,44 @@ pub fn word_to_pdf(
     let local_source = work.join(format!("source{kind}"));
     fs::copy(source, &local_source)?;
 
-    let deadline = Instant::now() + Duration::from_secs_f64(timeout_secs.max(5.0));
+    let timeout = Duration::from_secs_f64(timeout_secs.max(10.0));
     let output_pdf = work.join("source.pdf");
-    let strict_mode = normalized_policy(settings) == "strict";
 
-    let plan: FontResolutionPlan = match engine {
+    match engine {
         OfficeEngine::LibreOffice(ref soffice) => {
             let profile = work.join("profile");
-            fs::create_dir_all(profile.join("user"))?;
-            fs::write(
-                profile.join("user/registrymodifications.xcu"),
-                r#"<?xml version="1.0"?><oor:items xmlns:oor="http://openoffice.org/2001/registry"><item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="MacroSecurityLevel" oor:op="fuse"><value>3</value></prop></item></oor:items>"#,
-            )?;
+            let dirs = font_directories(settings)?;
+            let aliases = default_common_substitutions(settings);
+            write_libreoffice_registry_xcu(&profile, &aliases)?;
+            stage_profile_fonts(&profile, &dirs);
+            let font_conf = write_fontconfig_xml(work, &dirs, &aliases)?;
+            let profile_uri = Url::from_directory_path(&profile)
+                .or_else(|_| Url::from_file_path(&profile))
+                .map(|u| u.to_string())
+                .unwrap_or_else(|_| format!("file://{}", profile.display()));
 
-            let mut inspection_docx = local_source.clone();
-            let mut can_inspect_docx = kind == ".docx";
-            if kind == ".doc" {
-                let rem = deadline.saturating_duration_since(Instant::now());
-                if libreoffice_convert(
-                    soffice,
-                    work,
-                    &profile,
-                    &local_source,
-                    "docx:Office Open XML Text",
-                    settings,
-                    &BTreeMap::new(),
-                    rem,
-                )
-                .is_ok()
-                {
-                    let candidate = work.join("source.docx");
-                    if candidate.exists() {
-                        inspection_docx = candidate;
-                        can_inspect_docx = true;
-                    }
-                }
-            }
+            let mut cmd = Command::new(soffice);
+            cmd.arg(format!(
+                "-env:UserInstallation={}",
+                profile_uri.trim_end_matches('/')
+            ))
+            .arg("--headless")
+            .arg("--norestore")
+            .arg("--convert-to")
+            .arg("pdf:writer_pdf_Export")
+            .arg("--outdir")
+            .arg(work)
+            .arg(&local_source)
+            .env("FONTCONFIG_FILE", &font_conf);
 
-            let (declared_fonts, source_text, mut resolved) = if can_inspect_docx {
-                match docx_content(&inspection_docx) {
-                    Ok((fonts, text)) => {
-                        let plan = ensure_word_fonts(&fonts, settings)?;
-                        (fonts, text, plan)
-                    }
-                    Err(_) => (
-                        BTreeSet::new(),
-                        String::new(),
-                        FontResolutionPlan {
-                            substituted: default_common_substitutions(settings),
-                            policy: normalized_policy(settings),
-                            visual_review: true,
-                            ..FontResolutionPlan::default()
-                        },
-                    ),
-                }
-            } else {
-                (
-                    BTreeSet::new(),
-                    String::new(),
-                    FontResolutionPlan {
-                        substituted: default_common_substitutions(settings),
-                        policy: normalized_policy(settings),
-                        visual_review: true,
-                        ..FontResolutionPlan::default()
-                    },
-                )
-            };
-
-            let _ = declared_fonts;
-            if strict_mode && !resolved.missing.is_empty() {
+            let output = run_command_with_timeout(cmd, timeout)?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(AppError::Message(format!(
-                    "缺少原文字体：{}；原件已保留",
-                    resolved.missing.join("、")
+                    "LibreOffice 转换失败（{}），原件已保留",
+                    stderr.trim()
                 )));
             }
-
-            let rem = deadline.saturating_duration_since(Instant::now());
-            libreoffice_convert(
-                soffice,
-                work,
-                &profile,
-                &local_source,
-                "pdf:writer_pdf_Export",
-                settings,
-                &resolved.substituted,
-                rem,
-            )?;
-
-            if !output_pdf.exists() {
-                return Err(AppError::Message(
-                    "文档转换失败（可能受密码保护或格式损坏），原文件已保存".to_string(),
-                ));
-            }
-            verify_word_pdf_output(
-                &output_pdf,
-                &source_text,
-                expected_pages,
-                strict_mode,
-                &mut resolved,
-            )?;
-            resolved
         }
         OfficeEngine::MsWordCom | OfficeEngine::WpsCom => {
             #[cfg(target_os = "windows")]
@@ -664,145 +383,21 @@ pub fn word_to_pdf(
                 } else {
                     "WPS.Application"
                 };
-                let docx_temp = if kind == ".doc" {
-                    Some(work.join("source_inspected.docx"))
-                } else {
-                    None
-                };
-                let rem = deadline.saturating_duration_since(Instant::now());
-                windows_com_convert_to_pdf(
-                    prog_id,
-                    &local_source,
-                    &output_pdf,
-                    docx_temp.as_deref(),
-                    rem,
-                )?;
-                let inspect_target = docx_temp.as_deref().unwrap_or(&local_source);
-                let (declared_fonts, source_text) = if inspect_target.exists() {
-                    docx_content(inspect_target).unwrap_or_default()
-                } else {
-                    (BTreeSet::new(), String::new())
-                };
-                let mut resolved = ensure_word_fonts(&declared_fonts, settings)?;
-                if strict_mode && !resolved.missing.is_empty() {
-                    return Err(AppError::Message(format!(
-                        "缺少原文字体：{}；原件已保留",
-                        resolved.missing.join("、")
-                    )));
-                }
-                verify_word_pdf_output(
-                    &output_pdf,
-                    &source_text,
-                    expected_pages,
-                    strict_mode,
-                    &mut resolved,
-                )?;
-                resolved
+                windows_com_convert_to_pdf(prog_id, &local_source, &output_pdf, timeout)?;
             }
             #[cfg(not(target_os = "windows"))]
             {
                 return Err(AppError::Message("当前系统不支持 Windows COM 转换".to_string()));
             }
         }
-    };
-
-    fs::copy(&output_pdf, target)?;
-    Ok(plan)
-}
-
-#[allow(dead_code)]
-fn should_ignore_coverage_char(ch: char) -> bool {
-    if ch.is_whitespace() || ch.is_control() {
-        return true;
     }
-    // Ignore Private Use Area (Word Wingdings/Symbol bullets), zero-width/variation selectors,
-    // replacement chars, and decorative list markers that render as vector shapes in PDF.
-    matches!(
-        ch,
-        '\u{00AD}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{2028}'..='\u{202F}'
-            | '\u{2060}'..='\u{206F}'
-            | '\u{FE00}'..='\u{FE0F}'
-            | '\u{FEFF}'
-            | '\u{E000}'..='\u{F8FF}'
-            | '\u{FFF9}'..='\u{FFFD}'
-            | '•'
-            | '·'
-            | '▪'
-            | '▫'
-            | '■'
-            | '□'
-            | '▲'
-            | '△'
-            | '◆'
-            | '◇'
-            | '○'
-            | '●'
-            | '★'
-            | '☆'
-            | '✓'
-            | '✔'
-            | '✗'
-            | '✘'
-    )
-}
 
-#[allow(dead_code)]
-fn compute_text_coverage(source_text: &str, extracted_text: &str) -> (usize, usize, Vec<char>) {
-    let raw_src = count_non_whitespace_chars(source_text);
-    let rendered = count_non_whitespace_chars(extracted_text);
-
-    let mut total_needed = 0usize;
-    let mut total_matched = 0usize;
-    let mut missing_samples = Vec::new();
-
-    for (ch, needed) in raw_src {
-        if should_ignore_coverage_char(ch) {
-            continue;
-        }
-        total_needed = total_needed.saturating_add(needed);
-        let got = rendered.get(&ch).copied().unwrap_or(0);
-        total_matched = total_matched.saturating_add(got.min(needed));
-        if got < needed && missing_samples.len() < 5 {
-            missing_samples.push(ch);
-        }
-    }
-    (total_matched, total_needed, missing_samples)
-}
-
-fn verify_word_pdf_output(
-    output_pdf: &Path,
-    source_text: &str,
-    expected_pages: usize,
-    strict_mode: bool,
-    plan: &mut FontResolutionPlan,
-) -> AppResult<()> {
-    let inspection = inspect_pdf(output_pdf, strict_mode)?;
-    if inspection.page_count == 0 {
+    if !output_pdf.exists() {
         return Err(AppError::Message(
-            "转换后的 PDF 没有有效页面，原文件已保存".to_string(),
+            "文档转换失败（可能受密码保护或格式损坏），原文件已保存".to_string(),
         ));
     }
-
-    // Visual-first mode: formulas and embedded objects render as vector paths/images rather than
-    // extractable plain text. As long as pages rendered cleanly, publish the PDF & screenshots!
-    plan.page_check = page_check(
-        expected_pages,
-        inspection.page_count,
-        !strict_mode || plan.visual_review,
-        "",
-    )?;
-
-    if strict_mode && !source_text.trim().is_empty() {
-        let (matched, needed, _) = compute_text_coverage(source_text, &inspection.extracted_text);
-        if needed > 0 && matched < needed {
-            return Err(AppError::Message(
-                "Word 转换文字覆盖校验失败（严格模式）；未发布 PDF".to_string(),
-            ));
-        }
-    }
-
+    fs::copy(&output_pdf, target_pdf)?;
     Ok(())
 }
 
@@ -856,17 +451,14 @@ fn zip_member_role_rank(filename: &str) -> u8 {
         .unwrap_or(filename)
         .to_lowercase();
 
-    // Explicit blank/student exam paper markers always stay in bucket 0
     if stem.contains("原卷") || stem.contains("学生版") || stem.contains("空白卷") {
         return 0;
     }
 
-    // Answer sheet / card
     if stem.contains("答题卡") || stem.contains("答题纸") || stem.contains("答题卷") {
         return 1;
     }
 
-    // Listening script text
     if stem.contains("听力文本")
         || stem.contains("听力原文")
         || stem.contains("听力材料")
@@ -877,7 +469,6 @@ fn zip_member_role_rank(filename: &str) -> u8 {
         return 2;
     }
 
-    // Strip combined-paper phrases ("试题含答案" / "附答案" / "带解析") before checking standalone answer keys
     let mut cleaned = stem;
     for combined_tag in [
         "含参考答案",
@@ -1034,7 +625,8 @@ pub fn unpack_zip_bundle(
             suffix.as_str(),
             ".mp3" | ".wav" | ".m4a" | ".wma" | ".aac" | ".ogg" | ".flac"
         ) {
-            let safe_audio_name = filename.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            let safe_audio_name =
+                filename.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
             let target = directory.join(format!(
                 "audio_{:02}_{safe_audio_name}",
                 bundle.companion_audios.len() + 1
@@ -1117,262 +709,211 @@ pub fn humanize_conversion_error(raw: &str, suffix: &str) -> String {
     }
 }
 
-/// Converts any supported source file (`.pdf`, `.doc`, `.docx`, `.zip`, `.svg`, raster image) to a verified
-/// target PDF and returns the structured conversion report matching `conversion-report.json`.
+/// Renders one leaf source file (`.pdf`, `.doc`, `.docx`, `.svg`, or raster image) directly into
+/// `练习{start_index}.png ..` inside `page_dir`, returning the number of pages rendered.
+fn render_leaf_source_to_pngs(
+    source: &Path,
+    page_dir: &Path,
+    start_index: usize,
+    timeout_secs: f64,
+    settings: &AppSettings,
+) -> AppResult<usize> {
+    ensure_directory(page_dir)?;
+    let artifacts = ResourceArtifacts::new(page_dir.to_path_buf());
+    let kind = source_kind(source)?;
+
+    match kind {
+        ".pdf" => {
+            let count = append_pdf_to_pngs(source, page_dir, start_index, settings)?;
+            if count == 0 {
+                return Err(AppError::Message("PDF 没有可渲染的有效页面".to_string()));
+            }
+            Ok(count)
+        }
+        ".doc" | ".docx" => {
+            let temp_dir = tempfile::Builder::new().prefix("stzy-word-").tempdir()?;
+            let temp_pdf = temp_dir.path().join("word.pdf");
+            convert_word_to_temp_pdf(source, &temp_pdf, timeout_secs, settings)?;
+            let count = append_pdf_to_pngs(&temp_pdf, page_dir, start_index, settings)?;
+            if count == 0 {
+                return Err(AppError::Message("文档转换后没有可渲染的有效页面".to_string()));
+            }
+            Ok(count)
+        }
+        ".svg" => {
+            convert_svg_to_png(source, &artifacts.page_png(start_index.max(1)), settings)?;
+            Ok(1)
+        }
+        ".png" | ".jpg" | ".jpeg" | ".webp" => {
+            convert_image_to_png(source, &artifacts.page_png(start_index.max(1)))?;
+            Ok(1)
+        }
+        other => Err(AppError::Message(humanize_conversion_error(
+            &format!("暂不支持 {other} 转换"),
+            other,
+        ))),
+    }
+}
+
+/// Unified image-first print pipeline:
+/// 1. Renders any supported source (`.pdf`, `.doc`, `.docx`, `.zip`, `.svg`, image) into a continuous
+///    sequence of print-ready 180-DPI images `练习1.png .. 练习N.png` inside `page_dir`.
+/// 2. Stitches those exact page images into a standard A4 print-ready `target_pdf` (attaching PDF
+///    Outlines bookmarks when unpacking multi-file `.zip` archives).
+pub fn render_source_to_pages_and_pdf(
+    source: &Path,
+    page_dir: &Path,
+    target_pdf: &Path,
+    timeout_secs: f64,
+    files_metadata: &[Value],
+    settings: &AppSettings,
+) -> AppResult<(usize, Value)> {
+    ensure_directory(page_dir)?;
+    let kind = source_kind(source)?;
+    let mut parts_report: Vec<Value> = Vec::new();
+    let mut toc_pairs: Vec<(String, usize)> = Vec::new();
+    let mut self_heal_notes: Vec<String> = Vec::new();
+    let mut exported_companions: Vec<String> = Vec::new();
+
+    let total_pages = if kind == ".zip" {
+        let temp_dir = tempfile::Builder::new().prefix("stzy-zip-").tempdir()?;
+        let work = temp_dir.path();
+        let file_order: Vec<String> = files_metadata
+            .iter()
+            .filter_map(|item| item.get("fileName").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        let bundle = unpack_zip_bundle(source, work, &file_order)?;
+        let doc_count = bundle.documents.len();
+        let zip_total_timeout =
+            (timeout_secs.max(30.0) * (doc_count.max(1) as f64)).clamp(90.0, 900.0);
+        let deadline = Instant::now() + Duration::from_secs_f64(zip_total_timeout);
+
+        for (audio_name, audio_tmp) in &bundle.companion_audios {
+            let dst = page_dir.join(format!("companion_{audio_name}"));
+            if fs::copy(audio_tmp, &dst).is_ok() {
+                exported_companions.push(audio_name.clone());
+            }
+        }
+        if !bundle.companion_audios.is_empty() {
+            self_heal_notes.push(format!(
+                "已保留配套音频 {} 个",
+                bundle.companion_audios.len()
+            ));
+        }
+
+        let mut next_page_index = 1usize;
+        let mut skipped_members: Vec<String> = Vec::new();
+        let mut last_member_err = String::new();
+
+        for (name, member_path) in bundle.documents {
+            let base_name = name.rsplit('/').next().unwrap_or(&name).to_string();
+            let Ok(member_kind) = source_kind(&member_path) else {
+                skipped_members.push(base_name);
+                continue;
+            };
+            if matches!(member_kind, ".zip" | ".rar" | ".7z") {
+                skipped_members.push(base_name);
+                continue;
+            }
+            let rem = deadline.saturating_duration_since(Instant::now());
+            if rem.is_zero() {
+                last_member_err = "压缩包渲染超时".to_string();
+                break;
+            }
+            let per_doc_timeout = rem.as_secs_f64().min(timeout_secs.max(45.0));
+            let first_page = next_page_index;
+
+            match render_leaf_source_to_pngs(
+                &member_path,
+                page_dir,
+                first_page,
+                per_doc_timeout,
+                settings,
+            ) {
+                Ok(pages) => {
+                    next_page_index += pages;
+                    toc_pairs.push((name.clone(), first_page));
+                    parts_report.push(json!({
+                        "name": name,
+                        "pages": pages,
+                        "first_page": first_page,
+                        "source_kind": member_kind,
+                        "layout": "rendered_print_pages",
+                    }));
+                }
+                Err(e) => {
+                    last_member_err = format!("《{base_name}》渲染失败：{e}");
+                    skipped_members.push(base_name);
+                }
+            }
+        }
+
+        let rendered_total = next_page_index.saturating_sub(1);
+        if rendered_total == 0 {
+            let reason = if !last_member_err.is_empty() {
+                format!("{last_member_err}，原压缩包已保留")
+            } else {
+                "压缩包内无成功渲染的子文档，原压缩包已保留".to_string()
+            };
+            return Err(AppError::Message(reason));
+        }
+        if !skipped_members.is_empty() {
+            self_heal_notes.push(format!(
+                "已跳过 {} 个无法转换的附加文件，完整原文件见源文件.zip",
+                skipped_members.len()
+            ));
+        }
+        rendered_total
+    } else {
+        render_leaf_source_to_pngs(source, page_dir, 1, timeout_secs, settings)?
+    };
+
+    let artifacts = ResourceArtifacts::new(page_dir.to_path_buf());
+    let png_paths: Vec<PathBuf> = (1..=total_pages).map(|i| artifacts.page_png(i)).collect();
+    convert_originals_to_pdf(&png_paths, target_pdf, settings)?;
+
+    if !toc_pairs.is_empty() {
+        if let Err(err) = attach_pdf_outlines(target_pdf, &toc_pairs) {
+            tracing::warn!("Failed attaching PDF outlines to print PDF: {err}");
+        }
+    }
+
+    let report = json!({
+        "source_kind": kind,
+        "pages": total_pages,
+        "files": parts_report,
+        "companions": exported_companions,
+        "self_heal_note": self_heal_notes.join("；"),
+        "layout": "rendered_print_pages",
+    });
+    Ok((total_pages, report))
+}
+
+/// Convenience wrapper producing `target` PDF via the unified image-first print pipeline.
 pub fn source_to_pdf(
     source: &Path,
     target: &Path,
     timeout_secs: f64,
-    expected_pages: usize,
+    _expected_pages: usize,
     files_metadata: &[Value],
     settings: &AppSettings,
 ) -> AppResult<Value> {
-    let kind = source_kind(source)?;
-    let mut parts_report: Vec<Value> = Vec::new();
-    let mut font_plan = FontResolutionPlan {
-        policy: normalized_policy(settings),
-        ..FontResolutionPlan::default()
-    };
-    let mut parts_tolerated = false;
-    let mut self_heal_notes: Vec<String> = Vec::new();
-    let mut exported_companions: Vec<String> = Vec::new();
-
-    match kind {
-        ".pdf" => {
-            fs::copy(source, target)?;
-        }
-        ".doc" | ".docx" => {
-            font_plan = word_to_pdf(source, target, timeout_secs, expected_pages, settings)?;
-            let note = font_plan.summary_note();
-            if !note.is_empty() {
-                self_heal_notes.push(note);
-            }
-        }
-        ".zip" => {
-            let temp_dir = tempfile::Builder::new().prefix("stzy-zip-").tempdir()?;
-            let work = temp_dir.path();
-            let file_order: Vec<String> = files_metadata
-                .iter()
-                .filter_map(|item| item.get("fileName").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect();
-            let bundle = unpack_zip_bundle(source, work, &file_order)?;
-            let doc_count = bundle.documents.len();
-            let zip_total_timeout =
-                (timeout_secs.max(30.0) * (doc_count.max(1) as f64)).clamp(90.0, 900.0);
-            let deadline = Instant::now() + Duration::from_secs_f64(zip_total_timeout);
-
-            if let Some(out_dir) = target.parent() {
-                for (audio_name, audio_tmp) in &bundle.companion_audios {
-                    let dst = out_dir.join(format!("companion_{audio_name}"));
-                    if fs::copy(audio_tmp, &dst).is_ok() {
-                        exported_companions.push(audio_name.clone());
-                    }
-                }
-            }
-            if !bundle.companion_audios.is_empty() {
-                self_heal_notes.push(format!(
-                    "已保留配套音频 {} 个",
-                    bundle.companion_audios.len()
-                ));
-            }
-
-            let mut converted_member_pdfs: Vec<(String, PathBuf)> =
-                Vec::with_capacity(doc_count);
-            let mut member_reports: Vec<(String, Value)> = Vec::with_capacity(doc_count);
-            let mut zip_installed_fonts = BTreeSet::new();
-            let mut zip_substituted_fonts = BTreeMap::new();
-            let mut skipped_members: Vec<String> = Vec::new();
-            let mut last_member_err = String::new();
-
-            for (name, member_path) in bundle.documents {
-                let base_name = name.rsplit('/').next().unwrap_or(&name).to_string();
-                let Ok(member_kind) = source_kind(&member_path) else {
-                    skipped_members.push(base_name);
-                    continue;
-                };
-                if matches!(member_kind, ".zip" | ".rar" | ".7z") {
-                    skipped_members.push(base_name);
-                    continue;
-                }
-                let rem = deadline.saturating_duration_since(Instant::now());
-                if rem.is_zero() {
-                    last_member_err = "压缩包转换超时".to_string();
-                    break;
-                }
-                let per_doc_timeout = rem.as_secs_f64().min(timeout_secs.max(45.0));
-                let expected_member_pages = files_metadata
-                    .iter()
-                    .find(|f| {
-                        f.get("fileName")
-                            .and_then(Value::as_str)
-                            .map(|fnm| fnm == name || fnm == base_name)
-                            .unwrap_or(false)
-                    })
-                    .and_then(|f| f.get("totalPage"))
-                    .and_then(|v| {
-                        v.as_u64()
-                            .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-                    })
-                    .unwrap_or(0) as usize;
-
-                let stem = member_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("part");
-                let member_pdf = work.join(format!("{stem}-converted.pdf"));
-                let m_rep = match source_to_pdf(
-                    &member_path,
-                    &member_pdf,
-                    per_doc_timeout,
-                    expected_member_pages,
-                    &[],
-                    settings,
-                ) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        last_member_err = format!("《{base_name}》转换失败：{e}");
-                        skipped_members.push(base_name);
-                        continue;
-                    }
-                };
-
-                if let Some(f_obj) = m_rep.get("fonts") {
-                    if let Some(inst) = f_obj.get("installed").and_then(Value::as_array) {
-                        for item in inst.iter().filter_map(Value::as_str) {
-                            zip_installed_fonts.insert(item.to_string());
-                        }
-                    }
-                    if let Some(sub) = f_obj.get("substituted").and_then(Value::as_object) {
-                        for (k, v) in sub {
-                            if let Some(vs) = v.as_str() {
-                                zip_substituted_fonts.insert(k.clone(), vs.to_string());
-                            }
-                        }
-                    }
-                }
-
-                let m_insp = inspect_pdf(&member_pdf, false)?;
-                let m_check = if m_rep
-                    .get("page_check")
-                    .and_then(Value::as_object)
-                    .map(|o| !o.is_empty())
-                    .unwrap_or(false)
-                {
-                    m_rep.get("page_check").cloned().unwrap_or_else(|| json!({}))
-                } else {
-                    page_check(
-                        expected_member_pages,
-                        m_insp.page_count,
-                        normalized_policy(settings) != "strict",
-                        &format!("{base_name} "),
-                    )?
-                };
-                if m_check
-                    .get("tolerated")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    parts_tolerated = true;
-                }
-
-                converted_member_pdfs.push((name.clone(), member_pdf));
-                member_reports.push((name, m_rep));
-            }
-
-            if converted_member_pdfs.is_empty() {
-                let reason = if !last_member_err.is_empty() {
-                    format!("{last_member_err}，原压缩包已保留")
-                } else {
-                    "压缩包内无成功转换的子文档（可能含嵌套压缩包），原压缩包已保留".to_string()
-                };
-                return Err(AppError::Message(reason));
-            }
-            if !skipped_members.is_empty() {
-                self_heal_notes.push(format!(
-                    "已跳过 {} 个无法转换的附加文件，完整原文件见源文件.zip",
-                    skipped_members.len()
-                ));
-            }
-
-            font_plan.installed = zip_installed_fonts.into_iter().collect();
-            font_plan.substituted = zip_substituted_fonts;
-            let zip_font_note = font_plan.summary_note();
-            if !zip_font_note.is_empty() {
-                self_heal_notes.push(zip_font_note);
-            }
-
-            let merged_toc = merge_pdf_files_with_toc(&converted_member_pdfs, target)?;
-            for ((name, first_page, pages), (_, m_rep)) in
-                merged_toc.into_iter().zip(member_reports.into_iter())
-            {
-                parts_report.push(json!({
-                    "name": name,
-                    "pages": pages,
-                    "first_page": first_page,
-                    "source_kind": m_rep.get("source_kind").cloned().unwrap_or(json!("")),
-                    "layout": m_rep.get("layout").cloned().unwrap_or(json!("")),
-                    "fonts": m_rep.get("fonts").cloned().unwrap_or(json!({})),
-                    "page_check": m_rep.get("page_check").cloned().unwrap_or(json!({})),
-                }));
-            }
-        }
-        ".png" | ".jpg" | ".jpeg" | ".webp" | ".svg" => {
-            convert_originals_to_pdf(&[source.to_path_buf()], target, settings)?;
-        }
-        other => {
-            return Err(AppError::Message(humanize_conversion_error(
-                &format!("暂不支持 {other} 转 PDF"),
-                other,
-            )));
-        }
-    }
-
-    let final_insp = inspect_pdf(target, false)?;
-    let final_check = page_check(
-        expected_pages,
-        final_insp.page_count,
-        normalized_policy(settings) != "strict" || font_plan.visual_review || parts_tolerated,
-        "",
+    let temp_pages = tempfile::Builder::new().prefix("stzy-pages-").tempdir()?;
+    let (_count, report) = render_source_to_pages_and_pdf(
+        source,
+        temp_pages.path(),
+        target,
+        timeout_secs,
+        files_metadata,
+        settings,
     )?;
-
-    let all_source_pdf = matches!(kind, ".pdf" | ".zip")
-        && parts_report.iter().all(|p| {
-            p.get("layout")
-                .and_then(Value::as_str)
-                .map(|l| l == "source_pdf_pages")
-                .unwrap_or(false)
-        });
-    let layout = if all_source_pdf {
-        "source_pdf_pages"
-    } else {
-        "converted_requires_visual_review"
-    };
-
-    Ok(json!({
-        "source_kind": kind,
-        "pages": final_insp.page_count,
-        "files": parts_report,
-        "companions": exported_companions,
-        "fonts": font_plan.to_report_json(),
-        "page_check": final_check,
-        "self_heal_note": self_heal_notes.join("；"),
-        "layout": layout,
-    }))
+    Ok(report)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn text_coverage_ignores_pua_wingdings_and_bullets() {
-        let src = "一、选择题（共10题）\u{F0FE}\u{F06C} • 第一题：已知集合 A={1,2}";
-        let rendered = "一、选择题（共10题） 第一题：已知集合 A={1,2}";
-        let (matched, needed, missing) = compute_text_coverage(src, rendered);
-        assert_eq!(matched, needed);
-        assert!(missing.is_empty());
-    }
 
     #[test]
     fn humanize_error_explains_rar_and_passwords_clearly() {
