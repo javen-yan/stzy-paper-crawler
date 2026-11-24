@@ -135,7 +135,14 @@ impl CrawlRunner {
     }
 
     async fn run_inner(&self) -> AppResult<()> {
-        let catalog = TagCatalog::fetch(&self.client, &self.settings.study_phase_code).await?;
+        let catalog = match TagCatalog::fetch(&self.client, &self.settings.study_phase_code).await {
+            Ok(c) => c,
+            Err(err) if err.is_cancelled() => {
+                self.stats.lock().paused = true;
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        };
         let combos = catalog.combos(&self.filters)?;
         {
             let mut st = self.stats.lock();
@@ -286,7 +293,7 @@ impl CrawlRunner {
                     stats.resources_total += matched;
                     stats.filtered_skipped += filtered;
                 }
-                Err(AppError::Cancelled) => {
+                Err(err) if err.is_cancelled() => {
                     stats.paused = true;
                     break;
                 }
@@ -413,7 +420,7 @@ impl CrawlRunner {
 
             let data = match self.list_resources_with_retry(combo, page_num).await {
                 Ok(d) => d,
-                Err(AppError::Cancelled) => return Ok(ComboOutcome::Stopped),
+                Err(err) if err.is_cancelled() => return Ok(ComboOutcome::Stopped),
                 Err(err @ AppError::StzyApi { .. }) => return Err(err),
                 Err(exc) => {
                     self.stats.lock().failed += 1;
@@ -518,7 +525,7 @@ impl CrawlRunner {
                 .await
             {
                 Ok(data) => return Ok(data),
-                Err(AppError::Cancelled) => return Err(AppError::Cancelled),
+                Err(err) if err.is_cancelled() => return Err(AppError::Cancelled),
                 Err(err @ AppError::StzyApi { .. }) => {
                     if err.requires_login() {
                         return Err(err);
@@ -576,20 +583,40 @@ impl CrawlRunner {
             let runner = self.clone();
             let sem = page_sem.clone();
             join_set.spawn(async move {
-                let Ok(_permit) = sem.acquire().await else {
-                    return;
+                let permit = tokio::select! {
+                    _ = runner.cancel.cancelled() => return,
+                    p = sem.acquire() => match p {
+                        Ok(p) => p,
+                        Err(_) => return,
+                    },
                 };
                 if runner.cancel.is_cancelled() {
+                    drop(permit);
                     return;
                 }
                 runner.handle_single_resource(record).await;
+                drop(permit);
             });
         }
 
-        while join_set.join_next().await.is_some() {
-            if self.cancel.is_cancelled() {
-                join_set.abort_all();
+        loop {
+            if join_set.is_empty() {
                 break;
+            }
+            tokio::select! {
+                _ = self.cancel.cancelled() => {
+                    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+                        while join_set.join_next().await.is_some() {}
+                    }).await;
+                    join_set.abort_all();
+                    while join_set.join_next().await.is_some() {}
+                    break;
+                }
+                res = join_set.join_next() => {
+                    if res.is_none() {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -619,6 +646,7 @@ impl CrawlRunner {
             p = self.download_semaphore.acquire() => p.map_err(|_| AppError::Cancelled),
         };
 
+        let mut interrupted = false;
         match global_permit {
             Ok(_permit) => match downloader.handle_resource(&mut record).await {
                 Ok(result) => {
@@ -638,9 +666,11 @@ impl CrawlRunner {
                         }
                     }
                 }
-                Err(AppError::Cancelled) => {
+                Err(err) if err.is_cancelled() || self.cancel.is_cancelled() => {
                     record.status = ResourceStatus::Pending;
+                    record.error.clear();
                     self.stats.lock().paused = true;
+                    interrupted = true;
                 }
                 Err(exc) => {
                     record.status = ResourceStatus::Failed;
@@ -651,11 +681,15 @@ impl CrawlRunner {
             },
             Err(_) => {
                 record.status = ResourceStatus::Pending;
+                record.error.clear();
                 self.stats.lock().paused = true;
+                interrupted = true;
             }
         }
 
-        self.stats.lock().resources_completed += 1;
+        if !interrupted {
+            self.stats.lock().resources_completed += 1;
+        }
         (self.on_record)(record.clone());
         if record.status == ResourceStatus::Completed {
             (self.on_log)(format!(

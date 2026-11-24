@@ -160,7 +160,7 @@ impl DownloadService {
                         paid_unavailable: pdf_res.paid_unavailable,
                     });
                 }
-                Err(AppError::Cancelled) => return Err(AppError::Cancelled),
+                Err(err) if err.is_cancelled() => return Err(AppError::Cancelled),
                 Err(exc) => {
                     return Ok(DownloadResult {
                         status: ResourceStatus::Partial,
@@ -233,6 +233,9 @@ impl DownloadService {
                 record.resource_id
             ));
             let url_res = self.account_scheduler.download_pdf_url(record).await;
+            if self.client.cancel.is_cancelled() {
+                return Err(AppError::Cancelled);
+            }
             if url_res.status == Some(ResourceStatus::PaidUnavailable) {
                 let mut err = if url_res.error.is_empty() {
                     "无账号支持，请补充 VIP 账号后恢复任务".to_string()
@@ -288,7 +291,7 @@ impl DownloadService {
                     images_added,
                 ))
             }
-            Err(AppError::Cancelled) => Err(AppError::Cancelled),
+            Err(err) if err.is_cancelled() => Err(AppError::Cancelled),
             Err(exc) => {
                 let saved_count = DocumentConverter::saved_picture_count_from_dir(&directory);
                 let expected_pages = record.page_count;
@@ -339,6 +342,9 @@ impl DownloadService {
                 record.resource_id
             ));
             let res = self.account_scheduler.download_pdf_url(record).await;
+            if self.client.cancel.is_cancelled() {
+                return Err(AppError::Cancelled);
+            }
             if res.status == Some(ResourceStatus::PaidUnavailable) {
                 let reason = if res.error.is_empty() {
                     "原文不可下载"
@@ -395,6 +401,7 @@ impl DownloadService {
                         files_meta = arr.iter().filter(|v| v.is_object()).cloned().collect();
                     }
                 }
+                Err(err) if err.is_cancelled() => return Err(AppError::Cancelled),
                 Err(exc) => {
                     (self.on_log)(format!(
                         "ZIP 子文件目录不可用，按文件名排序：{} - {exc}",
@@ -447,7 +454,7 @@ impl DownloadService {
                 }
                 Ok(res)
             }
-            Err(AppError::Cancelled) => Err(AppError::Cancelled),
+            Err(err) if err.is_cancelled() => Err(AppError::Cancelled),
             Err(exc) => Ok(DownloadResult {
                 status: ResourceStatus::Partial,
                 saved_pages: 0,

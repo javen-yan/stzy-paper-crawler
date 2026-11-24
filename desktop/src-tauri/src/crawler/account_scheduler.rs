@@ -44,7 +44,23 @@ impl AccountScheduler {
     }
 
     pub async fn download_pdf_url(&self, record: &ResourceRecord) -> DownloadUrlResult {
+        if self.client.cancel.is_cancelled() {
+            return DownloadUrlResult {
+                url: String::new(),
+                status: None,
+                error: "任务已停止".to_string(),
+                paid_unavailable: 0,
+            };
+        }
         let mut attempts = self.scheduled_attempts(record).await;
+        if self.client.cancel.is_cancelled() {
+            return DownloadUrlResult {
+                url: String::new(),
+                status: None,
+                error: "任务已停止".to_string(),
+                paid_unavailable: 0,
+            };
+        }
         if attempts.is_empty() {
             let default_headers = self
                 .client
@@ -63,6 +79,14 @@ impl AccountScheduler {
         let mut diagnostics = Vec::new();
 
         for attempt in attempts {
+            if self.client.cancel.is_cancelled() {
+                return DownloadUrlResult {
+                    url: String::new(),
+                    status: None,
+                    error: "任务已停止".to_string(),
+                    paid_unavailable: 0,
+                };
+            }
             match self
                 .api
                 .download_resource_url(&record.resource_id, &attempt.headers, &record.resource_name)
@@ -86,9 +110,26 @@ impl AccountScheduler {
                 Ok(_) => {
                     last_error = "接口未返回 PDF 地址".to_string();
                 }
+                Err(err) if err.is_cancelled() => {
+                    return DownloadUrlResult {
+                        url: String::new(),
+                        status: None,
+                        error: "任务已停止".to_string(),
+                        paid_unavailable: 0,
+                    };
+                }
                 Err(err) => {
                     last_error = Self::user_facing_error(&err.user_message());
                 }
+            }
+
+            if self.client.cancel.is_cancelled() {
+                return DownloadUrlResult {
+                    url: String::new(),
+                    status: None,
+                    error: "任务已停止".to_string(),
+                    paid_unavailable: 0,
+                };
             }
 
             let diag = if attempt
@@ -142,6 +183,9 @@ impl AccountScheduler {
         let accounts = self.client.enabled_valid_accounts().await.unwrap_or_default();
         let mut indexed = Vec::with_capacity(accounts.len());
         for (idx, acc) in accounts.into_iter().enumerate() {
+            if self.client.cancel.is_cancelled() {
+                break;
+            }
             let headers = self.client.headers_for_account(&acc);
             let mut diagnosis = json!({});
             if record.price > 0.0 {

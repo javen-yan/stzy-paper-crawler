@@ -1062,6 +1062,22 @@ impl SqliteStore {
         Ok(out)
     }
 
+    pub fn reset_downloading_resources_to_pending(&self, task_id: &str) -> AppResult<usize> {
+        let conn = self.connect()?;
+        let now = now_iso_seconds();
+        let changed = conn.execute(
+            r#"
+            UPDATE domain_task_resources
+            SET status = 'pending',
+                error = '',
+                updated_at = ?2
+            WHERE task_id = ?1 AND status = 'downloading'
+            "#,
+            params![task_id, now],
+        )?;
+        Ok(changed)
+    }
+
     pub fn resources(
         &self,
         task_id: &str,

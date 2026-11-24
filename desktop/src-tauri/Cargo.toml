@@ -1,6 +1,6 @@
 [package]
 name = "stzy-desktop"
-version = "0.3.6"
+version = "0.3.7"
 description = "PaperDesk Native Desktop Client (Rust + Tauri v2)"
 authors = ["STZY Team"]
 edition = "2021"

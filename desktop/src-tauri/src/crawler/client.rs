@@ -535,7 +535,10 @@ impl StzyHttpClient {
                         continue;
                     }
                     let resp = resp.error_for_status()?;
-                    let data: Value = resp.json().await?;
+                    let data: Value = tokio::select! {
+                        _ = self.cancel.cancelled() => return Err(AppError::RequestStopped),
+                        r = resp.json() => r?,
+                    };
                     let code = match data.get("code") {
                         Some(Value::String(s)) => s.clone(),
                         Some(Value::Number(n)) => n.to_string(),
@@ -551,7 +554,7 @@ impl StzyHttpClient {
                     }
                     return Ok(data);
                 }
-                Err(AppError::RequestStopped) => return Err(AppError::RequestStopped),
+                Err(err) if err.is_cancelled() => return Err(AppError::RequestStopped),
                 Err(err) => {
                     last_err = Some(err);
                     if attempt + 1 < max_attempts {

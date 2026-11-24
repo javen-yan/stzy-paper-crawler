@@ -3,6 +3,7 @@ pub mod runner;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -24,6 +25,12 @@ use crate::task_engine::runner::CrawlRunner;
 
 pub type EventEmitter = Arc<dyn Fn(&str, Value) + Send + Sync>;
 
+struct RunningTaskEntry {
+    run_id: u64,
+    cancel: CancellationToken,
+    pending_resume: bool,
+}
+
 #[derive(Clone)]
 pub struct TaskManager {
     pub base_settings: AppSettings,
@@ -32,7 +39,8 @@ pub struct TaskManager {
     active_task_sem: Arc<Mutex<Arc<Semaphore>>>,
     download_sem: Arc<Mutex<Arc<Semaphore>>>,
     convert_sem: Arc<Mutex<Arc<Semaphore>>>,
-    running_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    running_tokens: Arc<Mutex<HashMap<String, RunningTaskEntry>>>,
+    next_run_id: Arc<AtomicU64>,
     emitter: Arc<Mutex<Option<EventEmitter>>>,
 }
 
@@ -59,6 +67,7 @@ impl TaskManager {
                 rt.max_convert_workers.max(1),
             )))),
             running_tokens: Arc::new(Mutex::new(HashMap::new())),
+            next_run_id: Arc::new(AtomicU64::new(0)),
             emitter: Arc::new(Mutex::new(None)),
         };
         let _ = mgr.store.mark_interrupted_running_tasks();
@@ -271,6 +280,7 @@ impl TaskManager {
         if !TASK_RESUMABLE.contains(&status) {
             return Err(AppError::Conflict(format!("当前状态 {status} 不可恢复")));
         }
+        let _ = self.store.reset_downloading_resources_to_pending(task_id);
         let incomplete = self.store.incomplete_resource_records(task_id)?;
         if !incomplete.is_empty() {
             let _ = self.store.append_log(
@@ -289,6 +299,7 @@ impl TaskManager {
             .ok_or_else(|| AppError::NotFound("Task not found".to_string()))?;
         self.attach_task_display(&mut refreshed);
         self.spawn_task(task_id.to_string());
+        self.emit_task_snapshot(task_id);
         Ok(refreshed)
     }
 
@@ -299,20 +310,27 @@ impl TaskManager {
             .ok_or_else(|| AppError::NotFound("Task not found".to_string()))?;
         let status = task.get("status").and_then(Value::as_str).unwrap_or("");
         if status == "queued" {
+            if let Some(entry) = self.running_tokens.lock().get_mut(task_id) {
+                entry.pending_resume = false;
+                entry.cancel.cancel();
+            }
             self.store.set_task_status(task_id, "paused", Some(""))?;
             let mut out = self.store.get_task(task_id)?.unwrap_or(task);
             self.attach_task_display(&mut out);
+            self.emit_task_snapshot(task_id);
             return Ok(out);
         }
         if status != "running" {
             return Err(AppError::Conflict(format!("当前状态 {status} 不可暂停")));
         }
         self.store.set_task_status(task_id, "pausing", Some(""))?;
-        if let Some(tok) = self.running_tokens.lock().get(task_id) {
-            tok.cancel();
+        if let Some(entry) = self.running_tokens.lock().get_mut(task_id) {
+            entry.pending_resume = false;
+            entry.cancel.cancel();
         }
         let mut out = self.store.get_task(task_id)?.unwrap_or(task);
         self.attach_task_display(&mut out);
+        self.emit_task_snapshot(task_id);
         Ok(out)
     }
 
@@ -403,12 +421,15 @@ impl TaskManager {
             .store
             .get_task(task_id)?
             .ok_or_else(|| AppError::NotFound("Task not found".to_string()))?;
-        if let Some(tok) = self.running_tokens.lock().get(task_id) {
-            tok.cancel();
+        if let Some(entry) = self.running_tokens.lock().get_mut(task_id) {
+            entry.pending_resume = false;
+            entry.cancel.cancel();
         }
         self.store.set_task_status(task_id, "cancelled", Some(""))?;
+        let _ = self.store.reset_downloading_resources_to_pending(task_id);
         let mut out = self.store.get_task(task_id)?.unwrap_or(task);
         self.attach_task_display(&mut out);
+        self.emit_task_snapshot(task_id);
         Ok(out)
     }
 
@@ -460,23 +481,94 @@ impl TaskManager {
     }
 
     fn spawn_task(&self, task_id: String) {
-        {
-            let guard = self.running_tokens.lock();
-            if guard.contains_key(&task_id) {
+        let (run_id, cancel) = {
+            let mut guard = self.running_tokens.lock();
+            if let Some(existing) = guard.get_mut(&task_id) {
+                if existing.cancel.is_cancelled() {
+                    existing.pending_resume = true;
+                }
                 return;
             }
-        }
+            let run_id = self.next_run_id.fetch_add(1, Ordering::Relaxed) + 1;
+            let cancel = CancellationToken::new();
+            guard.insert(
+                task_id.clone(),
+                RunningTaskEntry {
+                    run_id,
+                    cancel: cancel.clone(),
+                    pending_resume: false,
+                },
+            );
+            (run_id, cancel)
+        };
         let mgr = self.clone();
         tauri::async_runtime::spawn(async move {
-            mgr.execute_task(task_id).await;
+            mgr.execute_task(task_id, run_id, cancel).await;
         });
     }
 
-    async fn execute_task(&self, task_id: String) {
-        let task_sem = self.active_task_sem.lock().clone();
-        let Ok(_task_permit) = task_sem.acquire().await else {
-            return;
+    fn finish_run_entry(&self, task_id: &str, run_id: u64) -> bool {
+        let mut guard = self.running_tokens.lock();
+        if let Some(entry) = guard.get(task_id) {
+            if entry.run_id == run_id {
+                let should_resume = entry.pending_resume;
+                guard.remove(task_id);
+                return should_resume;
+            }
+        }
+        false
+    }
+
+    fn is_pending_resume(&self, task_id: &str, run_id: u64) -> bool {
+        self.running_tokens
+            .lock()
+            .get(task_id)
+            .map(|e| e.run_id == run_id && e.pending_resume)
+            .unwrap_or(false)
+    }
+
+    async fn execute_task(&self, task_id: String, run_id: u64, cancel: CancellationToken) {
+        struct RunCleanupGuard {
+            mgr: TaskManager,
+            task_id: String,
+            run_id: u64,
+            active: bool,
+        }
+        impl Drop for RunCleanupGuard {
+            fn drop(&mut self) {
+                if !self.active {
+                    return;
+                }
+                let should_resume = self.mgr.finish_run_entry(&self.task_id, self.run_id);
+                if should_resume {
+                    self.mgr.spawn_task(self.task_id.clone());
+                } else {
+                    self.mgr.emit_task_snapshot(&self.task_id);
+                }
+            }
+        }
+
+        let mut cleanup_guard = RunCleanupGuard {
+            mgr: self.clone(),
+            task_id: task_id.clone(),
+            run_id,
+            active: true,
         };
+
+        let task_sem = self.active_task_sem.lock().clone();
+        let _task_permit = tokio::select! {
+            _ = cancel.cancelled() => {
+                return;
+            }
+            permit = task_sem.acquire() => match permit {
+                Ok(p) => p,
+                Err(_) => return,
+            },
+        };
+
+        if cancel.is_cancelled() {
+            return;
+        }
 
         let Ok(Some(task)) = self.store.get_task(&task_id) else {
             return;
@@ -488,11 +580,6 @@ impl TaskManager {
         ) {
             return;
         }
-
-        let cancel = CancellationToken::new();
-        self.running_tokens
-            .lock()
-            .insert(task_id.clone(), cancel.clone());
 
         let _ = self.store.set_task_status(&task_id, "running", Some(""));
         self.emit_task_snapshot(&task_id);
@@ -570,6 +657,10 @@ impl TaskManager {
                 merge_stats(&mut aggregate, &stats);
             } else {
                 for sub in &subjects {
+                    if cancel.is_cancelled() {
+                        aggregate.paused = true;
+                        break;
+                    }
                     if let Ok(Some(latest)) = self.store.get_task(&task_id) {
                         let st = latest.get("status").and_then(Value::as_str).unwrap_or("");
                         if matches!(st, "cancelled" | "pausing" | "paused") {
@@ -607,36 +698,69 @@ impl TaskManager {
                 }
             }
 
-            let mut stats_payload = self.final_stats(&task_id, &aggregate);
-            let final_status = self.final_status(&task_id, &aggregate, &stats_payload);
-            let duration_secs = started_at.elapsed().as_secs();
-            if let Value::Object(ref mut map) = stats_payload {
-                map.insert("duration_seconds".to_string(), json!(duration_secs));
-            }
-            let err_str = if final_status == "failed" {
-                aggregate.error.as_str()
-            } else {
-                ""
-            };
-            self.store
-                .finalize_task(&task_id, &final_status, err_str, &stats_payload)?;
             Ok(())
         }
         .await;
 
-        if let Err(err) = exec_res {
-            let status = if err.requires_login() {
-                "auth_expired"
-            } else {
-                "failed"
-            };
-            let msg = err.user_message();
-            let _ = self.store.set_task_status(&task_id, status, Some(&msg));
-            let _ = self.store.append_log(&task_id, "error", &msg);
+        let _ = self.store.reset_downloading_resources_to_pending(&task_id);
+
+        if !self.is_pending_resume(&task_id, run_id) {
+            match exec_res {
+                Ok(()) => {
+                    let mut stats_payload = self.final_stats(&task_id, &aggregate);
+                    let final_status = self.final_status(&task_id, &aggregate, &stats_payload);
+                    let duration_secs = started_at.elapsed().as_secs();
+                    if let Value::Object(ref mut map) = stats_payload {
+                        map.insert("duration_seconds".to_string(), json!(duration_secs));
+                    }
+                    let err_str = if final_status == "failed" {
+                        aggregate.error.as_str()
+                    } else {
+                        ""
+                    };
+                    let _ = self.store.finalize_task(
+                        &task_id,
+                        &final_status,
+                        err_str,
+                        &stats_payload,
+                    );
+                }
+                Err(err) if err.is_cancelled() => {
+                    aggregate.paused = true;
+                    let mut stats_payload = self.final_stats(&task_id, &aggregate);
+                    let final_status = self.final_status(&task_id, &aggregate, &stats_payload);
+                    let duration_secs = started_at.elapsed().as_secs();
+                    if let Value::Object(ref mut map) = stats_payload {
+                        map.insert("duration_seconds".to_string(), json!(duration_secs));
+                    }
+                    let _ = self.store.finalize_task(
+                        &task_id,
+                        &final_status,
+                        "",
+                        &stats_payload,
+                    );
+                }
+                Err(err) => {
+                    let status = if err.requires_login() {
+                        "auth_expired"
+                    } else {
+                        "failed"
+                    };
+                    let msg = err.user_message();
+                    let _ = self.store.set_task_status(&task_id, status, Some(&msg));
+                    let _ = self.store.append_log(&task_id, "error", &msg);
+                }
+            }
         }
 
-        self.running_tokens.lock().remove(&task_id);
-        self.emit_task_snapshot(&task_id);
+        drop(_task_permit);
+        cleanup_guard.active = false;
+        let should_resume = self.finish_run_entry(&task_id, run_id);
+        if should_resume {
+            self.spawn_task(task_id);
+        } else {
+            self.emit_task_snapshot(&task_id);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1060,3 +1184,80 @@ fn merge_stats(base: &mut CrawlStats, res: &CrawlStats) {
 
 #[allow(dead_code)]
 type _PathRef = PathBuf;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::ResourceStatus;
+
+    fn build_test_manager() -> (TaskManager, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "stzy_task_mgr_test_{}",
+            Uuid::new_v4().simple()
+        ));
+        let mut settings = AppSettings::default();
+        settings.data_dir = dir.clone();
+        settings.output_dir = dir.join("output");
+        ensure_directory(&settings.output_dir).unwrap();
+        let store = SqliteStore::open(&dir).unwrap();
+        let artifacts = ArtifactService::new(store.clone(), settings.clone());
+        let mgr = TaskManager::new(settings, store, artifacts);
+        (mgr, dir)
+    }
+
+    #[test]
+    fn cancel_then_immediate_resume_sets_pending_resume_and_resets_downloading() {
+        let (mgr, dir) = build_test_manager();
+        let task_id = "task_cancel_resume_race";
+        let root = dir.join("output").join("tasks").join(task_id);
+        ensure_directory(&root).unwrap();
+        mgr.store
+            .create_task(task_id, "crawl", &json!({"mode": "crawl"}), &root, None)
+            .unwrap();
+        mgr.store
+            .set_task_status(task_id, "running", Some(""))
+            .unwrap();
+
+        // Simulate a resource stuck in downloading
+        let rec: ResourceRecord = serde_json::from_value(json!({
+            "resource_id": "res_1",
+            "resource_name": "测试试卷",
+            "status": "downloading"
+        }))
+        .unwrap();
+        mgr.store.record_resource(task_id, &rec).unwrap();
+
+        // Simulate an active run still inside running_tokens
+        let old_cancel = CancellationToken::new();
+        mgr.running_tokens.lock().insert(
+            task_id.to_string(),
+            RunningTaskEntry {
+                run_id: 1,
+                cancel: old_cancel.clone(),
+                pending_resume: false,
+            },
+        );
+
+        // 1. User clicks Cancel while old run is still unwinding
+        mgr.cancel_task(task_id).unwrap();
+        assert!(old_cancel.is_cancelled());
+        let after_cancel = mgr.store.incomplete_resource_records(task_id).unwrap();
+        assert_eq!(after_cancel.len(), 1);
+        assert_eq!(after_cancel[0].status, ResourceStatus::Pending);
+
+        // 2. User immediately clicks Resume before old run exits
+        let resumed = mgr.resume_task(task_id).unwrap();
+        assert_eq!(resumed.get("status").and_then(Value::as_str), Some("queued"));
+        assert!(mgr.is_pending_resume(task_id, 1));
+
+        // 3. When old run finishes, finish_run_entry signals it should respawn
+        assert!(mgr.finish_run_entry(task_id, 1));
+        assert!(!mgr.running_tokens.lock().contains_key(task_id));
+
+        // 4. Verify AppError cancellation helper covers both variants
+        assert!(AppError::Cancelled.is_cancelled());
+        assert!(AppError::RequestStopped.is_cancelled());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -834,6 +834,14 @@ impl ProxyPool {
             return;
         }
 
+        struct RefillGuard<'a>(&'a Mutex<ProxyPoolInner>);
+        impl Drop for RefillGuard<'_> {
+            fn drop(&mut self) {
+                self.0.lock().refilling = false;
+            }
+        }
+        let _refill_guard = RefillGuard(&self.inner);
+
         (self.on_event)(format!("提取接口补充代理：需要 {missing} 个"));
         let fetched = self.fetch_from_api(missing).await;
         let now = now_unix_secs();

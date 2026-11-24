@@ -47,6 +47,10 @@ pub enum AppError {
 }
 
 impl AppError {
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled | Self::RequestStopped)
+    }
+
     pub fn requires_login(&self) -> bool {
         match self {
             Self::StzyApi { code, message } => code == "-1" || message.contains("登录"),
