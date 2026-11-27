@@ -27,6 +27,10 @@ pub fn mark_exiting() {
     EXITING.store(true, Ordering::SeqCst);
 }
 
+pub fn is_tray_ready(app: &AppHandle) -> bool {
+    app.tray_by_id(TRAY_ID).is_some()
+}
+
 pub fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
@@ -38,6 +42,15 @@ pub fn show_main_window(app: &AppHandle) {
 pub fn hide_window_to_tray(window: &Window) {
     if window.is_fullscreen().unwrap_or(false) {
         let _ = window.set_fullscreen(false);
+        #[cfg(target_os = "macos")]
+        {
+            let win = window.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(420)).await;
+                let _ = win.hide();
+            });
+            return;
+        }
     }
     let _ = window.hide();
 }

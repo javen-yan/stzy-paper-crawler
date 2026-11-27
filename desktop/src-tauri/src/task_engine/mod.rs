@@ -10,7 +10,6 @@ use std::time::Instant;
 use chrono::Local;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -18,7 +17,7 @@ use crate::artifacts::{build_filter_display_name, short_task_label, ArtifactServ
 use crate::error::{AppError, AppResult};
 use crate::models::{
     ensure_directory, expand_tilde, now_iso_seconds, AppSettings, CrawlFilters, CrawlStats,
-    ResourceRecord,
+    DynamicLimiter, ResourceRecord,
 };
 use crate::store::{SqliteStore, TASK_RESUMABLE};
 use crate::task_engine::runner::CrawlRunner;
@@ -36,9 +35,9 @@ pub struct TaskManager {
     pub base_settings: AppSettings,
     pub store: SqliteStore,
     pub artifact_service: ArtifactService,
-    active_task_sem: Arc<Mutex<Arc<Semaphore>>>,
-    download_sem: Arc<Mutex<Arc<Semaphore>>>,
-    convert_sem: Arc<Mutex<Arc<Semaphore>>>,
+    active_task_sem: DynamicLimiter,
+    download_sem: DynamicLimiter,
+    convert_sem: DynamicLimiter,
     running_tokens: Arc<Mutex<HashMap<String, RunningTaskEntry>>>,
     next_run_id: Arc<AtomicU64>,
     emitter: Arc<Mutex<Option<EventEmitter>>>,
@@ -57,15 +56,9 @@ impl TaskManager {
             base_settings,
             store,
             artifact_service,
-            active_task_sem: Arc::new(Mutex::new(Arc::new(Semaphore::new(
-                rt.max_active_tasks.max(1),
-            )))),
-            download_sem: Arc::new(Mutex::new(Arc::new(Semaphore::new(
-                rt.max_download_workers.max(1),
-            )))),
-            convert_sem: Arc::new(Mutex::new(Arc::new(Semaphore::new(
-                rt.max_convert_workers.max(1),
-            )))),
+            active_task_sem: DynamicLimiter::new(rt.max_active_tasks.max(1)),
+            download_sem: DynamicLimiter::new(rt.max_download_workers.max(1)),
+            convert_sem: DynamicLimiter::new(rt.max_convert_workers.max(1)),
             running_tokens: Arc::new(Mutex::new(HashMap::new())),
             next_run_id: Arc::new(AtomicU64::new(0)),
             emitter: Arc::new(Mutex::new(None)),
@@ -90,11 +83,9 @@ impl TaskManager {
 
     pub fn apply_runtime_limits(&self) {
         let rt = self.runtime_settings();
-        *self.download_sem.lock() = Arc::new(Semaphore::new(rt.max_download_workers.max(1)));
-        *self.convert_sem.lock() = Arc::new(Semaphore::new(rt.max_convert_workers.max(1)));
-        if self.running_tokens.lock().is_empty() {
-            *self.active_task_sem.lock() = Arc::new(Semaphore::new(rt.max_active_tasks.max(1)));
-        }
+        self.download_sem.set_limit(rt.max_download_workers.max(1));
+        self.convert_sem.set_limit(rt.max_convert_workers.max(1));
+        self.active_task_sem.set_limit(rt.max_active_tasks.max(1));
     }
 
     pub fn runtime_settings(&self) -> AppSettings {
@@ -158,9 +149,18 @@ impl TaskManager {
             &task_root,
             idempotency_key,
         )?;
+        let actual_tid = task
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if actual_tid != task_id {
+            let _ = std::fs::remove_dir(&task_root);
+        }
         self.attach_task_display(&mut task);
-        if let Some(tid) = task.get("id").and_then(Value::as_str) {
-            self.spawn_task(tid.to_string());
+        let status = task.get("status").and_then(Value::as_str).unwrap_or("");
+        if !actual_tid.is_empty() && status == "queued" {
+            self.spawn_task(actual_tid);
         }
         Ok(task)
     }
@@ -207,8 +207,8 @@ impl TaskManager {
             ..CrawlStats::default()
         };
 
-        let dl_sem = self.download_sem.lock().clone();
-        let cv_sem = self.convert_sem.lock().clone();
+        let dl_sem = self.download_sem.clone();
+        let cv_sem = self.convert_sem.clone();
 
         for sub in &norm_subjects {
             let sub_code = sub.get("code").and_then(Value::as_str).unwrap_or("");
@@ -226,8 +226,7 @@ impl TaskManager {
                 .join(".tmp")
                 .join("estimates")
                 .join(&est_id);
-            ensure_directory(&est_root)?;
-            task_settings.output_dir = est_root;
+            task_settings.output_dir = est_root.clone();
             task_settings.subject_code = sub_code.to_string();
             task_settings.subject_name = sub_name.to_string();
             task_settings.task_scope = est_id;
@@ -255,7 +254,9 @@ impl TaskManager {
                 Arc::new(|_| {}),
                 Arc::new(|_| {}),
             );
-            let res = runner.estimate().await?;
+            let est_res = runner.estimate().await;
+            let _ = std::fs::remove_dir_all(&est_root);
+            let res = est_res?;
             merge_stats(&mut aggregate, &res);
         }
 
@@ -282,15 +283,24 @@ impl TaskManager {
         }
         let _ = self.store.reset_downloading_resources_to_pending(task_id);
         let incomplete = self.store.incomplete_resource_records(task_id)?;
+        let scan_completed = task
+            .get("stats")
+            .and_then(|s| s.get("scan_completed"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         if !incomplete.is_empty() {
-            let _ = self.store.append_log(
-                task_id,
-                "info",
-                &format!(
+            let log_msg = if scan_completed {
+                format!(
                     "继续下载：将仅重试未完成资源 {} 份，已完成资源不再重新扫描",
                     incomplete.len()
-                ),
-            );
+                )
+            } else {
+                format!(
+                    "继续下载：先补齐未完成资源 {} 份，随后从断点继续扫描剩余组合与分页",
+                    incomplete.len()
+                )
+            };
+            let _ = self.store.append_log(task_id, "info", &log_msg);
         }
         self.store.set_task_status(task_id, "queued", Some(""))?;
         let mut refreshed = self
@@ -393,20 +403,22 @@ impl TaskManager {
 
     pub async fn pause_active_tasks_for_restart(&self) -> usize {
         let mut paused_count = 0usize;
-        if let Ok(tasks) = self.store.list_tasks(false, 200, 0) {
-            for t in tasks {
-                let status = t.get("status").and_then(Value::as_str).unwrap_or("");
-                if matches!(status, "running" | "queued") {
-                    if let Some(tid) = t.get("id").and_then(Value::as_str) {
-                        if self.pause_task(tid).is_ok() {
-                            paused_count += 1;
+        for archived in [false, true] {
+            if let Ok(tasks) = self.store.list_tasks(archived, 200, 0) {
+                for t in tasks {
+                    let status = t.get("status").and_then(Value::as_str).unwrap_or("");
+                    if matches!(status, "running" | "queued") {
+                        if let Some(tid) = t.get("id").and_then(Value::as_str) {
+                            if self.pause_task(tid).is_ok() {
+                                paused_count += 1;
+                            }
                         }
                     }
                 }
             }
         }
-        if paused_count > 0 {
-            for _ in 0..25 {
+        if paused_count > 0 || !self.running_tokens.lock().is_empty() {
+            for _ in 0..45 {
                 if self.running_tokens.lock().is_empty() {
                     break;
                 }
@@ -427,6 +439,7 @@ impl TaskManager {
         }
         self.store.set_task_status(task_id, "cancelled", Some(""))?;
         let _ = self.store.reset_downloading_resources_to_pending(task_id);
+        crate::proxy::release_task_proxy_leases(task_id);
         let mut out = self.store.get_task(task_id)?.unwrap_or(task);
         self.attach_task_display(&mut out);
         self.emit_task_snapshot(task_id);
@@ -434,6 +447,16 @@ impl TaskManager {
     }
 
     pub fn archive_task(&self, task_id: &str) -> AppResult<Value> {
+        let task = self
+            .store
+            .get_task(task_id)?
+            .ok_or_else(|| AppError::NotFound("Task not found".to_string()))?;
+        let status = task.get("status").and_then(Value::as_str).unwrap_or("");
+        if matches!(status, "queued" | "running" | "pausing") {
+            return Err(AppError::Conflict(
+                "任务正在运行或排队中，请先暂停或取消后再归档".to_string(),
+            ));
+        }
         if !self.store.archive_task(task_id, true)? {
             return Err(AppError::NotFound("Task not found".to_string()));
         }
@@ -442,6 +465,7 @@ impl TaskManager {
             .get_task(task_id)?
             .unwrap_or_else(|| json!({ "id": task_id, "archived": true }));
         self.attach_task_display(&mut out);
+        self.emit_task_snapshot(task_id);
         Ok(out)
     }
 
@@ -555,7 +579,7 @@ impl TaskManager {
             active: true,
         };
 
-        let task_sem = self.active_task_sem.lock().clone();
+        let task_sem = self.active_task_sem.clone();
         let _task_permit = tokio::select! {
             _ = cancel.cancelled() => {
                 return;
@@ -592,6 +616,16 @@ impl TaskManager {
             .unwrap_or("crawl")
             .to_string();
 
+        let prior_stats_val = task.get("stats").cloned().unwrap_or_else(|| json!({}));
+        let scan_already_done = prior_stats_val
+            .get("scan_completed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let prior_duration = prior_stats_val
+            .get("duration_seconds")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+
         let retry_records = if mode == "crawl" {
             self.store
                 .incomplete_resource_records(&task_id)
@@ -599,12 +633,14 @@ impl TaskManager {
         } else {
             Vec::new()
         };
-        let resource_only_resume = !retry_records.is_empty();
+        let resource_only_resume = scan_already_done && !retry_records.is_empty();
         let started_at = Instant::now();
         let mut aggregate = CrawlStats {
             task_mode: mode.clone(),
             phase: "running".to_string(),
             running: true,
+            scan_completed: scan_already_done,
+            duration_seconds: prior_duration,
             ..CrawlStats::default()
         };
 
@@ -630,10 +666,10 @@ impl TaskManager {
                     })]
                 });
 
-            let dl_sem = self.download_sem.lock().clone();
-            let cv_sem = self.convert_sem.lock().clone();
+            let dl_sem = self.download_sem.clone();
+            let cv_sem = self.convert_sem.clone();
 
-            if resource_only_resume {
+            if !retry_records.is_empty() {
                 let first_sub = subjects.first().cloned().unwrap_or_else(|| json!({}));
                 let sub_code = first_sub.get("code").and_then(Value::as_str).unwrap_or("");
                 let sub_name = first_sub
@@ -647,24 +683,29 @@ impl TaskManager {
                     sub_code,
                     sub_name,
                     &rt,
-                    filters,
+                    filters.clone(),
                     cancel.clone(),
-                    dl_sem,
-                    cv_sem,
+                    dl_sem.clone(),
+                    cv_sem.clone(),
                     aggregate.clone(),
                 )?;
                 let stats = runner.run_records(retry_records).await?;
                 merge_stats(&mut aggregate, &stats);
-            } else {
+            }
+
+            if !resource_only_resume && !aggregate.paused && !aggregate.aborted {
+                let mut completed_all_subjects = true;
                 for sub in &subjects {
                     if cancel.is_cancelled() {
                         aggregate.paused = true;
+                        completed_all_subjects = false;
                         break;
                     }
                     if let Ok(Some(latest)) = self.store.get_task(&task_id) {
                         let st = latest.get("status").and_then(Value::as_str).unwrap_or("");
                         if matches!(st, "cancelled" | "pausing" | "paused") {
                             aggregate.paused = true;
+                            completed_all_subjects = false;
                             break;
                         }
                     }
@@ -693,8 +734,12 @@ impl TaskManager {
                     };
                     merge_stats(&mut aggregate, &res);
                     if res.aborted || res.paused {
+                        completed_all_subjects = false;
                         break;
                     }
+                }
+                if completed_all_subjects && !aggregate.paused && !aggregate.aborted {
+                    aggregate.scan_completed = true;
                 }
             }
 
@@ -703,15 +748,21 @@ impl TaskManager {
         .await;
 
         let _ = self.store.reset_downloading_resources_to_pending(&task_id);
+        crate::proxy::release_task_proxy_leases(&task_id);
 
         if !self.is_pending_resume(&task_id, run_id) {
+            let total_duration = prior_duration.saturating_add(started_at.elapsed().as_secs());
+            aggregate.duration_seconds = total_duration;
             match exec_res {
                 Ok(()) => {
                     let mut stats_payload = self.final_stats(&task_id, &aggregate);
                     let final_status = self.final_status(&task_id, &aggregate, &stats_payload);
-                    let duration_secs = started_at.elapsed().as_secs();
                     if let Value::Object(ref mut map) = stats_payload {
-                        map.insert("duration_seconds".to_string(), json!(duration_secs));
+                        map.insert("duration_seconds".to_string(), json!(total_duration));
+                        map.insert(
+                            "scan_completed".to_string(),
+                            json!(aggregate.scan_completed),
+                        );
                     }
                     let err_str = if final_status == "failed" {
                         aggregate.error.as_str()
@@ -729,9 +780,12 @@ impl TaskManager {
                     aggregate.paused = true;
                     let mut stats_payload = self.final_stats(&task_id, &aggregate);
                     let final_status = self.final_status(&task_id, &aggregate, &stats_payload);
-                    let duration_secs = started_at.elapsed().as_secs();
                     if let Value::Object(ref mut map) = stats_payload {
-                        map.insert("duration_seconds".to_string(), json!(duration_secs));
+                        map.insert("duration_seconds".to_string(), json!(total_duration));
+                        map.insert(
+                            "scan_completed".to_string(),
+                            json!(aggregate.scan_completed),
+                        );
                     }
                     let _ = self.store.finalize_task(
                         &task_id,
@@ -741,14 +795,24 @@ impl TaskManager {
                     );
                 }
                 Err(err) => {
-                    let status = if err.requires_login() {
-                        "auth_expired"
-                    } else {
-                        "failed"
-                    };
-                    let msg = err.user_message();
-                    let _ = self.store.set_task_status(&task_id, status, Some(&msg));
-                    let _ = self.store.append_log(&task_id, "error", &msg);
+                    let already_cancelled = self
+                        .store
+                        .get_task(&task_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|t| t.get("status").and_then(Value::as_str).map(str::to_string))
+                        .map(|s| s == "cancelled")
+                        .unwrap_or(false);
+                    if !already_cancelled {
+                        let status = if err.requires_login() {
+                            "auth_expired"
+                        } else {
+                            "failed"
+                        };
+                        let msg = err.user_message();
+                        let _ = self.store.set_task_status(&task_id, status, Some(&msg));
+                        let _ = self.store.append_log(&task_id, "error", &msg);
+                    }
                 }
             }
         }
@@ -772,8 +836,8 @@ impl TaskManager {
         base_rt: &AppSettings,
         filters: CrawlFilters,
         cancel: CancellationToken,
-        dl_sem: Arc<Semaphore>,
-        cv_sem: Arc<Semaphore>,
+        dl_sem: DynamicLimiter,
+        cv_sem: DynamicLimiter,
         prior_aggregate: CrawlStats,
     ) -> AppResult<CrawlRunner> {
         let mut ts = base_rt.clone();
@@ -822,7 +886,29 @@ impl TaskManager {
             merge_stats(&mut combined, &st);
             combined.running = st.running;
             combined.current_resource_name = st.current_resource_name.clone();
-            if let Ok(val) = serde_json::to_value(&combined) {
+            if let Ok(counts) = store_for_prog.resource_status_counts(&tid_prog) {
+                if !counts.is_empty() {
+                    let db_completed = counts.get("completed").copied().unwrap_or(0);
+                    let db_failed = counts.get("failed").copied().unwrap_or(0);
+                    let db_paid = counts.get("paid_unavailable").copied().unwrap_or(0)
+                        + counts.get("skipped_paid").copied().unwrap_or(0);
+                    let db_partial = counts.get("partial").copied().unwrap_or(0);
+                    let db_processed =
+                        db_completed + db_failed + db_paid + db_partial + combined.filtered_skipped;
+                    combined.resources_completed = combined.resources_completed.max(db_completed);
+                    combined.resources_processed = combined.resources_processed.max(db_processed);
+                    combined.failed = combined.failed.max(db_failed);
+                    combined.paid_skipped = combined.paid_skipped.max(db_paid);
+                    combined.preview_limited = combined.preview_limited.max(db_partial);
+                }
+            }
+            if let Ok(mut val) = serde_json::to_value(&combined) {
+                if let Value::Object(ref mut map) = val {
+                    map.insert(
+                        "resources_success".to_string(),
+                        json!(combined.resources_completed),
+                    );
+                }
                 let _ = store_for_prog.update_task_progress(&tid_prog, Some(&val), None);
                 if let Some(ref emit) = *emitter_for_prog.lock() {
                     emit(
@@ -1025,7 +1111,7 @@ impl TaskManager {
             let processed = completed + failed + paid + partial + stats.filtered_skipped;
             map.insert(
                 "resources_processed".to_string(),
-                json!(stats.resources_completed.max(processed)),
+                json!(stats.resources_processed.max(processed)),
             );
             map.insert("resources_success".to_string(), json!(completed));
             map.insert("resources_completed".to_string(), json!(completed));
@@ -1045,8 +1131,12 @@ impl TaskManager {
 
     fn final_status(&self, task_id: &str, stats: &CrawlStats, payload: &Value) -> String {
         if let Ok(Some(t)) = self.store.get_task(task_id) {
-            if t.get("status").and_then(Value::as_str) == Some("cancelled") {
+            let st = t.get("status").and_then(Value::as_str).unwrap_or("");
+            if st == "cancelled" {
                 return "cancelled".to_string();
+            }
+            if matches!(st, "pausing" | "paused") {
+                return "paused".to_string();
             }
         }
         if stats.aborted {
@@ -1166,6 +1256,7 @@ fn merge_stats(base: &mut CrawlStats, res: &CrawlStats) {
     base.completed_combos += res.completed_combos;
     base.resources_seen += res.resources_seen;
     base.resources_total += res.resources_total;
+    base.resources_processed += res.resources_processed;
     base.resources_completed += res.resources_completed;
     base.images_downloaded += res.images_downloaded;
     base.paid_skipped += res.paid_skipped;
@@ -1174,6 +1265,7 @@ fn merge_stats(base: &mut CrawlStats, res: &CrawlStats) {
     base.failed += res.failed;
     base.paused = base.paused || res.paused;
     base.aborted = base.aborted || res.aborted;
+    base.scan_completed = base.scan_completed || res.scan_completed;
     if !res.error.is_empty() {
         base.error = res.error.clone();
     }

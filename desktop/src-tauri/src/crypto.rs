@@ -69,15 +69,28 @@ impl CredentialVault {
         }
 
         if key_path.exists() {
-            if let Ok(text) = fs::read_to_string(key_path) {
-                if let Ok(decoded) = BASE64_URL_SAFE.decode(text.trim()) {
-                    if decoded.len() == 32 {
-                        let mut key = [0u8; 32];
-                        key.copy_from_slice(&decoded);
-                        return Ok(Self { key });
-                    }
-                }
+            let text = fs::read_to_string(key_path).map_err(|e| {
+                AppError::Runtime(format!(
+                    "读取凭据密钥文件失败（{}）：{e}",
+                    key_path.display()
+                ))
+            })?;
+            let decoded = BASE64_URL_SAFE.decode(text.trim()).map_err(|e| {
+                AppError::Runtime(format!(
+                    "凭据密钥文件格式已损坏（{}）：{e}",
+                    key_path.display()
+                ))
+            })?;
+            if decoded.len() != 32 {
+                return Err(AppError::Runtime(format!(
+                    "凭据密钥长度非法（{}）：期望 32 字节，实际 {} 字节",
+                    key_path.display(),
+                    decoded.len()
+                )));
             }
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&decoded);
+            return Ok(Self { key });
         }
 
         if let Some(parent) = key_path.parent() {

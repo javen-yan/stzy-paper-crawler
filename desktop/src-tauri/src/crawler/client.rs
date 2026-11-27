@@ -16,7 +16,7 @@ use crate::auth::{
 };
 use crate::error::{AppError, AppResult};
 use crate::models::{now_iso_seconds, AccountCredential, AppSettings};
-use crate::proxy::ProxyPool;
+use crate::proxy::{ProxyLeaseGuard, ProxyPool};
 use crate::store::SqliteStore;
 
 #[derive(Clone)]
@@ -186,43 +186,78 @@ impl StzyHttpClient {
 
     pub async fn ensure_account_valid(
         &self,
-        mut account: AccountCredential,
+        account: AccountCredential,
     ) -> Option<AccountCredential> {
-        let has_token = !account.access_token.is_empty()
-            || !token_from_cookie_header(&account.cookie).is_empty();
-        if has_token
+        self.ensure_account_valid_inner(account, false).await
+    }
+
+    async fn ensure_account_valid_inner(
+        &self,
+        account: AccountCredential,
+        force_probe: bool,
+    ) -> Option<AccountCredential> {
+        if !force_probe && account_recently_verified(&account) {
+            return Some(account);
+        }
+
+        let lock = self.store.auth_lock(&account.name);
+        let _auth_guard = lock.lock().await;
+
+        let mut latest = self
+            .store
+            .get_account(&account.name)
+            .ok()
+            .flatten()
+            .unwrap_or(account);
+
+        if !force_probe && account_recently_verified(&latest) {
+            return Some(latest);
+        }
+
+        let token_candidate = if !latest.access_token.is_empty() {
+            latest.access_token.clone()
+        } else {
+            token_from_cookie_header(&latest.cookie)
+        };
+        let has_unexpired_token = !token_candidate.is_empty()
+            && format_expiry_error_if_expired(&token_candidate).is_none();
+
+        if has_unexpired_token
             && self
                 .probe_auth(
-                    &account.cookie,
-                    &account.access_token,
-                    &account.user_agent,
-                    &account.request_headers(),
+                    &latest.cookie,
+                    &latest.access_token,
+                    &latest.user_agent,
+                    &latest.request_headers(),
                 )
                 .await
                 .is_ok()
         {
-            return Some(account);
+            let _ = self.store.touch_account_checked(&latest.name);
+            latest.last_checked_at = now_iso_seconds();
+            return Some(latest);
         }
-        if self.refresh_account_from_cookie(&mut account, true).await {
-            return Some(account);
+
+        if self.refresh_account_from_cookie(&mut latest, true).await {
+            return Some(latest);
         }
-        if account.login_phone.is_empty() {
+        if latest.login_phone.is_empty() {
             return None;
         }
         let refreshed = self
             .login_with_phone_password(
-                &account.login_phone,
-                if account.login_password.is_empty() {
+                &latest.login_phone,
+                if latest.login_password.is_empty() {
                     None
                 } else {
-                    Some(account.login_password.as_str())
+                    Some(latest.login_password.as_str())
                 },
-                &account.name,
+                &latest.name,
             )
             .await
             .ok()?;
         let mut merged = refreshed;
-        merged.enabled = account.enabled;
+        merged.enabled = latest.enabled;
         let saved = self.store.upsert_account(merged).ok()?;
         Some(saved)
     }
@@ -271,8 +306,8 @@ impl StzyHttpClient {
         headers.insert("referer".to_string(), self.settings.site_base_url.clone());
 
         let url = format!("{}/layout/paper-lib", self.settings.site_base_url);
-        let Ok((resp, _proxy)) = self
-            .send_once(reqwest::Method::GET, &url, None, &headers, "", true)
+        let Ok((resp, mut lease)) = self
+            .send_once(reqwest::Method::GET, &url, None, &headers, "")
             .await
         else {
             return false;
@@ -281,6 +316,11 @@ impl StzyHttpClient {
             return false;
         }
         let refreshed_cookie = merge_response_cookies(&account.cookie, &resp);
+        if !lease.is_empty() {
+            let p_url = lease.url().to_string();
+            lease.mark_success();
+            (self.on_proxy)(p_url);
+        }
         let refreshed_token = token_from_cookie_header(&refreshed_cookie);
         if refreshed_token.is_empty() {
             return false;
@@ -427,19 +467,18 @@ impl StzyHttpClient {
         json_body: Option<&Value>,
         extra_headers: &BTreeMap<String, String>,
         resource_name: &str,
-        mark_proxy_success: bool,
-    ) -> AppResult<(reqwest::Response, String)> {
+    ) -> AppResult<(reqwest::Response, ProxyLeaseGuard)> {
         if self.cancel.is_cancelled() {
             return Err(AppError::RequestStopped);
         }
-        let proxy = tokio::select! {
+        let mut lease = tokio::select! {
             _ = self.cancel.cancelled() => return Err(AppError::RequestStopped),
-            res = self.proxy_pool.acquire_proxy(resource_name) => res?,
+            res = self.proxy_pool.acquire_lease(resource_name) => res?,
         };
-        let client = match self.client_for_proxy(&proxy) {
+        let client = match self.client_for_proxy(lease.url()) {
             Ok(c) => c,
             Err(e) => {
-                self.proxy_pool.record_failure(&proxy);
+                lease.mark_failure();
                 return Err(e);
             }
         };
@@ -457,9 +496,6 @@ impl StzyHttpClient {
 
         let send_res = tokio::select! {
             _ = self.cancel.cancelled() => {
-                if !proxy.is_empty() {
-                    self.proxy_pool.record_success(&proxy);
-                }
                 return Err(AppError::RequestStopped);
             }
             r = req.send() => r,
@@ -468,19 +504,16 @@ impl StzyHttpClient {
         let resp = match send_res {
             Ok(r) => r,
             Err(e) => {
-                self.proxy_pool.record_failure(&proxy);
+                lease.mark_failure();
                 return Err(AppError::Http(e));
             }
         };
 
         let status = resp.status().as_u16();
         if matches!(status, 403 | 407 | 429 | 500 | 502 | 503 | 504) {
-            self.proxy_pool.record_failure(&proxy);
-        } else if mark_proxy_success && !proxy.is_empty() {
-            self.proxy_pool.record_success(&proxy);
-            (self.on_proxy)(proxy.clone());
+            lease.mark_failure();
         }
-        Ok((resp, proxy))
+        Ok((resp, lease))
     }
 
     async fn send_with_retries(
@@ -491,12 +524,63 @@ impl StzyHttpClient {
         headers: Option<&BTreeMap<String, String>>,
         resource_name: &str,
     ) -> AppResult<Value> {
-        let resolved_headers = match headers {
-            Some(h) => h.clone(),
-            None => self.default_auth_headers().await?,
-        };
-        self.send_with_explicit_headers(method, url, json_body, &resolved_headers, resource_name)
+        if let Some(h) = headers {
+            return self
+                .send_with_explicit_headers(method, url, json_body, h, resource_name)
+                .await;
+        }
+
+        let mut picked_acc: Option<AccountCredential> = None;
+        let schedulable = self.store.schedulable_accounts()?;
+        if !schedulable.is_empty() {
+            if let Some(acc) = self.store.next_round_robin_account(|_| true)? {
+                picked_acc = self.ensure_account_valid(acc).await;
+            }
+            if picked_acc.is_none() {
+                for acc in schedulable {
+                    if let Some(valid) = self.ensure_account_valid(acc).await {
+                        picked_acc = Some(valid);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let first_headers = picked_acc
+            .as_ref()
+            .map(|a| self.headers_for_account(a))
+            .unwrap_or_default();
+
+        match self
+            .send_with_explicit_headers(
+                method.clone(),
+                url,
+                json_body,
+                &first_headers,
+                resource_name,
+            )
             .await
+        {
+            Ok(val) => Ok(val),
+            Err(err) if err.requires_login() => {
+                if let Some(acc) = picked_acc {
+                    if let Some(revalidated) = self.ensure_account_valid_inner(acc, true).await {
+                        let retry_headers = self.headers_for_account(&revalidated);
+                        return self
+                            .send_with_explicit_headers(
+                                method,
+                                url,
+                                json_body,
+                                &retry_headers,
+                                resource_name,
+                            )
+                            .await;
+                    }
+                }
+                Err(err)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     async fn send_with_explicit_headers(
@@ -521,24 +605,41 @@ impl StzyHttpClient {
                     json_body,
                     resolved_headers,
                     resource_name,
-                    true,
                 )
                 .await
             {
-                Ok((resp, _)) => {
+                Ok((resp, mut lease)) => {
                     let status = resp.status();
                     if matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504)
                         && attempt + 1 < max_attempts
                     {
+                        lease.mark_failure();
                         last_err = Some(AppError::Runtime(format!("HTTP {}", status.as_u16())));
                         self.backoff_sleep(attempt).await?;
                         continue;
                     }
-                    let resp = resp.error_for_status()?;
+                    let resp = match resp.error_for_status() {
+                        Ok(r) => r,
+                        Err(e) => {
+                            lease.mark_failure();
+                            return Err(AppError::Http(e));
+                        }
+                    };
                     let data: Value = tokio::select! {
                         _ = self.cancel.cancelled() => return Err(AppError::RequestStopped),
-                        r = resp.json() => r?,
+                        r = resp.json() => match r {
+                            Ok(v) => v,
+                            Err(e) => {
+                                lease.mark_failure();
+                                return Err(AppError::Http(e));
+                            }
+                        },
                     };
+                    if !lease.is_empty() {
+                        let p_url = lease.url().to_string();
+                        lease.mark_success();
+                        (self.on_proxy)(p_url);
+                    }
                     let code = match data.get("code") {
                         Some(Value::String(s)) => s.clone(),
                         Some(Value::Number(n)) => n.to_string(),
@@ -608,18 +709,18 @@ impl StzyHttpClient {
         url: &str,
         extra_headers: &BTreeMap<String, String>,
         resource_name: &str,
-    ) -> AppResult<(reqwest::Response, String)> {
+    ) -> AppResult<(reqwest::Response, ProxyLeaseGuard)> {
         if self.cancel.is_cancelled() {
             return Err(AppError::RequestStopped);
         }
-        let proxy = tokio::select! {
+        let mut lease = tokio::select! {
             _ = self.cancel.cancelled() => return Err(AppError::RequestStopped),
-            res = self.proxy_pool.acquire_proxy(resource_name) => res?,
+            res = self.proxy_pool.acquire_lease(resource_name) => res?,
         };
-        let client = match self.download_client_for_proxy(&proxy) {
+        let client = match self.download_client_for_proxy(lease.url()) {
             Ok(c) => c,
             Err(e) => {
-                self.proxy_pool.record_failure(&proxy);
+                lease.mark_failure();
                 return Err(e);
             }
         };
@@ -644,9 +745,6 @@ impl StzyHttpClient {
 
         let send_res = tokio::select! {
             _ = self.cancel.cancelled() => {
-                if !proxy.is_empty() {
-                    self.proxy_pool.record_success(&proxy);
-                }
                 return Err(AppError::RequestStopped);
             }
             r = tokio::time::timeout(header_timeout, client.get(url).headers(header_map).send()) => r,
@@ -655,11 +753,11 @@ impl StzyHttpClient {
         let resp = match send_res {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
-                self.proxy_pool.record_failure(&proxy);
+                lease.mark_failure();
                 return Err(AppError::Http(e));
             }
             Err(_) => {
-                self.proxy_pool.record_failure(&proxy);
+                lease.mark_failure();
                 return Err(AppError::InvalidDownloadContent(
                     "连接下载源响应超时".to_string(),
                 ));
@@ -668,9 +766,9 @@ impl StzyHttpClient {
 
         let status = resp.status().as_u16();
         if matches!(status, 403 | 407 | 429 | 500 | 502 | 503 | 504) {
-            self.proxy_pool.record_failure(&proxy);
+            lease.mark_failure();
         }
-        Ok((resp, proxy))
+        Ok((resp, lease))
     }
 
     pub async fn download(
@@ -695,7 +793,7 @@ impl StzyHttpClient {
             tokio::fs::create_dir_all(parent).await?;
         }
         let partial = target.with_file_name(format!(
-            "{}.part",
+            ".{}.part",
             target
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -710,7 +808,7 @@ impl StzyHttpClient {
             }
             let _ = tokio::fs::remove_file(&partial).await;
 
-            let (resp, proxy) = match self
+            let (resp, mut lease) = match self
                 .send_download_once(url, &resolved_headers, resource_name)
                 .await
             {
@@ -727,9 +825,6 @@ impl StzyHttpClient {
                     break;
                 }
             };
-
-            let status_u16 = resp.status().as_u16();
-            let already_released = matches!(status_u16, 403 | 407 | 429 | 500 | 502 | 503 | 504);
 
             let content_type = resp
                 .headers()
@@ -774,24 +869,27 @@ impl StzyHttpClient {
 
             match stream_res {
                 Ok(written) => {
-                    tokio::fs::rename(&partial, target).await?;
-                    if !already_released && !proxy.is_empty() {
-                        self.proxy_pool.record_success(&proxy);
-                        (self.on_proxy)(proxy);
+                    let partial_clone = partial.clone();
+                    let target_buf = target.to_path_buf();
+                    tokio::task::spawn_blocking(move || {
+                        crate::models::replace_file_atomic(&partial_clone, &target_buf)
+                    })
+                    .await
+                    .map_err(|e| AppError::Runtime(format!("落盘任务异常：{e}")))??;
+                    if !lease.is_empty() {
+                        let p_url = lease.url().to_string();
+                        lease.mark_success();
+                        (self.on_proxy)(p_url);
                     }
                     return Ok(written);
                 }
                 Err(AppError::RequestStopped) | Err(AppError::Cancelled) => {
-                    if !already_released && !proxy.is_empty() {
-                        self.proxy_pool.record_success(&proxy);
-                    }
+                    drop(lease);
                     let _ = tokio::fs::remove_file(&partial).await;
                     return Err(AppError::RequestStopped);
                 }
                 Err(err) => {
-                    if !already_released && !proxy.is_empty() {
-                        self.proxy_pool.record_failure(&proxy);
-                    }
+                    lease.mark_failure();
                     let _ = tokio::fs::remove_file(&partial).await;
                     last_err = Some(err);
                     if attempt + 1 < attempts {
@@ -806,11 +904,38 @@ impl StzyHttpClient {
     }
 }
 
+fn account_recently_verified(account: &AccountCredential) -> bool {
+    let token = if !account.access_token.is_empty() {
+        account.access_token.as_str()
+    } else {
+        ""
+    };
+    let effective_token = if !token.is_empty() {
+        token.to_string()
+    } else {
+        token_from_cookie_header(&account.cookie)
+    };
+    if effective_token.is_empty() || format_expiry_error_if_expired(&effective_token).is_some() {
+        return false;
+    }
+    if account.last_checked_at.trim().is_empty() {
+        return false;
+    }
+    if let Ok(dt) =
+        chrono::NaiveDateTime::parse_from_str(&account.last_checked_at, "%Y-%m-%dT%H:%M:%S")
+    {
+        let age = chrono::Local::now().naive_local() - dt;
+        return age.num_seconds() >= 0 && age.num_seconds() <= 300;
+    }
+    false
+}
+
 fn effective_download_suffix(target: &Path, url: &str) -> String {
     let target_name = target
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("")
+        .trim_start_matches('.')
         .trim_end_matches(".part")
         .trim_end_matches(".download");
     if let Some(ext) = Path::new(target_name).extension().and_then(|e| e.to_str()) {
@@ -833,13 +958,14 @@ async fn validate_downloaded_file(
     content_type: &str,
 ) -> AppResult<()> {
     let meta = tokio::fs::metadata(partial).await?;
-    if meta.len() == 0 {
+    let total_len = meta.len();
+    if total_len == 0 {
         return Err(AppError::InvalidDownloadContent("下载内容为空".to_string()));
     }
-    let head_len = (meta.len() as usize).min(4096);
+    let head_len = (total_len as usize).min(4096);
     let mut file = tokio::fs::File::open(partial).await?;
     let mut head = vec![0u8; head_len];
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let n = file.read(&mut head).await?;
     head.truncate(n);
 
@@ -851,6 +977,13 @@ async fn validate_downloaded_file(
             "下载内容不是试卷文件，可能是代理或登录返回页".to_string(),
         ));
     }
+    if content_type.contains("application/json")
+        || (head.first() == Some(&b'{') && contains_subslice(&lower_ascii, b"\"code\""))
+    {
+        return Err(AppError::InvalidDownloadContent(
+            "下载接口返回了错误 JSON 而非文件流".to_string(),
+        ));
+    }
 
     let suffix = effective_download_suffix(target, url);
 
@@ -858,6 +991,17 @@ async fn validate_downloaded_file(
         if !head.starts_with(b"%PDF") {
             return Err(AppError::InvalidDownloadContent(
                 "PDF 下载内容异常，已尝试切换代理".to_string(),
+            ));
+        }
+        let tail_len = (total_len as usize).min(2048);
+        let tail_start = total_len.saturating_sub(tail_len as u64);
+        let mut tail = vec![0u8; tail_len];
+        file.seek(std::io::SeekFrom::Start(tail_start)).await?;
+        let tn = file.read(&mut tail).await?;
+        tail.truncate(tn);
+        if !contains_subslice(&tail, b"%%EOF") {
+            return Err(AppError::InvalidDownloadContent(
+                "PDF 文件尾部不完整（缺少 %%EOF），正在重试".to_string(),
             ));
         }
     } else if matches!(suffix.as_str(), ".zip" | ".docx")
@@ -882,6 +1026,22 @@ async fn validate_downloaded_file(
                 "压缩包尾目录不完整（可能传输中断），正在重试".to_string(),
             ));
         }
+    } else if suffix == ".rar" && !head.starts_with(b"Rar!\x1a\x07") {
+        return Err(AppError::InvalidDownloadContent(
+            "RAR 压缩包头异常，正在重试".to_string(),
+        ));
+    } else if suffix == ".7z" && !head.starts_with(&[b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C]) {
+        return Err(AppError::InvalidDownloadContent(
+            "7z 压缩包头异常，正在重试".to_string(),
+        ));
+    } else if suffix == ".png" && !head.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Err(AppError::InvalidDownloadContent(
+            "PNG 图片头异常，正在重试".to_string(),
+        ));
+    } else if matches!(suffix.as_str(), ".jpg" | ".jpeg") && !head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Err(AppError::InvalidDownloadContent(
+            "JPEG 图片头异常，正在重试".to_string(),
+        ));
     } else if (suffix == ".svg" || content_type.contains("image/svg"))
         && !contains_subslice(&lower_ascii, b"<svg")
     {
@@ -923,8 +1083,14 @@ fn merge_response_cookies(current_cookie: &str, response: &reqwest::Response) ->
     }
     for cookie in response.cookies() {
         let name = cookie.name().trim();
+        if name.is_empty() {
+            continue;
+        }
         let val = cookie.value().trim();
-        if !name.is_empty() && !val.is_empty() {
+        let expired = cookie.max_age() == Some(Duration::ZERO);
+        if val.is_empty() || expired {
+            cookies.remove(name);
+        } else {
             cookies.insert(name.to_string(), val.to_string());
         }
     }

@@ -29,10 +29,12 @@ const selectedTaskId = ref('')
 const logs = ref<LogLine[]>([])
 const resources = ref<TaskResource[]>([])
 const logCursor = ref(0)
+const currentArchivedView = ref(false)
 const LOG_FETCH_LIMIT = 80
 const LOG_TAIL_LIMIT = 200
 const LOG_BUFFER_LIMIT = 200
-let logRefreshing = false
+let latestLogSeq = 0
+let latestResSeq = 0
 let realtimeBound = false
 const realtimeUnlisteners: UnlistenFn[] = []
 
@@ -55,7 +57,12 @@ export function useTasks() {
       const unUpdated = await listen<Task>('task:updated', (event) => {
         const updated = event.payload
         if (!updated?.id) return
+        const isArchived = Boolean(updated.archived)
         const idx = tasks.value.findIndex((t) => t.id === updated.id)
+        if (isArchived !== currentArchivedView.value) {
+          if (idx >= 0) tasks.value.splice(idx, 1)
+          return
+        }
         if (idx >= 0) tasks.value[idx] = updated
         else tasks.value.unshift(updated)
       })
@@ -92,18 +99,26 @@ export function useTasks() {
   }
 
   async function refreshTasks(params: { archived?: boolean; limit?: number; offset?: number } = {}) {
-    const payload = await listTasks(params)
+    if (typeof params.archived === 'boolean') {
+      currentArchivedView.value = params.archived
+    }
+    const payload = await listTasks({
+      archived: params.archived ?? currentArchivedView.value,
+      limit: params.limit,
+      offset: params.offset,
+    })
     tasks.value = payload.items
     if (!selectedTaskId.value && tasks.value.length) selectedTaskId.value = tasks.value[0].id
     return payload
   }
 
   async function refreshSelectedTask() {
-    if (!selectedTaskId.value) return null
-    const task = await fetchTaskApi(selectedTaskId.value)
+    const reqTaskId = selectedTaskId.value
+    if (!reqTaskId) return null
+    const task = await fetchTaskApi(reqTaskId)
     const existingIndex = tasks.value.findIndex((item) => item.id === task.id)
     if (existingIndex >= 0) tasks.value[existingIndex] = task
-    else tasks.value.unshift(task)
+    else if (Boolean(task.archived) === currentArchivedView.value) tasks.value.unshift(task)
     return task
   }
 
@@ -112,14 +127,21 @@ export function useTasks() {
     const includeResources = options.includeResources ?? true
     const taskChanged = selectedTaskId.value !== taskId
     selectedTaskId.value = taskId
-    const existingIndex = tasks.value.findIndex((task) => task.id === taskId)
-    const task = await fetchTaskApi(taskId)
-    if (existingIndex >= 0) tasks.value[existingIndex] = task
-    else tasks.value.unshift(task)
-    if (taskChanged || includeLogs) {
+    if (taskChanged) {
+      logs.value = []
+      resources.value = []
+      logCursor.value = 0
+      latestLogSeq += 1
+      latestResSeq += 1
+    } else if (includeLogs) {
       logs.value = []
       logCursor.value = 0
     }
+    const task = await fetchTaskApi(taskId)
+    if (selectedTaskId.value !== taskId) return
+    const existingIndex = tasks.value.findIndex((item) => item.id === taskId)
+    if (existingIndex >= 0) tasks.value[existingIndex] = task
+    else if (Boolean(task.archived) === currentArchivedView.value) tasks.value.unshift(task)
     const jobs: Array<Promise<unknown> | undefined> = []
     if (includeLogs) {
       jobs.push(refreshLogs(true))
@@ -129,36 +151,37 @@ export function useTasks() {
   }
 
   async function refreshLogs(reset = false) {
-    if (!selectedTaskId.value) return
-    if (logRefreshing) return
-    logRefreshing = true
+    const reqTaskId = selectedTaskId.value
+    if (!reqTaskId) return
+    const seq = ++latestLogSeq
     if (reset) {
       logs.value = []
       logCursor.value = 0
     }
-    try {
-      const shouldTail = reset || (!logs.value.length && logCursor.value <= 0)
-      const payload = await fetchTaskLogs(
-        selectedTaskId.value,
-        shouldTail ? 0 : logCursor.value,
-        shouldTail ? LOG_TAIL_LIMIT : LOG_FETCH_LIMIT,
-        shouldTail,
-      )
-      const knownIds = new Set(logs.value.map((line) => line.id))
-      logs.value.push(...payload.items.filter((line) => !knownIds.has(line.id)))
-      if (logs.value.length > LOG_BUFFER_LIMIT) {
-        logs.value = logs.value.slice(-LOG_BUFFER_LIMIT)
-      }
-      logCursor.value = payload.next_cursor
-    } finally {
-      logRefreshing = false
+    const shouldTail = reset || (!logs.value.length && logCursor.value <= 0)
+    const payload = await fetchTaskLogs(
+      reqTaskId,
+      shouldTail ? 0 : logCursor.value,
+      shouldTail ? LOG_TAIL_LIMIT : LOG_FETCH_LIMIT,
+      shouldTail,
+    )
+    if (selectedTaskId.value !== reqTaskId || seq !== latestLogSeq) return
+    const knownIds = new Set(logs.value.map((line) => line.id))
+    logs.value.push(...payload.items.filter((line) => !knownIds.has(line.id)))
+    if (logs.value.length > LOG_BUFFER_LIMIT) {
+      logs.value = logs.value.slice(-LOG_BUFFER_LIMIT)
     }
+    logCursor.value = payload.next_cursor
   }
 
   async function refreshResources(params: { limit?: number; offset?: number; status?: string } = {}) {
-    if (!selectedTaskId.value) return
-    const payload = await fetchTaskResources(selectedTaskId.value, params.limit, params.offset, params.status)
-    resources.value = payload.items
+    const reqTaskId = selectedTaskId.value
+    if (!reqTaskId) return
+    const seq = ++latestResSeq
+    const payload = await fetchTaskResources(reqTaskId, params.limit, params.offset, params.status)
+    if (selectedTaskId.value === reqTaskId && seq === latestResSeq) {
+      resources.value = payload.items
+    }
     return payload
   }
 
@@ -218,7 +241,9 @@ export function useTasks() {
 }
 
 function taskFormToRequest(form: TaskCreateForm): TaskCreateRequest {
-  const filters: Record<string, unknown> = {}
+  const filters: Record<string, unknown> = {
+    download_paid: form.downloadPaid ?? true,
+  }
   if (form.scenes.length) filters.scenes = form.scenes
   if (form.grades.length) filters.grades = form.grades
   if (form.terms.length) filters.terms = form.terms

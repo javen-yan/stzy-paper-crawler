@@ -70,7 +70,7 @@ pub async fn check_for_app_update(app: &AppHandle, state: &AppState) -> AppResul
 pub async fn download_and_install_app_update(app: &AppHandle, state: &AppState) -> AppResult<Value> {
     let updater = app
         .updater_builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(600))
         .build()
         .map_err(|e| AppError::Runtime(format!("初始化更新组件失败：{e}")))?;
 
@@ -118,6 +118,7 @@ pub async fn download_and_install_app_update(app: &AppHandle, state: &AppState) 
         Some(downloaded_bytes),
         100.0,
     );
+    crate::tray::mark_exiting();
     update
         .install(package_bytes)
         .map_err(|e| AppError::Runtime(format!("写入新版本安装包失败：{e}")))?;
@@ -130,6 +131,5 @@ pub async fn download_and_install_app_update(app: &AppHandle, state: &AppState) 
         100.0,
     );
     tokio::time::sleep(Duration::from_millis(350)).await;
-    crate::tray::mark_exiting();
     app.restart();
 }

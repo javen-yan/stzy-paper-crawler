@@ -42,9 +42,8 @@ fi
 
 if [ -d "${TAURI_DIR}/resources" ]; then
   cp -R "${TAURI_DIR}/resources/." "${RESOURCES_DIR}/resources/"
-  if [ -f "${TAURI_DIR}/resources/libpdfium.dylib" ]; then
-    cp -f "${TAURI_DIR}/resources/libpdfium.dylib" "${RESOURCES_DIR}/libpdfium.dylib"
-    chmod 755 "${RESOURCES_DIR}/libpdfium.dylib" "${RESOURCES_DIR}/resources/libpdfium.dylib"
+  if [ -f "${RESOURCES_DIR}/resources/libpdfium.dylib" ]; then
+    chmod 755 "${RESOURCES_DIR}/resources/libpdfium.dylib"
   fi
 fi
 
@@ -85,13 +84,15 @@ EOF
 
 # Ad-hoc sign dynamic libraries and the .app bundle (required on Apple Silicon)
 if command -v codesign >/dev/null 2>&1; then
-  if [ -f "${RESOURCES_DIR}/libpdfium.dylib" ]; then
-    codesign --force --sign - "${RESOURCES_DIR}/libpdfium.dylib"
-  fi
   if [ -f "${RESOURCES_DIR}/resources/libpdfium.dylib" ]; then
     codesign --force --sign - "${RESOURCES_DIR}/resources/libpdfium.dylib"
   fi
-  codesign --force --deep --sign - "${APP_DIR}"
+  if [ -f "${TAURI_DIR}/Entitlements.plist" ]; then
+    codesign --force --entitlements "${TAURI_DIR}/Entitlements.plist" --sign - "${MACOS_EXE_DIR}/stzy-desktop"
+    codesign --force --entitlements "${TAURI_DIR}/Entitlements.plist" --sign - "${APP_DIR}"
+  else
+    codesign --force --deep --sign - "${APP_DIR}"
+  fi
 fi
 
 echo "==> Built macOS App Bundle: ${APP_DIR}"

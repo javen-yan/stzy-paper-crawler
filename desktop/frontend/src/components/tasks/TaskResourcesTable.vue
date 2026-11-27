@@ -10,7 +10,8 @@ const RESOURCE_STATUS_LABELS: Record<string, string> = {
   downloading: '处理中',
   pending: '待处理',
   partial: '部分完成',
-  paid_unavailable: '付费跳过',
+  paid_unavailable: '无 VIP 权限',
+  skipped_paid: '跳过付费',
   preview_limited: '仅预览页',
   filtered: '条件过滤',
 }

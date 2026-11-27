@@ -25,6 +25,7 @@ function statusTone(status: string) {
 
 const RESUMABLE = ['paused', 'partial_completed', 'failed', 'auth_expired', 'interrupted', 'cancelled']
 const PAUSABLE = ['running', 'queued']
+const CANCELLABLE = ['running', 'queued', 'pausing']
 
 function canResume(task: Task) {
   return task.mode !== 'estimate' && RESUMABLE.includes(task.status)
@@ -32,6 +33,14 @@ function canResume(task: Task) {
 
 function canPause(task: Task) {
   return PAUSABLE.includes(task.status)
+}
+
+function canCancel(task: Task) {
+  return CANCELLABLE.includes(task.status)
+}
+
+function canArchive(task: Task) {
+  return !task.archived && !CANCELLABLE.includes(task.status)
 }
 
 function canOpenFolder(task: Task) {
@@ -132,14 +141,14 @@ function shouldShowError(task: Task) {
             <CirclePlay :size="13" style="margin-right: 4px" />继续
           </el-button>
 
-          <el-dropdown v-if="!task.archived || canPause(task)" trigger="click">
+          <el-dropdown v-if="canArchive(task) || canCancel(task)" trigger="click">
             <el-button class="task-icon-btn" :icon="MoreHorizontal" circle aria-label="更多操作" />
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item v-if="canPause(task)" :icon="XCircle" @click="$emit('action', task, 'cancel')">
+                <el-dropdown-item v-if="canCancel(task)" :icon="XCircle" @click="$emit('action', task, 'cancel')">
                   取消任务
                 </el-dropdown-item>
-                <el-dropdown-item v-if="!task.archived" :icon="Archive" @click="$emit('action', task, 'archive')">
+                <el-dropdown-item v-if="canArchive(task)" :icon="Archive" @click="$emit('action', task, 'archive')">
                   归档隐藏
                 </el-dropdown-item>
               </el-dropdown-menu>

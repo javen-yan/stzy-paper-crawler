@@ -11,6 +11,7 @@ import type { Account, AccountImportPayload, PhoneLoginPayload } from '../types/
 const toast = useToast()
 const accounts = ref<Account[]>([])
 const loading = ref(false)
+const editorRef = ref<InstanceType<typeof AccountEditor> | null>(null)
 
 const usableCount = computed(() => accounts.value.filter((a) => a.enabled && a.usable).length)
 const vipCount = computed(() =>
@@ -21,26 +22,30 @@ async function refresh() {
   accounts.value = (await listAccounts()).items
 }
 
-async function run(work: () => Promise<void>, success: string) {
+async function run(work: () => Promise<void>, success: string): Promise<boolean> {
   loading.value = true
   try {
     await work()
     await refresh()
     toast.success(success)
+    return true
   } catch (error) {
     await refresh().catch(() => {})
     toast.error(error)
+    return false
   } finally {
     loading.value = false
   }
 }
 
 async function handlePhoneLogin(payload: PhoneLoginPayload) {
-  await run(() => phoneLogin(payload).then(() => undefined), '账号已登录并保存')
+  const ok = await run(() => phoneLogin(payload).then(() => undefined), '账号已登录并保存')
+  if (ok) editorRef.value?.closeAndReset()
 }
 
 async function handleImport(payload: AccountImportPayload) {
-  await run(() => importAccount(payload).then(() => undefined), '凭据已导入')
+  const ok = await run(() => importAccount(payload).then(() => undefined), '凭据已导入')
+  if (ok) editorRef.value?.closeAndReset()
 }
 
 async function handleVerify(account: Account) {
@@ -52,11 +57,15 @@ async function handleEnabled(account: Account, enabled: boolean) {
 }
 
 async function handleDelete(account: Account) {
-  await ElMessageBox.confirm(`确认删除账号「${account.name}」？此操作不会删除已下载文件。`, '删除账号', {
-    confirmButtonText: '删除',
-    cancelButtonText: '取消',
-    type: 'warning',
-  })
+  try {
+    await ElMessageBox.confirm(`确认删除账号「${account.name}」？此操作不会删除已下载文件。`, '删除账号', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch {
+    return
+  }
   await run(() => deleteAccount(account.name).then(() => undefined), '账号已删除')
 }
 
@@ -71,7 +80,7 @@ onMounted(refresh)
         <p class="hero-subtitle">添加官网登录账号，下载任务会自动按可用状态与剩余次数轮换使用。</p>
       </div>
       <div class="hero-actions">
-        <AccountEditor :loading="loading" @phone-login="handlePhoneLogin" @import="handleImport" />
+        <AccountEditor ref="editorRef" :loading="loading" @phone-login="handlePhoneLogin" @import="handleImport" />
       </div>
     </section>
 

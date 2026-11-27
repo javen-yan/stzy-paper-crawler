@@ -30,21 +30,20 @@ watch(
     form.output_dir = String(settings.output_dir || '')
     form.file_type = String(settings.file_type ?? '')
     form.max_pages_per_combo = settings.max_pages_per_combo == null ? undefined : Number(settings.max_pages_per_combo)
-    form.list_delay_seconds = Number(settings.list_delay_seconds || 0.8)
-    form.image_delay_seconds = Number(settings.image_delay_seconds || 0.3)
-    form.max_retries = Number(settings.max_retries || 3)
-    form.list_max_retries = Number(settings.list_max_retries || 3)
+    form.list_delay_seconds = Number(settings.list_delay_seconds ?? 0.8)
+    form.image_delay_seconds = Number(settings.image_delay_seconds ?? 0.3)
+    form.max_retries = Number(settings.max_retries ?? 3)
+    form.list_max_retries = Number(settings.list_max_retries ?? 3)
     form.combo_failure_limit = Number(settings.combo_failure_limit ?? 10)
-    form.connect_timeout = Number(settings.connect_timeout || 6)
-    form.read_timeout = Number(settings.read_timeout || 30)
+    form.connect_timeout = Number(settings.connect_timeout ?? 6)
+    form.read_timeout = Number(settings.read_timeout ?? 30)
   },
   { immediate: true },
 )
 
 function submit() {
   const payload: Partial<PublicSettings> = { ...form }
-  if (!form.output_dir.trim()) delete payload.output_dir
-  else payload.output_dir = form.output_dir.trim()
+  payload.output_dir = form.output_dir.trim()
   if (!form.max_pages_per_combo) payload.max_pages_per_combo = null
   emit('save', payload)
 }

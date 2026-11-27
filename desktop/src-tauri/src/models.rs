@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use chrono::Local;
 use regex::Regex;
@@ -130,31 +131,124 @@ pub fn default_output_dir(data_dir: &Path) -> PathBuf {
 }
 
 pub fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
+    let trimmed = path.trim();
+    if trimmed == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+    {
         if let Some(home) = dirs::home_dir() {
             return home.join(rest);
         }
     }
-    PathBuf::from(path)
+    PathBuf::from(trimmed)
+}
+
+fn is_windows_reserved_device_name(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_matches(|c| c == ' ' || c == '.');
+    let upper = stem.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM0"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT0"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 pub fn safe_filename(value: &str, fallback: &str) -> String {
-    let illegal = Regex::new(r#"[\\/:*?"<>|\n\r\t]+"#).unwrap();
-    let spaces = Regex::new(r"\s+").unwrap();
+    static ILLEGAL_RE: OnceLock<Regex> = OnceLock::new();
+    static SPACES_RE: OnceLock<Regex> = OnceLock::new();
+    let illegal = ILLEGAL_RE.get_or_init(|| Regex::new(r#"[\\/:*?"<>|\x00-\x1f\x7f]+"#).unwrap());
+    let spaces = SPACES_RE.get_or_init(|| Regex::new(r"\s+").unwrap());
+
     let replaced = illegal.replace_all(value, "_");
     let trimmed = replaced.trim_matches(|c| c == ' ' || c == '.' || c == '_');
     let collapsed = spaces.replace_all(trimmed, " ");
-    let limited: String = collapsed.chars().take(120).collect();
-    if limited.is_empty() {
+    let limited: String = collapsed
+        .chars()
+        .take(120)
+        .collect::<String>()
+        .trim_end_matches(|c| c == ' ' || c == '.')
+        .to_string();
+    let out = if limited.is_empty() {
         fallback.to_string()
     } else {
         limited
+    };
+    if is_windows_reserved_device_name(&out) {
+        format!("_{out}")
+    } else {
+        out
     }
 }
 
 pub fn ensure_directory(path: &Path) -> std::io::Result<PathBuf> {
     fs::create_dir_all(path)?;
     Ok(path.to_path_buf())
+}
+
+/// Cross-platform atomic file replacement that handles Windows quirks:
+/// - destination already exists (`ERROR_ALREADY_EXISTS`)
+/// - transient Windows Defender / antivirus file locks (`ERROR_ACCESS_DENIED` / `ERROR_SHARING_VIOLATION`)
+/// - cross-volume moves (`EXDEV`)
+pub fn replace_file_atomic(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if src == dst {
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if fs::rename(src, dst).is_ok() {
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        for attempt in 0..4 {
+            let _ = fs::remove_file(dst);
+            if fs::rename(src, dst).is_ok() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(60 * (attempt + 1)));
+        }
+    }
+    let _ = fs::remove_file(dst);
+    match fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            fs::copy(src, dst)?;
+            let _ = fs::remove_file(src);
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,7 +349,11 @@ impl CrawlCombo {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CrawlFilters {
     pub scenes: Vec<String>,
@@ -266,7 +364,24 @@ pub struct CrawlFilters {
     pub terms: Vec<String>,
     pub file_type: String,
     pub max_pages_per_combo: Option<usize>,
+    #[serde(default = "default_true")]
     pub download_paid: bool,
+}
+
+impl Default for CrawlFilters {
+    fn default() -> Self {
+        Self {
+            scenes: Vec::new(),
+            years: Vec::new(),
+            ranks: Vec::new(),
+            provinces: Vec::new(),
+            grades: Vec::new(),
+            terms: Vec::new(),
+            file_type: String::new(),
+            max_pages_per_combo: None,
+            download_paid: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,6 +439,7 @@ pub struct CrawlStats {
     pub completed_combos: usize,
     pub resources_seen: usize,
     pub resources_total: usize,
+    pub resources_processed: usize,
     pub resources_completed: usize,
     pub current_resource_name: String,
     pub images_downloaded: usize,
@@ -334,6 +450,8 @@ pub struct CrawlStats {
     pub running: bool,
     pub paused: bool,
     pub aborted: bool,
+    pub scan_completed: bool,
+    pub duration_seconds: u64,
     pub error: String,
 }
 
@@ -347,6 +465,7 @@ impl Default for CrawlStats {
             completed_combos: 0,
             resources_seen: 0,
             resources_total: 0,
+            resources_processed: 0,
             resources_completed: 0,
             current_resource_name: String::new(),
             images_downloaded: 0,
@@ -357,6 +476,8 @@ impl Default for CrawlStats {
             running: false,
             paused: false,
             aborted: false,
+            scan_completed: false,
+            duration_seconds: 0,
             error: String::new(),
         }
     }
@@ -514,6 +635,19 @@ impl ResourcePathBuilder {
     }
 
     pub fn resource_dir(&self, record: &ResourceRecord) -> PathBuf {
+        #[cfg(target_os = "windows")]
+        let max_dir_len: Option<usize> = Some(190);
+        #[cfg(not(target_os = "windows"))]
+        let max_dir_len: Option<usize> = None;
+
+        self.resource_dir_with_budget(record, max_dir_len)
+    }
+
+    pub fn resource_dir_with_budget(
+        &self,
+        record: &ResourceRecord,
+        max_dir_len: Option<usize>,
+    ) -> PathBuf {
         let subject_fallback = if self.subject_code.is_empty() {
             "unknown"
         } else {
@@ -524,13 +658,56 @@ impl ResourcePathBuilder {
         } else {
             &record.resource_id
         };
-        self.output_dir
+        let parent = self
+            .output_dir
             .join(safe_filename(&record.subject, subject_fallback))
             .join(safe_filename(&record.grade, "unknown"))
             .join(safe_filename(&Self::term_dir_name(&record.term), "unknown"))
-            .join(safe_filename(&Self::province_dir_name(&record.province), "unknown"))
-            .join(safe_filename(&record.scene, "unknown"))
-            .join(safe_filename(&record.resource_name, id_fallback))
+            .join(safe_filename(
+                &Self::province_dir_name(&record.province),
+                "unknown",
+            ))
+            .join(safe_filename(&record.scene, "unknown"));
+
+        let mut leaf = safe_filename(&record.resource_name, id_fallback);
+        if let Some(budget) = max_dir_len {
+            let parent_len = parent.to_string_lossy().encode_utf16().count() + 1;
+            let leaf_len = leaf.encode_utf16().count();
+            if parent_len + leaf_len > budget {
+                let id_tail: String = id_fallback
+                    .chars()
+                    .rev()
+                    .take(8)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                let suffix = format!("_{id_tail}");
+                let suffix_len = suffix.encode_utf16().count();
+                let allowed_prefix = budget.saturating_sub(parent_len + suffix_len);
+                if allowed_prefix >= 6 {
+                    let mut truncated = String::new();
+                    let mut acc = 0usize;
+                    for ch in leaf.chars() {
+                        let w = ch.len_utf16();
+                        if acc + w > allowed_prefix {
+                            break;
+                        }
+                        truncated.push(ch);
+                        acc += w;
+                    }
+                    let clean = truncated.trim_end_matches(|c| c == ' ' || c == '.' || c == '_');
+                    leaf = if clean.is_empty() {
+                        id_fallback.to_string()
+                    } else {
+                        format!("{clean}{suffix}")
+                    };
+                } else {
+                    leaf = id_tail;
+                }
+            }
+        }
+        parent.join(leaf)
     }
 
     pub fn term_dir_name(term: &str) -> String {
@@ -600,11 +777,7 @@ impl ResourceArtifacts {
             fs::create_dir_all(parent)?;
         }
         if source_pdf != final_pdf {
-            fs::rename(source_pdf, &final_pdf).or_else(|_: std::io::Error| {
-                fs::copy(source_pdf, &final_pdf)?;
-                let _ = fs::remove_file(source_pdf);
-                Ok::<(), std::io::Error>(())
-            })?;
+            replace_file_atomic(source_pdf, &final_pdf)?;
         }
         Ok(final_pdf)
     }
@@ -623,4 +796,141 @@ impl ResourceArtifacts {
 
 pub fn now_iso_seconds() -> String {
     Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+struct LimiterState {
+    counts: parking_lot::Mutex<(usize, usize)>, // (in_use, limit)
+    notify: tokio::sync::Notify,
+}
+
+/// Dynamically resizable concurrency limiter shared across active and queued tasks.
+#[derive(Clone)]
+pub struct DynamicLimiter {
+    inner: std::sync::Arc<LimiterState>,
+}
+
+pub struct DynamicPermit {
+    inner: std::sync::Arc<LimiterState>,
+}
+
+impl DynamicLimiter {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            inner: std::sync::Arc::new(LimiterState {
+                counts: parking_lot::Mutex::new((0, limit.max(1))),
+                notify: tokio::sync::Notify::new(),
+            }),
+        }
+    }
+
+    pub fn set_limit(&self, new_limit: usize) {
+        let clamped = new_limit.max(1);
+        {
+            let mut guard = self.inner.counts.lock();
+            guard.1 = clamped;
+        }
+        self.inner.notify.notify_waiters();
+    }
+
+    pub fn limit(&self) -> usize {
+        self.inner.counts.lock().1.max(1)
+    }
+
+    pub async fn acquire(&self) -> Result<DynamicPermit, ()> {
+        loop {
+            {
+                let mut guard = self.inner.counts.lock();
+                if guard.0 < guard.1 {
+                    guard.0 += 1;
+                    return Ok(DynamicPermit {
+                        inner: self.inner.clone(),
+                    });
+                }
+            }
+            let notified = self.inner.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut guard = self.inner.counts.lock();
+                if guard.0 < guard.1 {
+                    guard.0 += 1;
+                    return Ok(DynamicPermit {
+                        inner: self.inner.clone(),
+                    });
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Drop for DynamicPermit {
+    fn drop(&mut self) {
+        {
+            let mut guard = self.inner.counts.lock();
+            guard.0 = guard.0.saturating_sub(1);
+        }
+        self.inner.notify.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_filename_avoids_windows_reserved_names_and_trailing_dots() {
+        assert_eq!(safe_filename("CON", "fallback"), "_CON");
+        assert_eq!(safe_filename("nul.txt", "fallback"), "_nul.txt");
+        assert_eq!(safe_filename("COM1", "fallback"), "_COM1");
+        assert_eq!(safe_filename("试卷名... ", "fallback"), "试卷名");
+    }
+
+    #[test]
+    fn resource_dir_with_budget_truncates_long_paths_for_windows_max_path() {
+        let mut settings = AppSettings::default();
+        settings.output_dir = PathBuf::from(
+            r"C:\Users\ZhangSan\Downloads\STZY-Papers\tasks\task_20261124_162033_a1b2c3d4",
+        );
+        let builder = ResourcePathBuilder::new(&settings);
+        let rec: ResourceRecord = serde_json::from_value(serde_json::json!({
+            "resource_id": "684899820373319680",
+            "resource_name": "湖南省株洲市石峰区2025-2026学年七年级上学期期末考试地理试题（含答案解析及答题卡超长标题测试超长标题测试超长标题测试）",
+            "subject": "地理",
+            "grade": "七年级",
+            "term": "七上",
+            "province": "湖南",
+            "scene": "期末考试",
+            "status": "pending"
+        }))
+        .unwrap();
+
+        let dir = builder.resource_dir_with_budget(&rec, Some(120));
+        let utf16_len = dir.to_string_lossy().encode_utf16().count();
+        assert!(
+            utf16_len <= 120,
+            "expected path len <= 120, got {utf16_len}: {}",
+            dir.display()
+        );
+        assert!(dir.to_string_lossy().ends_with("_73319680"));
+    }
+
+    #[test]
+    fn replace_file_atomic_overwrites_existing_destination() {
+        let root = std::env::temp_dir().join(format!(
+            "stzy_replace_atomic_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let src = root.join("src.tmp");
+        let dst = root.join("dst.bin");
+        fs::write(&dst, b"old").unwrap();
+        fs::write(&src, b"new_content").unwrap();
+
+        replace_file_atomic(&src, &dst).unwrap();
+        assert!(!src.exists());
+        assert_eq!(fs::read(&dst).unwrap(), b"new_content");
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

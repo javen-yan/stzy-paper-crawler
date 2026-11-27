@@ -1,16 +1,15 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 
 use image::{ImageBuffer, Rgb};
 use regex::Regex;
 
 use crate::converter::fonts::{
-    base_font_key, build_font_database, font_key, heuristic_substitutes_for, substitutes_for,
+    base_font_key, build_font_database_arc, font_key, heuristic_substitutes_for, substitutes_for,
 };
 use crate::error::{AppError, AppResult};
-use crate::models::{ensure_directory, AppSettings};
+use crate::models::{ensure_directory, replace_file_atomic, AppSettings};
 
 pub const SVG_FONT_FALLBACKS: &[&str] = &[
     "Noto Sans CJK SC",
@@ -46,17 +45,24 @@ pub fn svg_needs_font_fallback(svg_path: &Path) -> bool {
 }
 
 pub fn svg_content_needs_font_fallback(content: &str) -> bool {
-    content.contains("<text")
-        && content.contains("@font-face")
-        && content.contains("data:font/")
-        && KNOWN_SUBSET_PDF_FONTS
-            .iter()
-            .any(|name| content.contains(name))
+    if !content.contains("<text") {
+        return false;
+    }
+    if content.contains("@font-face") && content.contains("data:font/") {
+        return true;
+    }
+    static SUBSET_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = SUBSET_RE.get_or_init(|| Regex::new(r"[A-Z]{6}\+[A-Za-z]").unwrap());
+    re.is_match(content)
+        || (content.contains("@font-face")
+            && KNOWN_SUBSET_PDF_FONTS
+                .iter()
+                .any(|name| content.contains(name)))
 }
 
-/// Detects the best installed CJK font family from `fontdb`.
+/// Detects the best installed CJK font family from cached `fontdb`.
 pub fn detect_svg_cjk_font_family(settings: &AppSettings) -> String {
-    let db = build_font_database(settings);
+    let db = build_font_database_arc(settings);
     for candidate in SVG_FONT_FALLBACKS {
         let found = db.faces().any(|face| {
             face.families
@@ -73,8 +79,13 @@ pub fn detect_svg_cjk_font_family(settings: &AppSettings) -> String {
 /// Extracts declared `font-family` names from SVG markup for font sampling & auto-install.
 pub fn extract_svg_declared_fonts(raw_svg: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    if let Ok(re_attr) = Regex::new(r#"font-family="([^"]+)""#) {
-        for cap in re_attr.captures_iter(raw_svg) {
+    static ATTR_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static STYLE_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re_attr = ATTR_RE.get_or_init(|| Regex::new(r#"font-family="([^"]+)""#).unwrap());
+    let re_style = STYLE_RE.get_or_init(|| Regex::new(r#"font-family\s*:\s*([^;"\}]+)"#).unwrap());
+
+    for re in [re_attr, re_style] {
+        for cap in re.captures_iter(raw_svg) {
             if let Some(m) = cap.get(1) {
                 for item in m.as_str().split(',') {
                     let clean = item.trim().trim_matches(['\'', '"']);
@@ -167,9 +178,9 @@ pub fn convert_svg_to_png(svg_path: &Path, png_path: &Path, settings: &AppSettin
     let preferred_cjk = detect_svg_cjk_font_family(settings);
     let normalized = normalize_svg_for_usvg(&raw, &preferred_cjk);
 
-    let db = build_font_database(settings);
+    let db = build_font_database_arc(settings);
     let mut opt = resvg::usvg::Options {
-        fontdb: Arc::new(db),
+        fontdb: db,
         ..resvg::usvg::Options::default()
     };
     if !preferred_cjk.is_empty() {
@@ -209,10 +220,21 @@ pub fn convert_svg_to_png(svg_path: &Path, png_path: &Path, settings: &AppSettin
     if let Some(parent) = png_path.parent() {
         ensure_directory(parent)?;
     }
-    let tmp_path = png_path.with_extension("png.tmp");
-    rgb.save_with_format(&tmp_path, image::ImageFormat::Png)
-        .map_err(|e| AppError::Message(format!("写入 PNG 失败：{e}")))?;
-    fs::rename(&tmp_path, png_path)?;
+    let tmp_path = png_path.with_file_name(format!(
+        ".{}.tmp",
+        png_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("page.png")
+    ));
+    if let Err(e) = rgb.save_with_format(&tmp_path, image::ImageFormat::Png) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(AppError::Message(format!("写入 PNG 失败：{e}")));
+    }
+    if let Err(e) = replace_file_atomic(&tmp_path, png_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(AppError::Io(e));
+    }
     Ok(())
 }
 
@@ -223,18 +245,10 @@ pub fn convert_svg_to_pdf_bytes(svg_path: &Path, settings: &AppSettings) -> AppR
     let preferred_cjk = detect_svg_cjk_font_family(settings);
     let normalized = normalize_svg_for_usvg(&raw, &preferred_cjk);
 
-    let mut db = svg2pdf::usvg::fontdb::Database::new();
-    db.load_system_fonts();
-    if let Ok(dirs) = crate::converter::fonts::font_directories(settings) {
-        for dir in dirs {
-            if dir.is_dir() {
-                db.load_fonts_dir(&dir);
-            }
-        }
-    }
+    let db = build_font_database_arc(settings);
 
     let mut opt = svg2pdf::usvg::Options {
-        fontdb: Arc::new(db),
+        fontdb: db,
         ..svg2pdf::usvg::Options::default()
     };
     if !preferred_cjk.is_empty() {
@@ -281,9 +295,20 @@ pub fn save_dynamic_image_on_white(dyn_img: &image::DynamicImage, png_path: &Pat
     if let Some(parent) = png_path.parent() {
         ensure_directory(parent)?;
     }
-    let tmp_path = png_path.with_extension("png.tmp");
-    rgb.save_with_format(&tmp_path, image::ImageFormat::Png)
-        .map_err(|e| AppError::Message(format!("写入 PNG 失败：{e}")))?;
-    fs::rename(&tmp_path, png_path)?;
+    let tmp_path = png_path.with_file_name(format!(
+        ".{}.tmp",
+        png_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("page.png")
+    ));
+    if let Err(e) = rgb.save_with_format(&tmp_path, image::ImageFormat::Png) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(AppError::Message(format!("写入 PNG 失败：{e}")));
+    }
+    if let Err(e) = replace_file_atomic(&tmp_path, png_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(AppError::Io(e));
+    }
     Ok(())
 }

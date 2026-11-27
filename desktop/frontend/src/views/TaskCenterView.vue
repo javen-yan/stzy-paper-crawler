@@ -45,7 +45,11 @@ const rawPageTasks = computed(() => tasks.value.slice(0, pageSize.value))
 
 const filteredTasks = computed(() => {
   const kw = searchKeyword.value.trim().toLowerCase()
+  const expectArchived = quickFilter.value === 'archived'
   return rawPageTasks.value.filter((task, idx) => {
+    if (Boolean(task.archived) !== expectArchived) {
+      return false
+    }
     if (quickFilter.value === 'active' && !['running', 'queued', 'pausing'].includes(task.status)) {
       return false
     }
@@ -54,7 +58,7 @@ const filteredTasks = computed(() => {
     }
     if (
       quickFilter.value === 'attention' &&
-      !['failed', 'auth_expired', 'interrupted', 'partial_completed', 'paused'].includes(task.status)
+      !['failed', 'auth_expired', 'interrupted', 'partial_completed', 'paused', 'cancelled'].includes(task.status)
     ) {
       return false
     }
@@ -262,17 +266,32 @@ onMounted(async () => {
 
       <el-skeleton v-if="loading" :rows="5" animated />
       <EmptyState
-        v-else-if="!rawPageTasks.length"
+        v-else-if="!rawPageTasks.length && page === 1"
         :title="quickFilter === 'archived' ? '暂无已归档任务' : '暂无下载任务'"
         :description="quickFilter === 'archived' ? '归档后的历史任务会显示在这里。' : '点击右上角「新建下载任务」选择学科与地区开始下载。'"
       />
-      <EmptyState
-        v-else-if="!filteredTasks.length"
-        title="没有匹配当前筛选的任务"
-        description="可以切换上方状态标签或清空搜索关键词。"
-        action-text="查看全部任务"
-        @action="quickFilter = 'all'; searchKeyword = ''"
-      />
+      <template v-else-if="!filteredTasks.length">
+        <EmptyState
+          title="当前页没有匹配筛选的任务"
+          description="可以翻页查看、切换上方状态标签或清空搜索关键词。"
+          action-text="查看全部任务"
+          @action="quickFilter = 'all'; searchKeyword = ''"
+        />
+        <SimplePager
+          v-if="page > 1 || hasNextPage"
+          class="list-pager"
+          :page="page"
+          :page-size="pageSize"
+          :item-count="rawPageTasks.length"
+          :has-next="hasNextPage"
+          :loading="loading"
+          label="任务"
+          @prev="prevPage"
+          @next="nextPage"
+          @refresh="refresh"
+          @page-size-change="changePageSize"
+        />
+      </template>
       <template v-else>
         <TaskTable
           :tasks="filteredTasks"

@@ -11,22 +11,52 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{expand_tilde, safe_filename};
+use crate::models::{expand_tilde, replace_file_atomic, safe_filename};
 use crate::store::SqliteStore;
 
 const IMAGE_SUFFIXES: &[&str] = &[".png", ".jpg", ".jpeg", ".webp"];
 const BLOCKED_INLINE_SUFFIXES: &[&str] = &[".svg", ".html", ".htm"];
 
-fn clean_canonical_path(path: &Path) -> PathBuf {
+pub(crate) fn clean_canonical_path(path: &Path) -> PathBuf {
     let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    normalize_windows_verbatim_path(resolved)
+}
+
+fn normalize_windows_verbatim_path(path: PathBuf) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(unc_tail) = raw.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc_tail}"));
+    }
+    if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+        return PathBuf::from(stripped);
+    }
+    path
+}
+
+fn strip_prefix_cross_platform(path: &Path, base: &Path) -> Option<PathBuf> {
+    if let Ok(rel) = path.strip_prefix(base) {
+        return Some(rel.to_path_buf());
+    }
     #[cfg(target_os = "windows")]
     {
-        let raw = resolved.to_string_lossy();
-        if let Some(stripped) = raw.strip_prefix(r"\\?\") {
-            return PathBuf::from(stripped);
+        let p_comps: Vec<_> = path.components().collect();
+        let b_comps: Vec<_> = base.components().collect();
+        if p_comps.len() >= b_comps.len() {
+            let matched = b_comps.iter().zip(p_comps.iter()).all(|(bc, pc)| {
+                bc.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&pc.as_os_str().to_string_lossy())
+            });
+            if matched {
+                let mut out = PathBuf::new();
+                for c in &p_comps[b_comps.len()..] {
+                    out.push(c.as_os_str());
+                }
+                return Some(out);
+            }
         }
     }
-    resolved
+    None
 }
 
 #[derive(Clone)]
@@ -163,7 +193,7 @@ impl ArtifactService {
             .store
             .artifacts(task_id, resource_id, kind, limit, offset)?;
         let mut task_cache: HashMap<String, Option<Value>> = HashMap::new();
-        let output_root = self.current_output_root();
+        let output_root = clean_canonical_path(&self.current_output_root());
 
         for item in &mut items {
             let tid = item
@@ -333,6 +363,39 @@ impl ArtifactService {
         Ok((file_path, mime))
     }
 
+    pub fn is_within_allowed_roots(&self, target: &Path) -> bool {
+        let canonical = clean_canonical_path(target);
+        let root = clean_canonical_path(&self.current_output_root());
+        if strip_prefix_cross_platform(&canonical, &root).is_some() {
+            return true;
+        }
+        if let Ok(tasks) = self.store.list_tasks(false, 500, 0) {
+            for t in tasks {
+                if let Some(dir_s) = t.get("output_dir").and_then(Value::as_str) {
+                    if !dir_s.is_empty() {
+                        let task_root = clean_canonical_path(Path::new(dir_s));
+                        if strip_prefix_cross_platform(&canonical, &task_root).is_some() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(tasks) = self.store.list_tasks(true, 500, 0) {
+            for t in tasks {
+                if let Some(dir_s) = t.get("output_dir").and_then(Value::as_str) {
+                    if !dir_s.is_empty() {
+                        let task_root = clean_canonical_path(Path::new(dir_s));
+                        if strip_prefix_cross_platform(&canonical, &task_root).is_some() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
     pub fn resolve_artifact_file(&self, artifact_id_val: &str) -> AppResult<(PathBuf, String)> {
         let art = self
             .store
@@ -342,7 +405,7 @@ impl ArtifactService {
             .get("path")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let p = PathBuf::from(raw_path);
+        let p = clean_canonical_path(Path::new(raw_path));
         if !p.is_file() || p.is_symlink() {
             return Err(AppError::NotFound("Artifact file not found on disk".to_string()));
         }
@@ -429,7 +492,24 @@ impl ArtifactService {
             fs::create_dir_all(parent)?;
         }
 
-        let tmp_zip = destination_zip.with_extension("zip.tmp");
+        let tmp_zip = destination_zip.with_file_name(format!(
+            ".{}.{}.tmp",
+            destination_zip
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("export.zip"),
+            std::process::id()
+        ));
+        struct TmpCleanup<'a>(&'a Path, bool);
+        impl Drop for TmpCleanup<'_> {
+            fn drop(&mut self) {
+                if self.1 {
+                    let _ = fs::remove_file(self.0);
+                }
+            }
+        }
+        let mut tmp_guard = TmpCleanup(&tmp_zip, true);
+
         let out_file = File::create(&tmp_zip)?;
         let mut writer = ZipWriter::new(out_file);
         let options = SimpleFileOptions::default()
@@ -437,6 +517,8 @@ impl ArtifactService {
 
         let mut included = Vec::new();
         let mut missing = Vec::new();
+        let mut used_arcnames = std::collections::HashSet::new();
+        used_arcnames.insert("manifest.json".to_string());
         let mut buf = vec![0u8; 64 * 1024];
 
         for file_path in files {
@@ -450,11 +532,22 @@ impl ArtifactService {
                 .filter(|s| !s.is_empty())
                 .map(|part| safe_filename(part, "未命名"))
                 .collect();
-            let arcname = if arc_parts.is_empty() {
+            let base_arcname = if arc_parts.is_empty() {
                 "未命名".to_string()
             } else {
                 arc_parts.join("/")
             };
+            let mut arcname = base_arcname.clone();
+            let mut dup_idx = 2usize;
+            while used_arcnames.contains(&arcname.to_lowercase()) {
+                if let Some((stem, ext)) = base_arcname.rsplit_once('.') {
+                    arcname = format!("{stem} ({dup_idx}).{ext}");
+                } else {
+                    arcname = format!("{base_arcname} ({dup_idx})");
+                }
+                dup_idx += 1;
+            }
+            used_arcnames.insert(arcname.to_lowercase());
 
             writer
                 .start_file(&arcname, options)
@@ -471,7 +564,6 @@ impl ArtifactService {
         }
 
         if included.is_empty() {
-            let _ = fs::remove_file(&tmp_zip);
             return Err(AppError::Validation("没有可用文件可打包".to_string()));
         }
 
@@ -487,7 +579,8 @@ impl ArtifactService {
             .finish()
             .map_err(|e| AppError::Message(format!("完成 ZIP 归档失败：{e}")))?;
 
-        fs::rename(&tmp_zip, destination_zip)?;
+        replace_file_atomic(&tmp_zip, destination_zip)?;
+        tmp_guard.1 = false;
         let size_bytes = fs::metadata(destination_zip).map(|m| m.len()).unwrap_or(0);
         let display_name = destination_zip
             .file_name()
@@ -565,9 +658,8 @@ impl ArtifactService {
             .get("path")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let p = Path::new(raw_path);
-        let rel_parts: Vec<String> = p
-            .strip_prefix(output_root)
+        let p = clean_canonical_path(Path::new(raw_path));
+        let rel_parts: Vec<String> = strip_prefix_cross_platform(&p, output_root)
             .map(|rel| {
                 rel.components()
                     .filter_map(|c| match c {
@@ -1020,5 +1112,14 @@ mod tests {
         assert_eq!(exp["status"], "completed");
         assert_eq!(exp["included_count"], 2);
         assert!(zip_out.is_file());
+
+        assert_eq!(
+            normalize_windows_verbatim_path(PathBuf::from(r"\\?\UNC\Mac\Home\Downloads\STZY")),
+            PathBuf::from(r"\\Mac\Home\Downloads\STZY")
+        );
+        assert_eq!(
+            normalize_windows_verbatim_path(PathBuf::from(r"\\?\C:\Users\Test\Downloads")),
+            PathBuf::from(r"C:\Users\Test\Downloads")
+        );
     }
 }

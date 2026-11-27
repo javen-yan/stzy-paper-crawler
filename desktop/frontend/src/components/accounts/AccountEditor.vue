@@ -54,6 +54,13 @@ function close() {
   visible.value = false
 }
 
+function closeAndReset() {
+  close()
+  reset()
+}
+
+defineExpose({ closeAndReset })
+
 function submitPhoneLogin() {
   if (!canPhoneLogin.value) return
   emit('phoneLogin', {
@@ -61,8 +68,6 @@ function submitPhoneLogin() {
     phone: phoneForm.value.phone.trim(),
     password: phoneForm.value.password || undefined,
   })
-  close()
-  reset()
 }
 
 function submitCredentialImport() {
@@ -71,8 +76,6 @@ function submitCredentialImport() {
     name: credentialForm.value.name.trim() || undefined,
     raw: credentialForm.value.raw.trim(),
   })
-  close()
-  reset()
 }
 
 async function copyScript() {

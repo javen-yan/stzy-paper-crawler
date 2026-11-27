@@ -3,7 +3,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::sync::Semaphore;
 
 use crate::converter::office::{humanize_conversion_error, source_kind};
 use crate::converter::pdf::pdf_file_looks_valid;
@@ -13,8 +12,8 @@ use crate::crawler::api::StzyCrawlerApi;
 use crate::crawler::client::StzyHttpClient;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    ensure_directory, AppSettings, DownloadResult, ResourceArtifacts, ResourcePathBuilder,
-    ResourceRecord, ResourceStatus,
+    ensure_directory, replace_file_atomic, AppSettings, DownloadResult, DynamicLimiter,
+    ResourceArtifacts, ResourcePathBuilder, ResourceRecord, ResourceStatus,
 };
 
 const SUPPORTED_SOURCE_SUFFIXES: &[&str] = &[
@@ -24,6 +23,7 @@ const SUPPORTED_SOURCE_SUFFIXES: &[&str] = &[
 #[derive(Clone)]
 pub struct DownloadService {
     pub settings: AppSettings,
+    pub download_paid: bool,
     pub client: StzyHttpClient,
     pub api: StzyCrawlerApi,
     pub paths: ResourcePathBuilder,
@@ -37,7 +37,18 @@ impl DownloadService {
         settings: AppSettings,
         client: StzyHttpClient,
         api: StzyCrawlerApi,
-        convert_semaphore: Option<Arc<Semaphore>>,
+        convert_semaphore: Option<DynamicLimiter>,
+        on_log: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    ) -> Self {
+        Self::new_with_paid_policy(settings, true, client, api, convert_semaphore, on_log)
+    }
+
+    pub fn new_with_paid_policy(
+        settings: AppSettings,
+        download_paid: bool,
+        client: StzyHttpClient,
+        api: StzyCrawlerApi,
+        convert_semaphore: Option<DynamicLimiter>,
         on_log: Option<Arc<dyn Fn(String) + Send + Sync>>,
     ) -> Self {
         let log_cb = on_log.unwrap_or_else(|| Arc::new(|_| {}));
@@ -52,6 +63,7 @@ impl DownloadService {
             AccountScheduler::new(client.clone(), api.clone(), Some(log_cb.clone()));
         Self {
             settings,
+            download_paid,
             client,
             api,
             paths,
@@ -161,6 +173,7 @@ impl DownloadService {
                     });
                 }
                 Err(err) if err.is_cancelled() => return Err(AppError::Cancelled),
+                Err(err) if err.requires_login() => return Err(err),
                 Err(exc) => {
                     return Ok(DownloadResult {
                         status: ResourceStatus::Partial,
@@ -228,6 +241,18 @@ impl DownloadService {
         }
 
         let pdf_url = if !file_non_empty(&pdf_path) {
+            if record.price > 0.0 && !self.download_paid {
+                return Ok(DownloadResult {
+                    status: ResourceStatus::SkippedPaid,
+                    saved_pages: DocumentConverter::saved_picture_count_from_dir(&directory),
+                    expected_pages: record.page_count,
+                    source: source.to_string(),
+                    local_dir: dir_str,
+                    error: "已按任务设置跳过付费试卷原文下载".to_string(),
+                    images_added: 0,
+                    paid_unavailable: 1,
+                });
+            }
             (self.on_log)(format!(
                 "资源进度：{} - 获取 PDF 地址",
                 record.resource_id
@@ -337,6 +362,18 @@ impl DownloadService {
         }
 
         if !original.exists() {
+            if record.price > 0.0 && !self.download_paid {
+                return Ok(DownloadResult {
+                    status: ResourceStatus::SkippedPaid,
+                    saved_pages: 0,
+                    expected_pages: record.page_count,
+                    source: "original".to_string(),
+                    local_dir: dir_str,
+                    error: "已按任务设置跳过付费试卷原文下载".to_string(),
+                    images_added: 0,
+                    paid_unavailable: 1,
+                });
+            }
             (self.on_log)(format!(
                 "资源进度：{} - 获取 {suffix} 原文地址",
                 record.resource_id
@@ -375,7 +412,7 @@ impl DownloadService {
                 self.client
                     .download(&res.url, &temporary, None, &record.resource_name)
                     .await?;
-                fs::rename(&temporary, &original)?;
+                replace_file_atomic(&temporary, &original)?;
                 source_kind(&original)?;
                 Ok::<(), AppError>(())
             }
@@ -441,10 +478,15 @@ impl DownloadService {
                     map.entry("sourcePageNum".to_string())
                         .or_insert_with(|| Value::from(record.page_count));
                 }
+                let check_expected = if expected_pages > 0 {
+                    expected_pages
+                } else {
+                    converted
+                };
                 record.page_count = converted;
                 let mut res = Self::result_from_count(
                     converted,
-                    converted,
+                    check_expected,
                     "original_pdf",
                     dir_str,
                     added,
@@ -455,6 +497,7 @@ impl DownloadService {
                 Ok(res)
             }
             Err(err) if err.is_cancelled() => Err(AppError::Cancelled),
+            Err(err) if err.requires_login() => Err(err),
             Err(exc) => Ok(DownloadResult {
                 status: ResourceStatus::Partial,
                 saved_pages: 0,

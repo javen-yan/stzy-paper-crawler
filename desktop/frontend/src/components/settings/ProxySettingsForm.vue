@@ -79,11 +79,11 @@ watch(
     const provider = String(settings.proxy_provider || 'generic')
     form.proxy_mode = (['off', 'fixed', 'api'].includes(mode) ? mode : 'off') as ProxyMode
     form.proxy_provider = (['generic', 'shenlong'].includes(provider) ? provider : 'generic') as ProxyProvider
-    form.concurrency = Number(settings.concurrency || 1)
-    form.proxy_max_failures = Number(settings.proxy_max_failures || 3)
-    form.proxy_cooldown_seconds = Number(settings.proxy_cooldown_seconds || 300)
-    form.proxy_min_ttl_seconds = Number(settings.proxy_min_ttl_seconds || 30)
-    form.proxy_pool_count = Number(settings.proxy_pool_count || 0)
+    form.concurrency = Number(settings.concurrency ?? 1)
+    form.proxy_max_failures = Number(settings.proxy_max_failures ?? 3)
+    form.proxy_cooldown_seconds = Number(settings.proxy_cooldown_seconds ?? 300)
+    form.proxy_min_ttl_seconds = Number(settings.proxy_min_ttl_seconds ?? 30)
+    form.proxy_pool_count = Number(settings.proxy_pool_count ?? 0)
 
     form.has_proxy_pool = syncSecretField('proxy_pool', settings.proxy_pool, settings.has_proxy_pool)
     form.has_proxy_api_url = syncSecretField('proxy_api_url', settings.proxy_api_url, settings.has_proxy_api_url)
@@ -128,7 +128,11 @@ function attachSecretToPayload(payload: Partial<PublicSettings>, key: SecretKey)
   if (!editingSecret[key]) {
     return
   }
-  if (val && val !== initialMasked[key] && !val.includes('*****')) {
+  if (!val) {
+    payload[key] = ''
+    return
+  }
+  if (val !== initialMasked[key] && !val.includes('*****')) {
     payload[key] = val
   }
 }

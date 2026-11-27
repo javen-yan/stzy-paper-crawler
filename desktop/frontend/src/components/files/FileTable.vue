@@ -20,7 +20,7 @@ type TreeNode = {
   children: TreeNode[]
 }
 
-const props = defineProps<{ taskId?: string }>()
+const props = defineProps<{ taskId?: string; selectable?: boolean }>()
 const emit = defineEmits<{
   selectionChange: [filePaths: string[]]
 }>()
@@ -35,6 +35,7 @@ const currentPath = ref(ROOT_PATH)
 const currentFiles = ref<ArtifactBrowserEntry[]>([])
 const selectedRows = ref<ArtifactBrowserEntry[]>([])
 const searchText = ref('')
+const isSearchMode = ref(false)
 const previewVisible = ref(false)
 const previewItem = ref<ArtifactBrowserEntry | null>(null)
 const expandedKeys = ref<string[]>([ROOT_PATH])
@@ -48,9 +49,10 @@ const HIDDEN_INTERNAL_FILES = new Set(['conversion-report.json', '.conversion-re
 const visibleFiles = computed(() => {
   const base = currentFiles.value.filter((item) => !HIDDEN_INTERNAL_FILES.has(item.name))
   const needle = searchText.value.trim().toLowerCase()
-  const files = needle
-    ? base.filter((item) => `${item.name} ${item.extension || ''}`.toLowerCase().includes(needle))
-    : base
+  const files =
+    needle && !isSearchMode.value
+      ? base.filter((item) => `${item.name} ${item.extension || ''} ${item.relative_path || ''}`.toLowerCase().includes(needle))
+      : base
   return [...files].sort((a, b) => {
     if (a.item_type !== b.item_type) return a.item_type === 'folder' ? -1 : 1
     return a.name.localeCompare(b.name, 'zh-Hans-CN', { numeric: true, sensitivity: 'base' })
@@ -173,7 +175,11 @@ function emitSelection() {
 }
 
 async function loadDirectory(path = ROOT_PATH, options: { force?: boolean } = {}) {
-  if (!options.force && currentPath.value === path && loadedDirs.has(path)) return
+  if (!options.force && !isSearchMode.value && currentPath.value === path && loadedDirs.has(path)) return
+  if (isSearchMode.value) {
+    isSearchMode.value = false
+    searchText.value = ''
+  }
   loading.value = true
   error.value = ''
   try {
@@ -203,6 +209,7 @@ async function runDeepSearch() {
   error.value = ''
   try {
     const payload = await searchArtifactBrowser({ path: currentPath.value, task_id: props.taskId, filter, deep: true })
+    isSearchMode.value = true
     currentFiles.value = payload.items
     selectedRows.value = []
     emitSelection()
@@ -360,7 +367,7 @@ onMounted(() => {
             </span>
             <span class="artifact-mobile-actions" @click.stop>
               <el-checkbox
-                v-if="row.item_type === 'file'"
+                v-if="selectable && row.item_type === 'file'"
                 :model-value="isSelected(row)"
                 aria-label="选择文件"
                 @change="toggleMobileSelection(row, Boolean($event))"
@@ -387,12 +394,13 @@ onMounted(() => {
           @selection-change="handleSelectionChange"
           @row-dblclick="openRow"
         >
-          <el-table-column type="selection" width="38" :selectable="(row: ArtifactBrowserEntry) => row.item_type === 'file'" />
+          <el-table-column v-if="selectable" type="selection" width="38" :selectable="(row: ArtifactBrowserEntry) => row.item_type === 'file'" />
           <el-table-column label="名称" min-width="260" show-overflow-tooltip>
             <template #default="{ row }">
               <button class="artifact-name-button" type="button" @click="openRow(row)">
                 <component :is="iconFor(row)" :size="17" />
                 <span>{{ row.name }}</span>
+                <small v-if="isSearchMode && row.parent_path" class="artifact-search-parent">（{{ row.parent_path }}）</small>
               </button>
             </template>
           </el-table-column>

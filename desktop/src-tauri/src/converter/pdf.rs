@@ -9,7 +9,7 @@ use pdfium_render::prelude::*;
 
 use crate::converter::svg::{convert_svg_to_pdf_bytes, save_dynamic_image_on_white};
 use crate::error::{AppError, AppResult};
-use crate::models::{ensure_directory, AppSettings, ResourceArtifacts};
+use crate::models::{ensure_directory, replace_file_atomic, AppSettings, ResourceArtifacts};
 
 static PDFIUM_RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -191,16 +191,15 @@ where
 }
 
 pub fn pdf_file_looks_valid(path: &Path) -> bool {
-    let Ok(meta) = fs::metadata(path) else {
+    use std::io::Read;
+    let Ok(mut file) = fs::File::open(path) else {
         return false;
     };
-    if !meta.is_file() || meta.len() < 5 {
-        return false;
-    }
-    let Ok(bytes) = fs::read(path) else {
+    let mut head = [0u8; 8];
+    let Ok(n) = file.read(&mut head) else {
         return false;
     };
-    bytes.starts_with(b"%PDF")
+    n >= 5 && head[..n].starts_with(b"%PDF")
 }
 
 #[derive(Debug, Clone)]
@@ -211,9 +210,11 @@ pub struct PdfInspection {
 
 /// Opens a PDF via Pdfium, ensures it is unencrypted and non-empty, and returns page count + text.
 pub fn inspect_pdf(pdf_path: &Path, extract_text: bool) -> AppResult<PdfInspection> {
+    let pdf_bytes = fs::read(pdf_path)
+        .map_err(|e| AppError::Message(format!("读取 PDF 文件失败：{e}")))?;
     with_pdfium(|pdfium| {
         let doc = pdfium
-            .load_pdf_from_file(pdf_path, None)
+            .load_pdf_from_byte_slice(&pdf_bytes, None)
             .map_err(|e| AppError::Message(format!("打开 PDF 失败（可能已加密或损坏）：{e}")))?;
         let count = doc.pages().len() as usize;
         if count == 0 {
@@ -260,47 +261,69 @@ pub fn append_pdf_to_pngs(
     let max_pages = settings.preview_max_pages.max(1);
     let max_pixels = settings.preview_max_pixels.max(1_000_000);
 
-    let rendered_images: Vec<(usize, image::DynamicImage)> = with_pdfium(|pdfium| {
+    let pdf_bytes = fs::read(pdf_path)
+        .map_err(|e| AppError::Message(format!("读取 PDF 文件失败：{e}")))?;
+    let total = with_pdfium(|pdfium| {
         let doc = pdfium
-            .load_pdf_from_file(pdf_path, None)
+            .load_pdf_from_byte_slice(&pdf_bytes, None)
             .map_err(|e| AppError::Message(format!("读取 PDF 失败：{e}")))?;
-        let total = doc.pages().len() as usize;
-        if base_idx.saturating_add(total).saturating_sub(1) > max_pages {
-            return Err(AppError::Message(format!(
-                "累计渲染页数超过安全上限（{max_pages}）"
-            )));
-        }
-        let mut out = Vec::with_capacity(total);
-        for (idx, page) in doc.pages().iter().enumerate() {
-            let pt_w = page.width().value.max(1.0);
-            let pt_h = page.height().value.max(1.0);
-            let px_w = ((pt_w * 180.0 / 72.0).round() as i32).max(1);
-            let px_h = ((pt_h * 180.0 / 72.0).round() as i32).max(1);
-            if (px_w as u64) * (px_h as u64) > (max_pixels as u64) {
-                return Err(AppError::Message(format!(
-                    "第 {} 页渲染像素（{px_w}x{px_h}）超过安全上限",
-                    idx + 1
-                )));
-            }
-            let config = PdfRenderConfig::new()
-                .set_target_width(px_w)
-                .set_maximum_height(px_h + 4)
-                .render_form_data(true)
-                .render_annotations(true);
-            let bitmap = page
-                .render_with_config(&config)
-                .map_err(|e| AppError::Message(format!("渲染第 {} 页失败：{e}", idx + 1)))?;
-            out.push((base_idx + idx, bitmap.as_image()));
-        }
-        Ok(out)
+        Ok(doc.pages().len() as usize)
     })?;
-
-    let count = rendered_images.len();
-    for (page_no, dyn_img) in &rendered_images {
-        let target = artifacts.page_png(*page_no);
-        save_dynamic_image_on_white(dyn_img, &target)?;
+    if total == 0 {
+        return Ok(0);
     }
-    Ok(count)
+    if base_idx.saturating_add(total).saturating_sub(1) > max_pages {
+        return Err(AppError::Message(format!(
+            "累计渲染页数超过安全上限（{max_pages}）"
+        )));
+    }
+
+    // Stream rendering in small 4-page batches so 150-300 page bundles never hold gigabytes
+    // of uncompressed RGBA bitmaps in RAM simultaneously, while avoiding long holds on SAFE_PDFIUM.
+    const BATCH_SIZE: usize = 4;
+    let mut start = 0usize;
+    while start < total {
+        let end = (start + BATCH_SIZE).min(total);
+        let batch_images: Vec<(usize, image::DynamicImage)> = with_pdfium(|pdfium| {
+            let doc = pdfium
+                .load_pdf_from_byte_slice(&pdf_bytes, None)
+                .map_err(|e| AppError::Message(format!("读取 PDF 失败：{e}")))?;
+            let mut batch = Vec::with_capacity(end - start);
+            for idx in start..end {
+                let page = doc
+                    .pages()
+                    .get(idx as u16)
+                    .map_err(|e| AppError::Message(format!("访问第 {} 页失败：{e}", idx + 1)))?;
+                let pt_w = page.width().value.max(1.0);
+                let pt_h = page.height().value.max(1.0);
+                let px_w = ((pt_w * 180.0 / 72.0).round() as i32).max(1);
+                let px_h = ((pt_h * 180.0 / 72.0).round() as i32).max(1);
+                if (px_w as u64) * (px_h as u64) > (max_pixels as u64) {
+                    return Err(AppError::Message(format!(
+                        "第 {} 页渲染像素（{px_w}x{px_h}）超过安全上限",
+                        idx + 1
+                    )));
+                }
+                let config = PdfRenderConfig::new()
+                    .set_target_width(px_w)
+                    .set_maximum_height(px_h + 4)
+                    .render_form_data(true)
+                    .render_annotations(true);
+                let bitmap = page
+                    .render_with_config(&config)
+                    .map_err(|e| AppError::Message(format!("渲染第 {} 页失败：{e}", idx + 1)))?;
+                batch.push((base_idx + idx, bitmap.as_image()));
+            }
+            Ok(batch)
+        })?;
+
+        for (page_no, dyn_img) in batch_images {
+            let target = artifacts.page_png(page_no);
+            save_dynamic_image_on_white(&dyn_img, &target)?;
+        }
+        start = end;
+    }
+    Ok(total)
 }
 
 fn append_raster_page_to_doc(
@@ -435,10 +458,21 @@ pub fn images_to_print_pdf(image_paths: &[PathBuf], pdf_path: &Path) -> AppResul
     });
     doc.trailer.set("Root", catalog_id);
 
-    let tmp = pdf_path.with_extension("pdf.tmp");
-    doc.save(&tmp)
-        .map_err(|e| AppError::Message(format!("写入打印 PDF 失败：{e}")))?;
-    fs::rename(&tmp, pdf_path)?;
+    let tmp = pdf_path.with_file_name(format!(
+        ".{}.tmp",
+        pdf_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("merged.pdf")
+    ));
+    if let Err(e) = doc.save(&tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(AppError::Message(format!("写入打印 PDF 失败：{e}")));
+    }
+    if let Err(e) = replace_file_atomic(&tmp, pdf_path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(AppError::Io(e));
+    }
     Ok(())
 }
 
@@ -497,9 +531,21 @@ pub fn convert_originals_to_pdf(
             .map_err(|e| AppError::Message(format!("序列化 PDF 失败：{e}")))
     })?;
 
-    let tmp = pdf_path.with_extension("pdf.tmp");
-    fs::write(&tmp, &merged_bytes)?;
-    fs::rename(&tmp, pdf_path)?;
+    let tmp = pdf_path.with_file_name(format!(
+        ".{}.tmp",
+        pdf_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("merged.pdf")
+    ));
+    if let Err(e) = fs::write(&tmp, &merged_bytes) {
+        let _ = fs::remove_file(&tmp);
+        return Err(AppError::Io(e));
+    }
+    if let Err(e) = replace_file_atomic(&tmp, pdf_path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(AppError::Io(e));
+    }
     Ok(())
 }
 
@@ -563,8 +609,21 @@ pub fn attach_pdf_outlines(pdf_path: &Path, toc: &[(String, usize)]) -> AppResul
     if let Ok(catalog) = doc.catalog_mut() {
         catalog.set("Outlines", outlines_id);
     }
-    doc.save(pdf_path)
-        .map_err(|e| AppError::Message(format!("保存 PDF 书签失败：{e}")))?;
+    let tmp = pdf_path.with_file_name(format!(
+        ".{}.outline.tmp",
+        pdf_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("merged.pdf")
+    ));
+    if let Err(e) = doc.save(&tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(AppError::Message(format!("保存 PDF 书签失败：{e}")));
+    }
+    if let Err(e) = replace_file_atomic(&tmp, pdf_path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(AppError::Io(e));
+    }
     Ok(())
 }
 

@@ -14,7 +14,8 @@ use crate::crawler::client::StzyHttpClient;
 use crate::crawler::tags::TagCatalog;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    AppSettings, CrawlCombo, CrawlFilters, CrawlStats, ResourceRecord, ResourceStatus,
+    AppSettings, CrawlCombo, CrawlFilters, CrawlStats, DynamicLimiter, ResourceRecord,
+    ResourceStatus,
 };
 use crate::proxy::ProxyPool;
 use crate::store::SqliteStore;
@@ -29,8 +30,8 @@ pub struct CrawlRunner {
     pub proxy_pool: Arc<ProxyPool>,
     pub client: StzyHttpClient,
     pub api: StzyCrawlerApi,
-    pub download_semaphore: Arc<Semaphore>,
-    pub convert_semaphore: Arc<Semaphore>,
+    pub download_semaphore: DynamicLimiter,
+    pub convert_semaphore: DynamicLimiter,
     pub completed_resource_ids: Arc<HashSet<String>>,
     pub stats: Arc<Mutex<CrawlStats>>,
     on_log: Arc<dyn Fn(String) + Send + Sync>,
@@ -46,8 +47,8 @@ impl CrawlRunner {
         filters: CrawlFilters,
         store: SqliteStore,
         cancel: CancellationToken,
-        download_semaphore: Arc<Semaphore>,
-        convert_semaphore: Arc<Semaphore>,
+        download_semaphore: DynamicLimiter,
+        convert_semaphore: DynamicLimiter,
         completed_resource_ids: HashSet<String>,
         on_log: Arc<dyn Fn(String) + Send + Sync>,
         on_record: Arc<dyn Fn(ResourceRecord) + Send + Sync>,
@@ -88,7 +89,7 @@ impl CrawlRunner {
     }
 
     pub async fn download_workers(&self) -> usize {
-        let configured = self.settings.max_download_workers.clamp(1, 32);
+        let configured = self.download_semaphore.limit().clamp(1, 32);
         if self.proxy_pool.proxy_mode() == "off" {
             return configured;
         }
@@ -183,7 +184,16 @@ impl CrawlRunner {
                     .is_combo_completed(scope, &combo, &self.settings.subject_code)
                     .unwrap_or(false)
             {
-                (self.on_log)("组合曾经跑过，本次继续检查新增或缺失资源".to_string());
+                let names = combo.names();
+                (self.on_log)(format!(
+                    "续跑跳过已完成组合：{} / {} / {}",
+                    names.get("province").map(String::as_str).unwrap_or(""),
+                    names.get("grade").map(String::as_str).unwrap_or(""),
+                    names.get("scene").map(String::as_str).unwrap_or(""),
+                ));
+                self.stats.lock().completed_combos += 1;
+                self.emit_progress();
+                continue;
             }
 
             match self.crawl_combo(&combo).await? {
@@ -658,9 +668,11 @@ impl CrawlRunner {
                         let mut st = self.stats.lock();
                         st.images_downloaded += result.images_added;
                         st.paid_skipped += result.paid_unavailable;
-                        if !matches!(
+                        if result.status == ResourceStatus::Completed {
+                            st.resources_completed += 1;
+                        } else if !matches!(
                             result.status,
-                            ResourceStatus::Completed | ResourceStatus::PaidUnavailable
+                            ResourceStatus::PaidUnavailable | ResourceStatus::SkippedPaid
                         ) {
                             st.preview_limited += 1;
                         }
@@ -688,7 +700,7 @@ impl CrawlRunner {
         }
 
         if !interrupted {
-            self.stats.lock().resources_completed += 1;
+            self.stats.lock().resources_processed += 1;
         }
         (self.on_record)(record.clone());
         if record.status == ResourceStatus::Completed {
@@ -709,8 +721,9 @@ impl CrawlRunner {
             Some(self.on_proxy.clone()),
         );
         let api = StzyCrawlerApi::new(client.clone());
-        DownloadService::new(
+        DownloadService::new_with_paid_policy(
             self.settings.clone(),
+            self.filters.download_paid,
             client,
             api,
             Some(self.convert_semaphore.clone()),
@@ -722,6 +735,7 @@ impl CrawlRunner {
         {
             let mut st = self.stats.lock();
             st.resources_seen += 1;
+            st.resources_processed += 1;
             st.resources_completed += 1;
             st.current_resource_name = record.resource_name.clone();
         }
@@ -736,7 +750,7 @@ impl CrawlRunner {
         {
             let mut st = self.stats.lock();
             st.resources_seen += 1;
-            st.resources_completed += 1;
+            st.resources_processed += 1;
             st.filtered_skipped += 1;
             st.current_resource_name = resource_name.to_string();
         }
@@ -747,12 +761,43 @@ impl CrawlRunner {
         if combo.province.code.is_empty() {
             return true;
         }
+        if let Some(code) = item
+            .get("provinceCode")
+            .and_then(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| v.as_i64().map(|n| n.to_string()))
+            })
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return code == combo.province.code.trim();
+        }
+        let norm = |s: &str| -> String {
+            let mut t = s.trim().to_string();
+            for suffix in [
+                "壮族自治区",
+                "回族自治区",
+                "维吾尔自治区",
+                "特别行政区",
+                "自治区",
+                "省",
+                "市",
+            ] {
+                if let Some(stripped) = t.strip_suffix(suffix) {
+                    if !stripped.is_empty() {
+                        t = stripped.to_string();
+                        break;
+                    }
+                }
+            }
+            t
+        };
         let actual = item
             .get("provinceName")
             .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim();
-        actual == combo.province.name
+            .unwrap_or("");
+        norm(actual) == norm(&combo.province.name)
     }
 
     fn emit_progress(&self) {

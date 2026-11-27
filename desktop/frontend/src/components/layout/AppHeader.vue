@@ -12,7 +12,7 @@ import {
   TriangleAlert,
   Users,
 } from 'lucide-vue-next'
-import { openExternalUrl, openLocalPath } from '../../api/local'
+import { openLocalPath } from '../../api/local'
 import { useRuntime } from '../../composables/useRuntime'
 import { useTasks } from '../../composables/useTasks'
 import { useToast } from '../../composables/useToast'
@@ -21,7 +21,7 @@ import { useUpdater } from '../../composables/useUpdater'
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
-const { hasOfficeCore, libreOfficeUrl } = useRuntime()
+const { hasOfficeCore, openOfficeDialog } = useRuntime()
 const { tasks } = useTasks()
 const { currentVersion, hasUpdate, updateInfo, checking, checkForUpdates, openUpdateDialog } = useUpdater()
 
@@ -47,11 +47,7 @@ async function handleCoreClick() {
     router.push('/settings')
     return
   }
-  try {
-    await openExternalUrl(libreOfficeUrl.value)
-  } catch (error) {
-    toast.error(error, '打开下载链接失败')
-  }
+  openOfficeDialog()
 }
 </script>
 
@@ -114,7 +110,7 @@ async function handleCoreClick() {
       >
         <CheckCircle2 v-if="hasOfficeCore" :size="14" class="core-ok-icon" />
         <TriangleAlert v-else :size="14" class="core-warn-icon" />
-        <span>{{ hasOfficeCore ? '文档转换核心已就绪' : '未安装 LibreOffice · 点击下载' }}</span>
+        <span>{{ hasOfficeCore ? '文档转换核心已就绪' : '未安装 LibreOffice · 点击配置' }}</span>
       </button>
     </div>
   </aside>

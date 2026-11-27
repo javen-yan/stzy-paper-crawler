@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use rand::Rng;
 use serde_json::Value;
-use tokio::sync::Semaphore;
 
 use crate::converter::office::render_source_to_pages_and_pdf;
 use crate::converter::pdf::{convert_originals_to_pdf, convert_pdf_to_pngs, pdf_file_looks_valid};
@@ -19,13 +18,15 @@ use crate::converter::svg::{
 };
 use crate::crawler::client::StzyHttpClient;
 use crate::error::{AppError, AppResult};
-use crate::models::{AppSettings, ResourceArtifacts, ResourceRecord};
+use crate::models::{
+    replace_file_atomic, AppSettings, DynamicLimiter, ResourceArtifacts, ResourceRecord,
+};
 
 #[derive(Clone)]
 pub struct DocumentConverter {
     pub settings: AppSettings,
     pub client: StzyHttpClient,
-    pub convert_semaphore: Arc<Semaphore>,
+    pub convert_semaphore: DynamicLimiter,
     on_log: Arc<dyn Fn(String) + Send + Sync>,
 }
 
@@ -33,12 +34,11 @@ impl DocumentConverter {
     pub fn new(
         settings: AppSettings,
         client: StzyHttpClient,
-        convert_semaphore: Option<Arc<Semaphore>>,
+        convert_semaphore: Option<DynamicLimiter>,
         on_log: Option<Arc<dyn Fn(String) + Send + Sync>>,
     ) -> Self {
-        let sem = convert_semaphore.unwrap_or_else(|| {
-            Arc::new(Semaphore::new(settings.max_convert_workers.max(1)))
-        });
+        let sem = convert_semaphore
+            .unwrap_or_else(|| DynamicLimiter::new(settings.max_convert_workers.max(1)));
         Self {
             settings,
             client,
@@ -175,8 +175,8 @@ impl DocumentConverter {
 
         let (count, report) = tokio::task::spawn_blocking(move || -> AppResult<(usize, Value)> {
             let staging_dir = tempfile::Builder::new()
-                .prefix(".convert-")
-                .tempdir_in(&dir_buf)?;
+                .prefix("stzy-convert-")
+                .tempdir()?;
             let staging = staging_dir.path();
             let converted_pdf = staging.join("converted.pdf");
             let (rendered_count, report) = render_source_to_pages_and_pdf(
@@ -199,31 +199,33 @@ impl DocumentConverter {
 
             artifacts.publish_pdf(&converted_pdf)?;
 
-            // Atomically swap 练习*.png pages & publish any companion audio files
-            if let Ok(entries) = fs::read_dir(&dir_buf) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if is_practice_png(&p) {
-                        let _ = fs::remove_file(&p);
-                    }
-                }
-            }
+            // Publish new 练习1..N.png pages first, then remove stale >N pages so partial errors never wipe existing pages
             if let Ok(entries) = fs::read_dir(staging) {
                 for entry in entries.flatten() {
                     let p = entry.path();
                     if is_practice_png(&p) {
                         if let Some(name) = p.file_name() {
-                            fs::rename(&p, dir_buf.join(name))?;
+                            replace_file_atomic(&p, &dir_buf.join(name))?;
                         }
                     } else if let Some(name_str) = p.file_name().and_then(|s| s.to_str()) {
                         if let Some(clean_audio) = name_str.strip_prefix("companion_") {
-                            let _ = fs::rename(&p, dir_buf.join(clean_audio));
+                            let _ = replace_file_atomic(&p, &dir_buf.join(clean_audio));
+                        }
+                    }
+                }
+            }
+            if let Ok(entries) = fs::read_dir(&dir_buf) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if let Some(idx) = practice_page_number(&p) {
+                        if idx > rendered_count {
+                            let _ = fs::remove_file(&p);
                         }
                     }
                 }
             }
             let _ = fs::remove_file(dir_buf.join("conversion-report.json"));
-            fs::rename(&report_path, dir_buf.join(".conversion-report.json"))?;
+            replace_file_atomic(&report_path, &dir_buf.join(".conversion-report.json"))?;
             Ok((rendered_count, report))
         })
         .await
@@ -333,14 +335,19 @@ impl DocumentConverter {
     }
 
     pub fn original_file_looks_valid(path: &Path, url: &str) -> bool {
-        if !file_non_empty(path) {
-            return false;
-        }
-        let Ok(bytes) = fs::read(path) else {
+        use std::io::Read;
+        let Ok(mut file) = fs::File::open(path) else {
             return false;
         };
-        let head_len = bytes.len().min(4096);
-        let head_str = String::from_utf8_lossy(&bytes[..head_len]).to_lowercase();
+        let mut head = [0u8; 4096];
+        let Ok(n) = file.read(&mut head) else {
+            return false;
+        };
+        if n == 0 {
+            return false;
+        }
+        let slice = &head[..n];
+        let head_str = String::from_utf8_lossy(slice).to_lowercase();
         if head_str.contains("<html") || head_str.contains("<!doctype html") {
             return false;
         }
@@ -357,7 +364,7 @@ impl DocumentConverter {
                     .to_lowercase()
             });
         match suffix.as_str() {
-            "pdf" => bytes.starts_with(b"%PDF"),
+            "pdf" => slice.starts_with(b"%PDF"),
             "svg" => head_str.contains("<svg"),
             _ => true,
         }
@@ -383,10 +390,13 @@ fn file_non_empty(path: &Path) -> bool {
 }
 
 fn is_practice_png(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-        return false;
-    };
-    name.starts_with("练习") && name.ends_with(".png")
+    practice_page_number(path).is_some()
+}
+
+fn practice_page_number(path: &Path) -> Option<usize> {
+    let name = path.file_name().and_then(|s| s.to_str())?;
+    let num_str = name.strip_prefix("练习")?.strip_suffix(".png")?;
+    num_str.parse::<usize>().ok()
 }
 
 #[cfg(test)]

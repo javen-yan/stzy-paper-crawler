@@ -6,15 +6,15 @@ const props = defineProps<{ status: string; label?: string }>()
 const tone = computed(() => {
   if (props.status === 'completed') return 'success'
   if (['failed', 'auth_expired', 'cancelled', 'interrupted'].includes(props.status)) return 'danger'
-  if (['paused', 'pausing', 'partial_completed'].includes(props.status)) return 'warning'
-  if (props.status === 'running') return 'active'
+  if (['paused', 'pausing', 'partial_completed', 'partial', 'paid_unavailable', 'skipped_paid', 'preview_limited'].includes(props.status)) return 'warning'
+  if (['running', 'downloading'].includes(props.status)) return 'active'
   return 'idle'
 })
 </script>
 
 <template>
   <span class="status-tag" :data-tone="tone">
-    <span class="status-dot" :class="{ pulse: status === 'running' }" aria-hidden="true" />
+    <span class="status-dot" :class="{ pulse: status === 'running' || status === 'downloading' }" aria-hidden="true" />
     {{ label || status }}
   </span>
 </template>

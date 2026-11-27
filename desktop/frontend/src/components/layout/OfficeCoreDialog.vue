@@ -9,14 +9,14 @@ import { useToast } from '../../composables/useToast'
 const DOWNLOAD_URL = 'https://www.libreoffice.org/download/'
 
 const toast = useToast()
-const { runtime, hasOfficeCore, libreOfficeUrl, loadRuntime } = useRuntime()
+const { runtime, hasOfficeCore, officeDialogDismissed, libreOfficeUrl, loadRuntime, dismissOfficeDialog } = useRuntime()
 
 const checking = ref(false)
 const showCustomPath = ref(false)
 const customSofficePath = ref('')
 const savingPath = ref(false)
 
-const visible = computed(() => Boolean(runtime.value && !hasOfficeCore.value))
+const visible = computed(() => Boolean(runtime.value && !hasOfficeCore.value && !officeDialogDismissed.value))
 const targetUrl = computed(() => libreOfficeUrl.value || DOWNLOAD_URL)
 
 async function openDownloadPage() {
@@ -88,10 +88,11 @@ async function saveCustomPath() {
     :model-value="visible"
     width="min(560px, 94vw)"
     :close-on-click-modal="false"
-    :close-on-press-escape="false"
-    :show-close="false"
+    :close-on-press-escape="true"
+    :show-close="true"
     align-center
     class="office-core-dialog"
+    @close="dismissOfficeDialog"
   >
     <template #header>
       <div class="core-dialog-title">
@@ -154,6 +155,9 @@ async function saveCustomPath() {
 
     <template #footer>
       <div class="core-dialog-footer">
+        <el-button size="large" text @click="dismissOfficeDialog">
+          稍后配置（先下载 PDF 与预览图）
+        </el-button>
         <el-button size="large" :loading="checking" @click="recheckCore">
           <RefreshCw :size="15" style="margin-right: 6px" />我已安装，重新检测
         </el-button>

@@ -288,7 +288,19 @@ pub fn substitutes_for(canonical_key: &str) -> &'static [&'static str] {
 /// Strips common weight/encoding suffixes (e.g. `Calibri Light` -> `calibri`, `方正小标宋_GBK` -> `方正小标宋`)
 /// so variant font names can match known base families before falling back to style heuristics.
 pub fn base_font_key(raw: &str) -> String {
-    let mut cleaned = raw.trim().trim_start_matches('@').to_lowercase();
+    let trimmed = raw.trim().trim_start_matches('@');
+    // Strip 6-letter uppercase PDF subset prefix like `HLEOCO+KaiTi`
+    let without_subset = if trimmed.len() > 7
+        && trimmed.as_bytes()[6] == b'+'
+        && trimmed.as_bytes()[..6]
+            .iter()
+            .all(|b| b.is_ascii_uppercase())
+    {
+        &trimmed[7..]
+    } else {
+        trimmed
+    };
+    let mut cleaned = without_subset.to_lowercase();
     for suffix in [
         "_gb2312",
         "_gbk",
@@ -551,22 +563,43 @@ pub fn font_directories(settings: &AppSettings) -> AppResult<Vec<PathBuf>> {
     Ok(dirs)
 }
 
-/// Loads a `fontdb::Database` containing system fonts + configured licensed/managed directories.
-pub fn build_font_database(settings: &AppSettings) -> fontdb::Database {
-    let mut db = fontdb::Database::new();
-    db.load_system_fonts();
-    if let Ok(dirs) = font_directories(settings) {
-        for dir in dirs {
-            if dir.is_dir() {
-                db.load_fonts_dir(&dir);
+/// Cached `Arc<fontdb::Database>` keyed by resolved font directories so rendering multi-page SVGs
+/// does not rescan hundreds of MB of system fonts on every single page.
+pub fn build_font_database_arc(settings: &AppSettings) -> std::sync::Arc<fontdb::Database> {
+    type CacheEntry = (Vec<PathBuf>, std::sync::Arc<fontdb::Database>);
+    static FONT_DB_CACHE: std::sync::OnceLock<parking_lot::Mutex<Option<CacheEntry>>> =
+        std::sync::OnceLock::new();
+
+    let dirs = font_directories(settings).unwrap_or_default();
+    let cache = FONT_DB_CACHE.get_or_init(|| parking_lot::Mutex::new(None));
+    {
+        let guard = cache.lock();
+        if let Some((cached_dirs, cached_db)) = guard.as_ref() {
+            if *cached_dirs == dirs {
+                return cached_db.clone();
             }
         }
     }
-    db
+
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    for dir in &dirs {
+        if dir.is_dir() {
+            db.load_fonts_dir(dir);
+        }
+    }
+    let arc_db = std::sync::Arc::new(db);
+    *cache.lock() = Some((dirs, arc_db.clone()));
+    arc_db
+}
+
+/// Loads a `fontdb::Database` containing system fonts + configured licensed/managed directories.
+pub fn build_font_database(settings: &AppSettings) -> fontdb::Database {
+    (*build_font_database_arc(settings)).clone()
 }
 
 pub fn available_font_keys(settings: &AppSettings) -> BTreeSet<String> {
-    let db = build_font_database(settings);
+    let db = build_font_database_arc(settings);
     let mut keys = BTreeSet::new();
     for face in db.faces() {
         for (family, _) in &face.families {

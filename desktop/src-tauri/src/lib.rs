@@ -66,7 +66,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .register_uri_scheme_protocol("stzyfile", protocol::handle_stzyfile_request)
+        .register_asynchronous_uri_scheme_protocol("stzyfile", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let resp = protocol::handle_stzyfile_request_with_app(&app, request);
+                responder.respond(resp);
+            });
+        })
         .setup(|app| {
             let handle = app.handle().clone();
             if let Ok(res_dir) = app.path().resource_dir() {
@@ -109,7 +115,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    if !tray::is_exiting() {
+                    if !tray::is_exiting() && tray::is_tray_ready(window.app_handle()) {
                         api.prevent_close();
                         tray::hide_window_to_tray(window);
                     }
@@ -154,16 +160,23 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building PaperDesk application")
         .run(|app_handle, event| {
-            #[cfg(not(target_os = "macos"))]
-            let _ = (app_handle, &event);
-
-            #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = event {
-                if let Some(win) = app_handle.get_webview_window("main") {
-                    if !win.is_visible().unwrap_or(true) || win.is_minimized().unwrap_or(false) {
-                        tray::show_main_window(app_handle);
+            match event {
+                tauri::RunEvent::Exit => {
+                    tray::mark_exiting();
+                    if let Some(state) = app_handle.try_state::<AppState>() {
+                        let _ = state.task_manager.pause_all_active_tasks();
                     }
                 }
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { .. } => {
+                    if let Some(win) = app_handle.get_webview_window("main") {
+                        if !win.is_visible().unwrap_or(true) || win.is_minimized().unwrap_or(false)
+                        {
+                            tray::show_main_window(app_handle);
+                        }
+                    }
+                }
+                _ => {}
             }
         });
 }

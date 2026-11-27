@@ -12,13 +12,13 @@ const total = computed(() => {
 })
 
 const done = computed(() => {
-  if (props.task.mode === 'estimate') return Number(stats.value.completed_combos || 0)
-  return Number(stats.value.resources_processed || stats.value.resources_completed || 0)
+  if (props.task.mode === 'estimate') return Number(stats.value.completed_combos ?? 0)
+  return Number(stats.value.resources_processed ?? stats.value.resources_completed ?? 0)
 })
 
-const completed = computed(() => Number(stats.value.resources_completed || 0))
-const failed = computed(() => Number(stats.value.failed || 0))
-const filtered = computed(() => Number(stats.value.filtered_skipped || 0))
+const completed = computed(() => Number(stats.value.resources_success ?? stats.value.resources_completed ?? 0))
+const failed = computed(() => Number(stats.value.failed ?? 0))
+const filtered = computed(() => Number(stats.value.filtered_skipped ?? 0))
 
 const percentage = computed(() => {
   if (!total.value) return props.task.status === 'completed' ? 100 : 0

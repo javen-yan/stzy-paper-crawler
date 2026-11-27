@@ -2,15 +2,15 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
 use tauri::http::{header, Request, Response, StatusCode};
-use tauri::{Manager, Runtime, UriSchemeContext};
+use tauri::{Manager, Runtime};
 use url::Url;
 
 use crate::commands::AppState;
 
 /// Handles custom `stzyfile://` (macOS/Linux) / `http://stzyfile.localhost/` (Windows) requests
 /// for inline image and PDF preview inside the WebView without running an external HTTP server.
-pub fn handle_stzyfile_request<R: Runtime>(
-    ctx: UriSchemeContext<'_, R>,
+pub fn handle_stzyfile_request_with_app<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
     request: Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
     if request.method() == tauri::http::Method::OPTIONS {
@@ -22,8 +22,12 @@ pub fn handle_stzyfile_request<R: Runtime>(
             .body(Vec::new())
             .unwrap_or_default();
     }
+    let is_head = request.method() == tauri::http::Method::HEAD;
+    if !is_head && request.method() != tauri::http::Method::GET {
+        return plain_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed");
+    }
 
-    let Some(state) = ctx.app_handle().try_state::<AppState>() else {
+    let Some(state) = app_handle.try_state::<AppState>() else {
         return plain_error(StatusCode::SERVICE_UNAVAILABLE, "Application state not ready");
     };
 
@@ -93,29 +97,58 @@ pub fn handle_stzyfile_request<R: Runtime>(
         "inline"
     };
 
+    if is_head {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, &mime_type)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(header::CONTENT_LENGTH, total_len.to_string())
+            .header(header::CONTENT_DISPOSITION, disposition)
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header("X-Content-Type-Options", "nosniff")
+            .body(Vec::new())
+            .unwrap_or_default();
+    }
+
     // Support HTTP Range requests so WebView built-in PDF viewers stream smoothly
     if let Some(range_hdr) = request
         .headers()
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok())
     {
-        if let Some((start, end)) = parse_byte_range(range_hdr, total_len) {
-            let chunk_len = (end - start + 1) as usize;
-            let mut buf = vec![0u8; chunk_len];
-            if file.seek(SeekFrom::Start(start)).is_ok() && file.read_exact(&mut buf).is_ok() {
+        match parse_byte_range(range_hdr, total_len) {
+            Some((start, end)) => {
+                // Cap open-ended streaming chunks at 8 MB per slice for smooth memory footprint
+                let capped_end = if range_hdr.trim().ends_with('-') {
+                    end.min(start.saturating_add(8 * 1024 * 1024 - 1))
+                } else {
+                    end
+                };
+                let chunk_len = (capped_end - start + 1) as usize;
+                let mut buf = vec![0u8; chunk_len];
+                if file.seek(SeekFrom::Start(start)).is_ok() && file.read_exact(&mut buf).is_ok() {
+                    return Response::builder()
+                        .status(StatusCode::PARTIAL_CONTENT)
+                        .header(header::CONTENT_TYPE, &mime_type)
+                        .header(header::ACCEPT_RANGES, "bytes")
+                        .header(
+                            header::CONTENT_RANGE,
+                            format!("bytes {start}-{capped_end}/{total_len}"),
+                        )
+                        .header(header::CONTENT_LENGTH, chunk_len.to_string())
+                        .header(header::CONTENT_DISPOSITION, disposition)
+                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                        .header("X-Content-Type-Options", "nosniff")
+                        .body(buf)
+                        .unwrap_or_default();
+                }
+            }
+            None => {
                 return Response::builder()
-                    .status(StatusCode::PARTIAL_CONTENT)
-                    .header(header::CONTENT_TYPE, &mime_type)
-                    .header(header::ACCEPT_RANGES, "bytes")
-                    .header(
-                        header::CONTENT_RANGE,
-                        format!("bytes {start}-{end}/{total_len}"),
-                    )
-                    .header(header::CONTENT_LENGTH, chunk_len.to_string())
-                    .header(header::CONTENT_DISPOSITION, disposition)
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header(header::CONTENT_RANGE, format!("bytes */{total_len}"))
                     .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .header("X-Content-Type-Options", "nosniff")
-                    .body(buf)
+                    .body(Vec::new())
                     .unwrap_or_default();
             }
         }

@@ -144,6 +144,26 @@ impl ProxyRuntimeRegistry {
         }
     }
 
+    pub fn release_task(&self, task_id: &str) {
+        if task_id.is_empty() {
+            return;
+        }
+        let now = now_unix_secs();
+        let mut items = self.items.lock();
+        for entry in items.values_mut() {
+            if entry.lease_task_id == task_id {
+                entry.lease_task_id.clear();
+                entry.lease_resource_name.clear();
+                entry.leased_at = 0.0;
+                entry.status = if entry.cooldown_until > now {
+                    "冷却中".to_string()
+                } else {
+                    "空闲".to_string()
+                };
+            }
+        }
+    }
+
     pub fn sync_known(
         &self,
         source: &str,
@@ -474,7 +494,8 @@ fn proxies_from_ip_port(payload: &Value) -> Vec<ProxyEndpoint> {
                 .unwrap_or_else(|| "http".to_string())
                 .to_lowercase();
             let scheme = match protocol.as_str() {
-                "1" | "http" | "https" => "http",
+                "1" | "http" => "http",
+                "https" => "https",
                 "2" | "socks5" | "socks" => "socks5",
                 other => other.split("://").next().unwrap_or("http"),
             };
@@ -575,6 +596,54 @@ struct ProxyPoolInner {
     leases: HashMap<String, ProxyLeaseInfo>,
     cursor: usize,
     refilling: bool,
+    next_refill_allowed_at: f64,
+    empty_refill_streak: usize,
+}
+
+pub fn release_task_proxy_leases(task_id: &str) {
+    PROXY_RUNTIME.release_task(task_id);
+}
+
+pub struct ProxyLeaseGuard {
+    pool: Arc<ProxyPool>,
+    proxy: String,
+    settled: bool,
+}
+
+impl ProxyLeaseGuard {
+    pub fn url(&self) -> &str {
+        &self.proxy
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.proxy.is_empty()
+    }
+
+    pub fn mark_success(&mut self) {
+        if !self.settled {
+            self.settled = true;
+            if !self.proxy.is_empty() {
+                self.pool.record_success(&self.proxy);
+            }
+        }
+    }
+
+    pub fn mark_failure(&mut self) {
+        if !self.settled {
+            self.settled = true;
+            if !self.proxy.is_empty() {
+                self.pool.record_failure(&self.proxy);
+            }
+        }
+    }
+}
+
+impl Drop for ProxyLeaseGuard {
+    fn drop(&mut self) {
+        if !self.settled && !self.proxy.is_empty() {
+            self.pool.release_neutral(&self.proxy);
+        }
+    }
 }
 
 /// Async-friendly strict-lease proxy pool for one crawl task.
@@ -629,6 +698,8 @@ impl ProxyPool {
                 leases: HashMap::new(),
                 cursor: 0,
                 refilling: false,
+                next_refill_allowed_at: 0.0,
+                empty_refill_streak: 0,
             }),
             notify: Notify::new(),
             on_event: emitter,
@@ -675,6 +746,18 @@ impl ProxyPool {
         urls.iter()
             .filter(|p| is_proxy_usable(p, &inner, now, min_ttl) && !inner.leases.contains_key(*p))
             .count()
+    }
+
+    pub async fn acquire_lease(
+        self: &Arc<Self>,
+        resource_name: &str,
+    ) -> AppResult<ProxyLeaseGuard> {
+        let proxy = self.acquire_proxy(resource_name).await?;
+        Ok(ProxyLeaseGuard {
+            pool: self.clone(),
+            proxy,
+            settled: false,
+        })
     }
 
     pub async fn acquire_proxy(&self, resource_name: &str) -> AppResult<String> {
@@ -743,6 +826,20 @@ impl ProxyPool {
         None
     }
 
+    pub fn release_neutral(&self, proxy: &str) {
+        if proxy.is_empty() {
+            return;
+        }
+        {
+            let mut inner = self.inner.lock();
+            inner.leases.remove(proxy);
+            let f_cnt = inner.failures.get(proxy).copied().unwrap_or(0);
+            let cd = inner.cooldowns.get(proxy).copied().unwrap_or(0.0);
+            PROXY_RUNTIME.release(proxy, f_cnt, cd);
+        }
+        self.notify.notify_waiters();
+    }
+
     pub fn record_success(&self, proxy: &str) {
         if proxy.is_empty() {
             return;
@@ -753,6 +850,11 @@ impl ProxyPool {
             let mut inner = self.inner.lock();
             if inner.cooldowns.get(proxy).copied().unwrap_or(0.0) > now {
                 inner.leases.remove(proxy);
+                let f_cnt = inner.failures.get(proxy).copied().unwrap_or(0);
+                let cd = inner.cooldowns.get(proxy).copied().unwrap_or(0.0);
+                PROXY_RUNTIME.release(proxy, f_cnt, cd);
+                drop(inner);
+                self.notify.notify_waiters();
                 return;
             }
             had_failure = inner.failures.remove(proxy).is_some();
@@ -823,7 +925,7 @@ impl ProxyPool {
                 .iter()
                 .filter(|p| is_proxy_usable(p, &inner, now, min_ttl))
                 .count();
-            if available >= target || inner.refilling {
+            if available >= target || inner.refilling || now < inner.next_refill_allowed_at {
                 0
             } else {
                 inner.refilling = true;
@@ -837,7 +939,12 @@ impl ProxyPool {
         struct RefillGuard<'a>(&'a Mutex<ProxyPoolInner>);
         impl Drop for RefillGuard<'_> {
             fn drop(&mut self) {
-                self.0.lock().refilling = false;
+                let mut inner = self.0.lock();
+                inner.refilling = false;
+                let min_next = now_unix_secs() + 1.5;
+                if inner.next_refill_allowed_at < min_next {
+                    inner.next_refill_allowed_at = min_next;
+                }
             }
         }
         let _refill_guard = RefillGuard(&self.inner);
@@ -847,7 +954,7 @@ impl ProxyPool {
         let now = now_unix_secs();
         let min_ttl = self.min_ttl_secs();
         let target = self.settings.concurrency.clamp(1, 20);
-        let (added_count, avail_after) = {
+        let (added_count, avail_after, should_log_empty) = {
             let mut inner = self.inner.lock();
             inner.refilling = false;
             let mut added = 0usize;
@@ -865,6 +972,21 @@ impl ProxyPool {
                 inner.api_urls.push(ep.url);
                 added += 1;
             }
+            let log_empty = if added > 0 {
+                inner.empty_refill_streak = 0;
+                inner.next_refill_allowed_at = now + 1.5;
+                false
+            } else {
+                inner.empty_refill_streak = inner.empty_refill_streak.saturating_add(1);
+                let backoff = match inner.empty_refill_streak {
+                    1 => 2.0,
+                    2 => 4.0,
+                    3 => 6.0,
+                    _ => 10.0,
+                };
+                inner.next_refill_allowed_at = now + backoff;
+                inner.empty_refill_streak == 1 || inner.empty_refill_streak % 5 == 0
+            };
             let avail = inner
                 .api_urls
                 .iter()
@@ -877,15 +999,15 @@ impl ProxyPool {
                 &inner.failures,
                 &inner.cooldowns,
             );
-            (added, avail)
+            (added, avail, log_empty)
         };
 
         if added_count > 0 {
             (self.on_event)(format!(
                 "提取接口返回代理：{added_count} 个，可用 {avail_after}/{target}"
             ));
-        } else {
-            (self.on_event)("提取接口暂时没有返回可用代理".to_string());
+        } else if should_log_empty {
+            (self.on_event)("提取接口暂时没有返回可用代理，稍后自动重试".to_string());
         }
         self.notify.notify_waiters();
     }
@@ -1180,5 +1302,14 @@ mod tests {
         assert_eq!(p2_retry, p2);
         pool.record_failure(&p2_retry);
         assert_eq!(pool.available_capacity().await, 0);
+
+        // Verify ProxyLeaseGuard automatically releases lease on drop without penalizing
+        drop(p3);
+        pool.record_success(&p1);
+        {
+            let _guard = pool.acquire_lease("res-drop").await.unwrap();
+            assert_eq!(pool.available_capacity().await, 0);
+        }
+        assert_eq!(pool.available_capacity().await, 1);
     }
 }

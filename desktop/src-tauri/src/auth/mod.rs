@@ -418,8 +418,42 @@ fn find_matching_brace(value: &str, start: usize) -> Option<usize> {
     None
 }
 
+fn normalize_curl_text(value: &str) -> String {
+    let trimmed = value.trim();
+    // Detect Windows `Copy as cURL (cmd)` format (`^\r\n` continuations or `^"` escapes)
+    let is_windows_cmd_curl =
+        trimmed.contains("^\r\n") || trimmed.contains("^\n") || trimmed.contains("^\"");
+    if !is_windows_cmd_curl {
+        return trimmed.replace("\\\r\n", " ").replace("\\\n", " ");
+    }
+
+    let line_joined = trimmed.replace("^\r\n", " ").replace("^\n", " ");
+    let mut out = String::with_capacity(line_joined.len());
+    let mut chars = line_joined.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '^' {
+            if let Some(&next) = chars.peek() {
+                match next {
+                    '^' | '"' | '%' | '&' | '|' | '<' | '>' | '(' | ')' | '{' | '}' | '\'' => {
+                        out.push(chars.next().unwrap());
+                        continue;
+                    }
+                    '\r' | '\n' => {
+                        chars.next();
+                        out.push(' ');
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn parse_curl_import(value: &str) -> AppResult<(BTreeMap<String, String>, String, String, String)> {
-    let normalized = value.replace("\\\r\n", " ").replace("\\\n", " ");
+    let normalized = normalize_curl_text(value);
     let parts = shlex::split(&normalized)
         .ok_or_else(|| AppError::Validation("cURL 格式解析失败，请重新复制完整 cURL".to_string()))?;
     if parts.first().map(String::as_str) != Some("curl") {
@@ -577,5 +611,12 @@ mod tests {
             Some("https://www.stzy.com/layout/paper-lib")
         );
         assert_eq!(account_label_from_auth("", &parsed_fetch.access_token), "13800138000");
+
+        // Windows DevTools `Copy as cURL (cmd)` format (`^\r\n` and `^"` escapes)
+        let win_cmd_curl = "curl ^\"https://qms.stzy.com/matrix/zw-zzw/api/v1/zzw/user/detail^\" ^\r\n  -H ^\"token: eyJhbGciOiJIUzI1NiJ9.eyJuaWNrTmFtZSI6IuadjuWbmyIsImV4cCI6NDA3MDkwODgwMH0.sig^\" ^\r\n  -H ^\"user-agent: WinChrome/130^\"";
+        let parsed_win = parse_auth_import(win_cmd_curl).unwrap();
+        assert_eq!(parsed_win.import_method, "network_curl");
+        assert_eq!(parsed_win.user_agent, "WinChrome/130");
+        assert_eq!(account_label_from_auth("", &parsed_win.access_token), "李四");
     }
 }

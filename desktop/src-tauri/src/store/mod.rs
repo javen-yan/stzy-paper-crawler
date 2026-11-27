@@ -76,7 +76,7 @@ pub struct SqliteStore {
 
 struct AccountPoolState {
     next_index: usize,
-    auth_locks: HashMap<String, Arc<Mutex<()>>>,
+    auth_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl SqliteStore {
@@ -103,15 +103,15 @@ impl SqliteStore {
 
     fn connect(&self) -> AppResult<Connection> {
         let conn = Connection::open(&self.db_path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.busy_timeout(std::time::Duration::from_secs(15))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.busy_timeout(std::time::Duration::from_secs(15))?;
         Ok(conn)
     }
 
     fn init_schema(&self) -> AppResult<()> {
         let conn = self.connect()?;
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS app_kv (
@@ -278,10 +278,16 @@ impl SqliteStore {
                     }
                     if SECRET_SETTING_KEYS.contains(&k.as_str()) {
                         if let Some(s) = v.as_str() {
-                            if let Ok(decrypted) = self.vault.decrypt(s) {
-                                target.insert(k, Value::String(decrypted));
-                                continue;
+                            match self.vault.decrypt(s) {
+                                Ok(decrypted) => {
+                                    target.insert(k, Value::String(decrypted));
+                                }
+                                Err(err) => {
+                                    tracing::warn!("解密配置项 {k} 失败，已回退为空：{err}");
+                                    target.insert(k, Value::String(String::new()));
+                                }
                             }
+                            continue;
                         }
                     }
                     target.insert(k, v);
@@ -336,7 +342,12 @@ impl SqliteStore {
                 }
                 if k == "output_dir" {
                     if let Some(raw_dir) = v.as_str() {
-                        let expanded = expand_tilde(raw_dir.trim());
+                        let trimmed = raw_dir.trim();
+                        if trimmed.is_empty() {
+                            current.remove(k.as_str());
+                            continue;
+                        }
+                        let expanded = expand_tilde(trimmed);
                         ensure_directory(&expanded)?;
                         current.insert(
                             k.clone(),
@@ -380,12 +391,12 @@ impl SqliteStore {
     // Accounts Pool
     // -------------------------------------------------------------------------
 
-    pub fn auth_lock(&self, account_name: &str) -> Arc<Mutex<()>> {
+    pub fn auth_lock(&self, account_name: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut state = self.account_state.lock();
         state
             .auth_locks
             .entry(account_name.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
     }
 
@@ -553,12 +564,17 @@ impl SqliteStore {
     }
 
     pub fn set_account_enabled(&self, name: &str, enabled: bool) -> AppResult<AccountCredential> {
-        let mut account = self
-            .get_account(name)?
-            .ok_or_else(|| AppError::NotFound("Account not found".to_string()))?;
-        account.enabled = enabled;
-        self.write_account_row(&account)?;
-        Ok(account)
+        let conn = self.connect()?;
+        let now = now_iso_seconds();
+        let changed = conn.execute(
+            "UPDATE accounts SET enabled = ?2, updated_at = ?3 WHERE name = ?1",
+            params![name, if enabled { 1 } else { 0 }, now],
+        )?;
+        if changed == 0 {
+            return Err(AppError::NotFound("Account not found".to_string()));
+        }
+        self.get_account(name)?
+            .ok_or_else(|| AppError::NotFound("Account not found".to_string()))
     }
 
     pub fn delete_account(&self, name: &str) -> AppResult<()> {
@@ -593,39 +609,84 @@ impl SqliteStore {
         Ok(Some(candidates[idx].clone()))
     }
 
+    pub fn touch_account_checked(&self, name: &str) -> AppResult<()> {
+        let conn = self.connect()?;
+        let now = now_iso_seconds();
+        conn.execute(
+            "UPDATE accounts SET last_checked_at = ?2, updated_at = ?2 WHERE name = ?1",
+            params![name, now],
+        )?;
+        Ok(())
+    }
+
     pub fn update_account_download_profile(&self, name: &str, info: &Value) -> AppResult<()> {
-        let Some(mut account) = self.get_account(name)? else {
-            return Ok(());
-        };
-        account.user_type = info.get("userType").and_then(value_to_i64);
-        account.rank = info.get("rank").and_then(value_to_i64);
-        account.last_price = info.get("price").and_then(value_to_f64);
-        account.surplus_num = info.get("surplusNum").and_then(value_to_i64);
-        account.last_checked_at = now_iso_seconds();
-        self.write_account_row(&account)
+        let conn = self.connect()?;
+        let now = now_iso_seconds();
+        let user_type = info.get("userType").and_then(value_to_i64);
+        let rank = info.get("rank").and_then(value_to_i64);
+        let last_price = info.get("price").and_then(value_to_f64);
+        let surplus_num = info.get("surplusNum").and_then(value_to_i64);
+        conn.execute(
+            r#"
+            UPDATE accounts
+            SET user_type = COALESCE(?2, user_type),
+                rank = COALESCE(?3, rank),
+                last_price = COALESCE(?4, last_price),
+                surplus_num = COALESCE(?5, surplus_num),
+                last_checked_at = ?6,
+                updated_at = ?6
+            WHERE name = ?1
+            "#,
+            params![name, user_type, rank, last_price, surplus_num, now],
+        )?;
+        Ok(())
     }
 
     pub fn mark_account_success(&self, name: &str) -> AppResult<()> {
-        let Some(mut account) = self.get_account(name)? else {
-            return Ok(());
-        };
-        account.fail_count = 0;
-        account.last_error.clear();
-        account.cooldown_until.clear();
-        self.write_account_row(&account)
+        let conn = self.connect()?;
+        let now = now_iso_seconds();
+        conn.execute(
+            r#"
+            UPDATE accounts
+            SET fail_count = 0,
+                last_error = '',
+                cooldown_until = '',
+                updated_at = ?2
+            WHERE name = ?1
+            "#,
+            params![name, now],
+        )?;
+        Ok(())
     }
 
     pub fn mark_account_failure(&self, name: &str, error: &str) -> AppResult<()> {
-        let Some(mut account) = self.get_account(name)? else {
-            return Ok(());
-        };
-        account.fail_count += 1;
-        account.last_error = error.chars().take(300).collect();
-        let cooldown_secs = (20 * account.fail_count).min(300);
-        account.cooldown_until = (Local::now() + Duration::seconds(cooldown_secs))
+        let conn = self.connect()?;
+        let now = now_iso_seconds();
+        let trimmed_err: String = error.chars().take(300).collect();
+        let current_fails: i64 = conn
+            .query_row(
+                "SELECT fail_count FROM accounts WHERE name = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let next_fails = current_fails.saturating_add(1);
+        let cooldown_secs = (20 * next_fails).min(300);
+        let cooldown_until = (Local::now() + Duration::seconds(cooldown_secs))
             .format("%Y-%m-%dT%H:%M:%S")
             .to_string();
-        self.write_account_row(&account)
+        conn.execute(
+            r#"
+            UPDATE accounts
+            SET fail_count = ?2,
+                last_error = ?3,
+                cooldown_until = ?4,
+                updated_at = ?5
+            WHERE name = ?1
+            "#,
+            params![name, next_fails, trimmed_err, cooldown_until, now],
+        )?;
+        Ok(())
     }
 
     // -------------------------------------------------------------------------
@@ -642,6 +703,17 @@ impl SqliteStore {
                 error = CASE WHEN error = '' THEN '客户端上次退出时任务仍在运行，点击恢复可继续下载' ELSE error END,
                 updated_at = ?1
             WHERE status IN ('running', 'pausing')
+            "#,
+            params![now],
+        )?;
+        conn.execute(
+            r#"
+            UPDATE domain_task_resources
+            SET status = 'pending',
+                error = '',
+                updated_at = ?1
+            WHERE status = 'downloading'
+              AND task_id IN (SELECT id FROM domain_tasks WHERE status = 'interrupted')
             "#,
             params![now],
         )?;

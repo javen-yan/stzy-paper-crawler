@@ -41,9 +41,16 @@ impl OfficeEngine {
     }
 }
 
-/// Auto-detects the best local Office-to-PDF engine (Windows prefers native Word / WPS COM first;
-/// macOS & Linux use LibreOffice headless).
-pub fn detect_office_engine(settings: &AppSettings) -> Option<OfficeEngine> {
+/// Auto-detects all available local Office-to-PDF engines in priority order so Windows can
+/// seamlessly fall back (e.g. Word COM -> WPS COM -> LibreOffice) if one engine fails.
+pub fn detect_office_engines(settings: &AppSettings) -> Vec<OfficeEngine> {
+    let mut engines = Vec::new();
+    let mut push_unique = |eng: OfficeEngine| {
+        if !engines.contains(&eng) {
+            engines.push(eng);
+        }
+    };
+
     let explicit = std::env::var("STZY_SOFFICE_PATH")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -51,20 +58,19 @@ pub fn detect_office_engine(settings: &AppSettings) -> Option<OfficeEngine> {
     if !explicit.trim().is_empty() {
         let p = crate::models::expand_tilde(explicit.trim());
         if p.is_file() {
-            return Some(OfficeEngine::LibreOffice(p));
-        }
-        if let Some(found) = which_binary(explicit.trim()) {
-            return Some(OfficeEngine::LibreOffice(found));
+            push_unique(OfficeEngine::LibreOffice(p));
+        } else if let Some(found) = which_binary(explicit.trim()) {
+            push_unique(OfficeEngine::LibreOffice(found));
         }
     }
 
     #[cfg(target_os = "windows")]
     {
         if windows_progid_exists("Word.Application") {
-            return Some(OfficeEngine::MsWordCom);
+            push_unique(OfficeEngine::MsWordCom);
         }
         if windows_progid_exists("KWPS.Application") || windows_progid_exists("WPS.Application") {
-            return Some(OfficeEngine::WpsCom);
+            push_unique(OfficeEngine::WpsCom);
         }
         let win_candidates = [
             r"C:\Program Files\LibreOffice\program\soffice.exe",
@@ -73,14 +79,14 @@ pub fn detect_office_engine(settings: &AppSettings) -> Option<OfficeEngine> {
         for cand in win_candidates {
             let p = PathBuf::from(cand);
             if p.is_file() {
-                return Some(OfficeEngine::LibreOffice(p));
+                push_unique(OfficeEngine::LibreOffice(p));
             }
         }
     }
 
     for bin in ["soffice", "libreoffice"] {
         if let Some(found) = which_binary(bin) {
-            return Some(OfficeEngine::LibreOffice(found));
+            push_unique(OfficeEngine::LibreOffice(found));
         }
     }
 
@@ -88,11 +94,17 @@ pub fn detect_office_engine(settings: &AppSettings) -> Option<OfficeEngine> {
     {
         let mac_app = PathBuf::from("/Applications/LibreOffice.app/Contents/MacOS/soffice");
         if mac_app.is_file() {
-            return Some(OfficeEngine::LibreOffice(mac_app));
+            push_unique(OfficeEngine::LibreOffice(mac_app));
         }
     }
 
-    None
+    engines
+}
+
+/// Auto-detects the best local Office-to-PDF engine (Windows prefers native Word / WPS COM first;
+/// macOS & Linux use LibreOffice headless).
+pub fn detect_office_engine(settings: &AppSettings) -> Option<OfficeEngine> {
+    detect_office_engines(settings).into_iter().next()
 }
 
 fn which_binary(name: &str) -> Option<PathBuf> {
@@ -150,12 +162,27 @@ pub fn source_kind(path: &Path) -> AppResult<&'static str> {
 
     if slice.starts_with(b"PK\x03\x04") || slice.starts_with(b"PK\x05\x06") {
         let zf = File::open(path)?;
-        if let Ok(archive) = ZipArchive::new(zf) {
-            let names: HashSet<&str> = archive.file_names().collect();
-            if names.contains("[Content_Types].xml") && names.contains("word/document.xml") {
-                return Ok(".docx");
+        match ZipArchive::new(zf) {
+            Ok(archive) => {
+                let names: HashSet<&str> = archive.file_names().collect();
+                if names.contains("[Content_Types].xml") {
+                    if names.contains("word/document.xml") {
+                        return Ok(".docx");
+                    }
+                    if names.contains("xl/workbook.xml") {
+                        return Ok(".xlsx");
+                    }
+                    if names.contains("ppt/presentation.xml") {
+                        return Ok(".pptx");
+                    }
+                }
+                return Ok(".zip");
             }
-            return Ok(".zip");
+            Err(e) => {
+                return Err(AppError::Message(format!(
+                    "压缩包或文档结构已损坏（{e}），原文件已保留"
+                )));
+            }
         }
     }
 
@@ -201,6 +228,29 @@ pub fn source_kind(path: &Path) -> AppResult<&'static str> {
     }
 }
 
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let pid = child.id();
+        let _ = Command::new("taskkill")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .output();
+    }
+    #[cfg(unix)]
+    {
+        let pid = child.id();
+        if pid > 0 {
+            let _ = Command::new("kill")
+                .args(["-9", &format!("-{pid}")])
+                .output();
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn run_command_with_timeout(
     mut cmd: Command,
     timeout: Duration,
@@ -210,28 +260,65 @@ fn run_command_with_timeout(
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     let mut child = cmd
         .spawn()
         .map_err(|e| AppError::Message(format!("启动外部转换进程失败：{e}")))?;
+
+    // Drain stdout/stderr concurrently to avoid deadlocking on Windows' 4 KB pipe buffer,
+    // using bounded recv_timeout so inherited child handles can never hang wait/timeout cleanup.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::sync_channel(1);
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stdout_pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        let _ = stdout_tx.send(buf);
+    });
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stderr_pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        let _ = stderr_tx.send(buf);
+    });
+
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|e| AppError::Message(format!("读取转换输出失败：{e}")));
+            Ok(Some(status)) => {
+                let stdout = stdout_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap_or_default();
+                let stderr = stderr_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap_or_default();
+                return Ok(std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_process_tree(&mut child);
                     return Err(AppError::Message("Word 转换超时，原件已保留".to_string()));
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(80));
             }
-            Err(e) => return Err(AppError::Message(format!("等待转换进程失败：{e}"))),
+            Err(e) => {
+                kill_process_tree(&mut child);
+                return Err(AppError::Message(format!("等待转换进程失败：{e}")));
+            }
         }
     }
 }
@@ -271,134 +358,198 @@ fn stage_profile_fonts(profile_dir: &Path, font_dirs: &[PathBuf]) {
 }
 
 #[cfg(target_os = "windows")]
+static WINDOWS_COM_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+#[cfg(target_os = "windows")]
+fn encode_powershell_utf16le_base64(script: &str) -> String {
+    use base64::Engine;
+    let utf16: Vec<u8> = script
+        .encode_utf16()
+        .flat_map(|u| u.to_le_bytes())
+        .collect();
+    base64::engine::general_purpose::STANDARD.encode(utf16)
+}
+
+#[cfg(target_os = "windows")]
 fn windows_com_convert_to_pdf(
     prog_id: &str,
     source_path: &Path,
     pdf_path: &Path,
     timeout: Duration,
 ) -> AppResult<()> {
+    // Word / WPS COM servers share Normal.dotm and single-instance state; serialize access
+    // so concurrent convert workers never corrupt or kill each other's COM session.
+    let _com_guard = WINDOWS_COM_LOCK.lock();
+
     let src = source_path.to_string_lossy().replace('\'', "''");
     let dst = pdf_path.to_string_lossy().replace('\'', "''");
 
     let script = format!(
-        "$ErrorActionPreference = 'Stop'; \
-         $app = New-Object -ComObject '{prog_id}'; \
-         try {{ \
-           $app.Visible = $false; \
-           $app.DisplayAlerts = 0; \
-           $doc = $app.Documents.Open('{src}', $false, $true); \
-           try {{ \
-             $doc.ExportAsFixedFormat('{dst}', 17); \
-           }} finally {{ \
-             $doc.Close($false); \
-           }} \
-         }} finally {{ \
-           $app.Quit(); \
+        "$ErrorActionPreference = 'Stop'\n\
+         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n\
+         $app = $null\n\
+         $doc = $null\n\
+         try {{\n\
+           $app = New-Object -ComObject '{prog_id}'\n\
+           $app.Visible = $false\n\
+           try {{ $app.DisplayAlerts = 0 }} catch {{}}\n\
+           try {{\n\
+             $doc = $app.Documents.Open('{src}', $false, $true, $false, '__STZY_NO_PASSWORD__')\n\
+           }} catch {{\n\
+             if ($_.Exception.Message -match '参数|argument|parameter|mismatch') {{\n\
+               $doc = $app.Documents.Open('{src}', $false, $true, $false)\n\
+             }} else {{\n\
+               throw\n\
+             }}\n\
+           }}\n\
+           try {{\n\
+             $doc.ExportAsFixedFormat('{dst}', 17)\n\
+           }} catch {{\n\
+             $doc.SaveAs2('{dst}', 17)\n\
+           }}\n\
+         }} finally {{\n\
+           if ($doc -ne $null) {{\n\
+             try {{ $doc.Close($false) }} catch {{}}\n\
+             try {{ [void][System.Runtime.Interopservices.Marshal]::ReleaseComObject($doc) }} catch {{}}\n\
+           }}\n\
+           if ($app -ne $null) {{\n\
+             try {{ $app.Quit() }} catch {{}}\n\
+             try {{ [void][System.Runtime.Interopservices.Marshal]::ReleaseComObject($app) }} catch {{}}\n\
+           }}\n\
          }}"
     );
 
+    let encoded = encode_powershell_utf16le_base64(&script);
     let mut cmd = Command::new("powershell");
-    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        &encoded,
+    ]);
     let out = run_command_with_timeout(cmd, timeout)?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
+        let msg = if err.trim().is_empty() {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        } else {
+            err.trim().to_string()
+        };
         return Err(AppError::Message(format!(
-            "Windows Office COM 转换失败（{}），原件已保留",
-            err.trim()
+            "Windows Office COM 转换失败（{msg}），原件已保留"
         )));
     }
     Ok(())
 }
 
 /// Thin single-pass adapter that delegates `.doc` / `.docx` visual rendering to the best installed
-/// local Office engine (WPS / Word COM on Windows; LibreOffice with full system + bundled fonts on macOS/Linux)
-/// without any XML scraping, online font fetching, or text-extraction gates.
+/// local Office engine (WPS / Word COM with automatic fallback to LibreOffice on Windows;
+/// LibreOffice with full system + bundled fonts on macOS/Linux).
 fn convert_word_to_temp_pdf(
     source: &Path,
     target_pdf: &Path,
     timeout_secs: f64,
     settings: &AppSettings,
 ) -> AppResult<()> {
-    let Some(engine) = detect_office_engine(settings) else {
+    let engines = detect_office_engines(settings);
+    if engines.is_empty() {
         return Err(AppError::Message(
             "未安装 LibreOffice 转换核心，已保存原 Word 文件；安装 LibreOffice 后点击「继续任务」即可生成 PDF"
                 .to_string(),
         ));
-    };
+    }
 
-    let temp_dir = tempfile::Builder::new()
-        .prefix("stzy-office-")
-        .tempdir()?;
-    let work = temp_dir.path();
     let kind = source_kind(source)?;
-    let local_source = work.join(format!("source{kind}"));
-    fs::copy(source, &local_source)?;
-
     let timeout = Duration::from_secs_f64(timeout_secs.max(10.0));
-    let output_pdf = work.join("source.pdf");
+    let mut last_err: Option<AppError> = None;
 
-    match engine {
-        OfficeEngine::LibreOffice(ref soffice) => {
-            let profile = work.join("profile");
-            let dirs = font_directories(settings)?;
-            let aliases = default_common_substitutions(settings);
-            write_libreoffice_registry_xcu(&profile, &aliases)?;
-            stage_profile_fonts(&profile, &dirs);
-            let font_conf = write_fontconfig_xml(work, &dirs, &aliases)?;
-            let profile_uri = Url::from_directory_path(&profile)
-                .or_else(|_| Url::from_file_path(&profile))
-                .map(|u| u.to_string())
-                .unwrap_or_else(|_| format!("file://{}", profile.display()));
+    for engine in engines {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("stzy-office-")
+            .tempdir()?;
+        let work = temp_dir.path();
+        let local_source = work.join(format!("source{kind}"));
+        fs::copy(source, &local_source)?;
+        let output_pdf = work.join("source.pdf");
 
-            let mut cmd = Command::new(soffice);
-            cmd.arg(format!(
-                "-env:UserInstallation={}",
-                profile_uri.trim_end_matches('/')
-            ))
-            .arg("--headless")
-            .arg("--norestore")
-            .arg("--convert-to")
-            .arg("pdf:writer_pdf_Export")
-            .arg("--outdir")
-            .arg(work)
-            .arg(&local_source)
-            .env("FONTCONFIG_FILE", &font_conf);
+        let attempt_res: AppResult<()> = match engine {
+            OfficeEngine::LibreOffice(ref soffice) => {
+                let profile = work.join("profile");
+                let dirs = font_directories(settings)?;
+                let aliases = default_common_substitutions(settings);
+                write_libreoffice_registry_xcu(&profile, &aliases)?;
+                stage_profile_fonts(&profile, &dirs);
+                let font_conf = write_fontconfig_xml(work, &dirs, &aliases)?;
+                let profile_uri = Url::from_directory_path(&profile)
+                    .or_else(|_| Url::from_file_path(&profile))
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|_| format!("file://{}", profile.display()));
 
-            let output = run_command_with_timeout(cmd, timeout)?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(AppError::Message(format!(
-                    "LibreOffice 转换失败（{}），原件已保留",
-                    stderr.trim()
-                )));
-            }
-        }
-        OfficeEngine::MsWordCom | OfficeEngine::WpsCom => {
-            #[cfg(target_os = "windows")]
-            {
-                let prog_id = if matches!(engine, OfficeEngine::MsWordCom) {
-                    "Word.Application"
-                } else if windows_progid_exists("KWPS.Application") {
-                    "KWPS.Application"
+                let mut cmd = Command::new(soffice);
+                cmd.arg(format!(
+                    "-env:UserInstallation={}",
+                    profile_uri.trim_end_matches('/')
+                ))
+                .arg("--headless")
+                .arg("--norestore")
+                .arg("--convert-to")
+                .arg("pdf:writer_pdf_Export")
+                .arg("--outdir")
+                .arg(work)
+                .arg(&local_source)
+                .env("FONTCONFIG_FILE", &font_conf);
+
+                let output = run_command_with_timeout(cmd, timeout)?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    Err(AppError::Message(format!(
+                        "LibreOffice 转换失败（{}），原件已保留",
+                        stderr.trim()
+                    )))
                 } else {
-                    "WPS.Application"
-                };
-                windows_com_convert_to_pdf(prog_id, &local_source, &output_pdf, timeout)?;
+                    Ok(())
+                }
             }
-            #[cfg(not(target_os = "windows"))]
-            {
-                return Err(AppError::Message("当前系统不支持 Windows COM 转换".to_string()));
+            OfficeEngine::MsWordCom | OfficeEngine::WpsCom => {
+                #[cfg(target_os = "windows")]
+                {
+                    let prog_id = if matches!(engine, OfficeEngine::MsWordCom) {
+                        "Word.Application"
+                    } else if windows_progid_exists("KWPS.Application") {
+                        "KWPS.Application"
+                    } else {
+                        "WPS.Application"
+                    };
+                    windows_com_convert_to_pdf(prog_id, &local_source, &output_pdf, timeout)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Err(AppError::Message("当前系统不支持 Windows COM 转换".to_string()))
+                }
+            }
+        };
+
+        match attempt_res {
+            Ok(()) if output_pdf.exists() => {
+                fs::copy(&output_pdf, target_pdf)?;
+                return Ok(());
+            }
+            Ok(()) => {
+                last_err = Some(AppError::Message(
+                    "文档转换失败（可能受密码保护或格式损坏），原文件已保存".to_string(),
+                ));
+            }
+            Err(err) => {
+                last_err = Some(err);
             }
         }
     }
 
-    if !output_pdf.exists() {
-        return Err(AppError::Message(
-            "文档转换失败（可能受密码保护或格式损坏），原文件已保存".to_string(),
-        ));
-    }
-    fs::copy(&output_pdf, target_pdf)?;
-    Ok(())
+    Err(last_err.unwrap_or_else(|| {
+        AppError::Message("文档转换失败（可能受密码保护或格式损坏），原文件已保存".to_string())
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -469,6 +620,26 @@ fn zip_member_role_rank(filename: &str) -> u8 {
         return 2;
     }
 
+    // Check explicit edition tags (`含解析版` / `含答案版` / `答案版` / `解析版`) BEFORE stripping `含答案`
+    for answer_edition in [
+        "含参考答案版",
+        "含答案解析版",
+        "含答案及解析版",
+        "含解析版",
+        "含答案版",
+        "带解析版",
+        "带答案版",
+        "附解析版",
+        "附答案版",
+        "有答案版",
+        "答案版",
+        "解析版",
+    ] {
+        if stem.contains(answer_edition) {
+            return 3;
+        }
+    }
+
     let mut cleaned = stem;
     for combined_tag in [
         "含参考答案",
@@ -498,6 +669,28 @@ fn zip_member_role_rank(filename: &str) -> u8 {
         return 3;
     }
 
+    0
+}
+
+fn zip_entry_effective_role(full_rel_path: &str) -> u8 {
+    let base = full_rel_path.rsplit('/').next().unwrap_or(full_rel_path);
+    let leaf_role = zip_member_role_rank(base);
+    if leaf_role != 0 {
+        return leaf_role;
+    }
+    let lower_base = base.to_lowercase();
+    if lower_base.contains("原卷")
+        || lower_base.contains("学生版")
+        || lower_base.contains("空白卷")
+    {
+        return 0;
+    }
+    for dir_seg in full_rel_path.rsplit('/').skip(1) {
+        let dir_role = zip_member_role_rank(dir_seg);
+        if dir_role != 0 {
+            return dir_role;
+        }
+    }
     0
 }
 
@@ -556,8 +749,8 @@ pub fn unpack_zip_bundle(
     raw_entries.sort_by(|a, b| {
         let base_a = a.1.rsplit('/').next().unwrap_or(&a.1);
         let base_b = b.1.rsplit('/').next().unwrap_or(&b.1);
-        let role_a = zip_member_role_rank(base_a);
-        let role_b = zip_member_role_rank(base_b);
+        let role_a = zip_entry_effective_role(&a.1);
+        let role_b = zip_entry_effective_role(&b.1);
         let rank_a = order_map
             .get(&a.1)
             .or_else(|| order_map.get(base_a))
@@ -576,6 +769,8 @@ pub fn unpack_zip_bundle(
 
     let mut bundle = UnpackedZipBundle::default();
     let mut unsupported_exts = BTreeSet::new();
+    let mut actual_extracted_bytes: u64 = 0;
+    let mut used_audio_names = HashSet::new();
 
     for (idx, norm_name, is_dir) in raw_entries {
         if norm_name.starts_with('/')
@@ -614,28 +809,57 @@ pub fn unpack_zip_bundle(
             ".pdf" | ".doc" | ".docx" | ".png" | ".jpg" | ".jpeg" | ".webp" | ".svg"
         ) {
             let target = directory.join(format!("{:04}{suffix}", bundle.documents.len()));
-            let mut entry = archive
+            let entry = archive
                 .by_index(idx)
                 .map_err(|e| AppError::Message(format!("解压 {clean_rel} 失败：{e}")))?;
+            let remaining = MAX_EXPANDED_BYTES.saturating_sub(actual_extracted_bytes);
+            let mut bounded = entry.take(remaining.saturating_add(1));
             let mut out_file = File::create(&target)?;
-            std::io::copy(&mut entry, &mut out_file)?;
+            let written = std::io::copy(&mut bounded, &mut out_file)?;
             out_file.flush()?;
+            actual_extracted_bytes = actual_extracted_bytes.saturating_add(written);
+            if actual_extracted_bytes > MAX_EXPANDED_BYTES {
+                return Err(AppError::Message(
+                    "压缩包实际解压体积超过 512 MB 安全上限，已保留原压缩包".to_string(),
+                ));
+            }
             bundle.documents.push((clean_rel, target));
         } else if matches!(
             suffix.as_str(),
             ".mp3" | ".wav" | ".m4a" | ".wma" | ".aac" | ".ogg" | ".flac"
         ) {
-            let safe_audio_name =
-                filename.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            let stem_raw = Path::new(filename)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("audio");
+            let clean_stem: String = crate::models::safe_filename(stem_raw, "audio")
+                .chars()
+                .take(48)
+                .collect();
+            let mut safe_audio_name = format!("{clean_stem}{suffix}");
+            let mut dup_idx = 2usize;
+            while used_audio_names.contains(&safe_audio_name.to_lowercase()) {
+                safe_audio_name = format!("{clean_stem}_{dup_idx}{suffix}");
+                dup_idx += 1;
+            }
+            used_audio_names.insert(safe_audio_name.to_lowercase());
+
             let target = directory.join(format!(
                 "audio_{:02}_{safe_audio_name}",
                 bundle.companion_audios.len() + 1
             ));
-            if let Ok(mut entry) = archive.by_index(idx) {
+            if let Ok(entry) = archive.by_index(idx) {
+                let remaining = MAX_EXPANDED_BYTES.saturating_sub(actual_extracted_bytes);
+                let mut bounded = entry.take(remaining.saturating_add(1));
                 if let Ok(mut out_file) = File::create(&target) {
-                    if std::io::copy(&mut entry, &mut out_file).is_ok() {
-                        let _ = out_file.flush();
-                        bundle.companion_audios.push((safe_audio_name, target));
+                    if let Ok(written) = std::io::copy(&mut bounded, &mut out_file) {
+                        actual_extracted_bytes = actual_extracted_bytes.saturating_add(written);
+                        if actual_extracted_bytes <= MAX_EXPANDED_BYTES {
+                            let _ = out_file.flush();
+                            bundle.companion_audios.push((safe_audio_name, target));
+                        } else {
+                            let _ = fs::remove_file(&target);
+                        }
                     }
                 }
             }
@@ -938,6 +1162,11 @@ mod tests {
             3
         );
         assert_eq!(zip_member_role_rank("2026期中数学试卷（解析版）.docx"), 3);
+        assert_eq!(zip_member_role_rank("2026期中数学试卷（含解析版）.docx"), 3);
+        assert_eq!(zip_member_role_rank("2026期中数学试卷（含答案版）.docx"), 3);
+        assert_eq!(zip_entry_effective_role("试题/数学.pdf"), 0);
+        assert_eq!(zip_entry_effective_role("答题卡/数学.pdf"), 1);
+        assert_eq!(zip_entry_effective_role("答案/数学.pdf"), 3);
 
         let gbk_bytes = encoding_rs::GB18030
             .encode("七历史26秋期中监测七年级历史参考答案.pdf")

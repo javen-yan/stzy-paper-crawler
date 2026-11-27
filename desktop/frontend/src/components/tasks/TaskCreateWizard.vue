@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { Calculator, ChevronDown, Download, Plus, RefreshCw, RotateCcw, UserRoundCog } from 'lucide-vue-next'
 import { fetchCatalogs, refreshCatalogs } from '../../api/catalogs'
+import { fetchSettings } from '../../api/settings'
 import { useTasks } from '../../composables/useTasks'
 import { useToast } from '../../composables/useToast'
 import type { Account } from '../../types/accounts'
@@ -31,7 +32,7 @@ const form = reactive<TaskCreateForm>({
   mode: 'crawl',
   studyPhase: '300',
   fileType: '',
-  downloadPaid: false,
+  downloadPaid: true,
   maxPagesPerCombo: undefined,
   subjectLabels: {},
   filterLabels: {},
@@ -142,6 +143,7 @@ function resetFilters(keepPhase = false) {
     form.studyPhase = '300'
     form.title = ''
     form.fileType = ''
+    form.downloadPaid = true
     form.maxPagesPerCombo = undefined
   }
   form.subjects = []
@@ -180,6 +182,7 @@ function currentFilterSignature() {
   return JSON.stringify({
     studyPhase: form.studyPhase,
     fileType: form.fileType,
+    downloadPaid: form.downloadPaid,
     maxPagesPerCombo: form.maxPagesPerCombo || null,
     subjects: [...form.subjects].sort(),
     scenes: [...form.scenes].sort(),
@@ -241,6 +244,12 @@ function openDialog() {
   resetFilters(false)
   showMoreOptions.value = false
   visible.value = true
+  fetchSettings()
+    .then((s) => {
+      if (s.file_type != null) form.fileType = String(s.file_type)
+      if (s.max_pages_per_combo != null) form.maxPagesPerCombo = Number(s.max_pages_per_combo)
+    })
+    .catch(() => {})
   ensureCatalogsLoaded(false)
 }
 
@@ -249,10 +258,11 @@ defineExpose({ openDialog })
 async function runEstimate() {
   if (!canSubmit.value) return
   syncLabelsIntoForm()
+  const requestSignature = currentFilterSignature()
   estimateLoading.value = true
   try {
     estimateResult.value = await estimateTask({ ...form, mode: 'estimate' })
-    estimatedSignature.value = currentFilterSignature()
+    estimatedSignature.value = requestSignature
     toast.success(`预估完成：约 ${numberStat(estimateResult.value?.stats?.resources_seen)} 份试卷`)
   } catch (error) {
     toast.error(error, '预估失败')
@@ -524,6 +534,14 @@ function goAccounts() {
                   placeholder="默认"
                   class="full-width-num"
                 />
+              </div>
+
+              <div class="field-item">
+                <label>付费/VIP 试卷</label>
+                <el-select v-model="form.downloadPaid">
+                  <el-option label="自动尝试下载（推荐）" :value="true" />
+                  <el-option label="跳过付费原文（保护额度）" :value="false" />
+                </el-select>
               </div>
             </div>
           </div>

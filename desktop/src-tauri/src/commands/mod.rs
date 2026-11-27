@@ -536,7 +536,26 @@ pub fn open_local_path(
         )));
     }
 
-    if reveal.unwrap_or(false) && target.is_file() {
+    if !state.artifact_service.is_within_allowed_roots(&target) {
+        return Err(AppError::Validation(
+            "安全限制：仅允许打开下载输出目录内的文件或文件夹".to_string(),
+        ));
+    }
+
+    let dangerous_exec = target
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "exe" | "bat" | "cmd" | "ps1" | "vbs" | "js" | "jse" | "wsf" | "wsh" | "msi"
+                    | "msp" | "com" | "scr" | "hta" | "lnk" | "reg" | "jar" | "sh" | "command"
+                    | "app"
+            )
+        })
+        .unwrap_or(false);
+
+    if (reveal.unwrap_or(false) || dangerous_exec) && target.is_file() {
         app.opener()
             .reveal_item_in_dir(&target)
             .map_err(|e| AppError::Message(format!("在系统文件管理器中显示失败：{e}")))?;

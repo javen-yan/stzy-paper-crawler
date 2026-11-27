@@ -73,13 +73,13 @@ const polling = usePolling(
 
 const overviewStats = computed<TaskOverviewStats>(() => {
   const stats = selectedTask.value?.stats || {}
-  const total = numberStat(stats.resources_total || stats.resources_seen)
-  const processed = numberStat(stats.resources_processed || stats.resources_completed || stats.success)
+  const total = numberStat(stats.resources_total ?? stats.resources_seen)
+  const processed = numberStat(stats.resources_processed ?? stats.resources_completed ?? stats.success)
   const skipped = numberStat(stats.paid_skipped) + numberStat(stats.preview_limited) + numberStat(stats.filtered_skipped)
   return {
     total,
     processed,
-    completed: numberStat(stats.resources_success || stats.resources_completed || stats.success),
+    completed: numberStat(stats.resources_success ?? stats.resources_completed ?? stats.success),
     failed: numberStat(stats.failed),
     pending: Math.max(0, total - processed),
     skipped,
@@ -154,10 +154,10 @@ const isTaskActive = computed(() => ['queued', 'running', 'pausing'].includes(se
 const hasLocalFiles = computed(() =>
   Boolean(
     selectedTask.value?.mode !== 'estimate' &&
-      (overviewStats.value.completed > 0 || ['completed', 'partial_completed'].includes(selectedTask.value?.status || '')),
+      (overviewStats.value.completed > 0 || overviewStats.value.processed > 0),
   ),
 )
-const canCreateZip = computed(() => Boolean(selectedFilePaths.value.length || hasLocalFiles.value))
+const canCreateZip = computed(() => Boolean(selectedFilePaths.value.length || overviewStats.value.completed > 0))
 
 function numberStat(value: unknown) {
   const numeric = Number(value || 0)
@@ -172,18 +172,21 @@ function formatTime(raw?: string) {
 async function refreshAll() {
   await selectTask(props.id, { includeLogs: false, includeResources: false })
   const status = selectedTask.value?.status || ''
-  if (selectedTask.value?.mode === 'estimate') {
-    activeTab.value = 'logs'
-    await refreshLogs(true)
-  } else if (['failed', 'auth_expired', 'interrupted'].includes(status)) {
-    activeTab.value = 'issues'
-    await refreshIssueResources()
-  } else if (['running', 'queued'].includes(status) && overviewStats.value.completed === 0) {
-    activeTab.value = 'resources'
-    await refreshResourcePage()
-  } else {
-    activeTab.value = 'files'
-    await refreshResourcePage()
+  const nextTab =
+    selectedTask.value?.mode === 'estimate'
+      ? 'logs'
+      : ['failed', 'auth_expired', 'interrupted'].includes(status)
+        ? 'issues'
+        : ['running', 'queued'].includes(status) && overviewStats.value.completed === 0
+          ? 'resources'
+          : 'files'
+
+  const tabChanged = activeTab.value !== nextTab
+  activeTab.value = nextTab
+  if (!tabChanged) {
+    if (nextTab === 'logs') await refreshLogs(true)
+    else if (nextTab === 'issues') await refreshIssueResources()
+    else await refreshResourcePage()
   }
 }
 
@@ -374,6 +377,26 @@ onMounted(async () => {
 })
 
 watch(
+  () => props.id,
+  async (nextId, prevId) => {
+    if (!nextId || nextId === prevId) return
+    loading.value = true
+    selectedFilePaths.value = []
+    resourcePage.value = 1
+    resourceStatusFilter.value = ''
+    issueResources.value = []
+    setActiveTaskId(nextId)
+    try {
+      await refreshAll()
+    } catch (error) {
+      toast.error(error, '切换任务详情失败')
+    } finally {
+      loading.value = false
+    }
+  },
+)
+
+watch(
   () => activeTab.value,
   async (tab) => {
     if (tab === 'logs') await refreshLogs(true)
@@ -416,7 +439,7 @@ watch(
             <el-button v-if="canPause" :icon="CirclePause" :loading="actionLoading" @click="handleAction('pause')">暂停</el-button>
             <el-button v-if="canResume" :icon="CirclePlay" type="primary" :loading="actionLoading" @click="handleAction('resume')">继续任务</el-button>
             <el-button v-if="isTaskActive" :icon="XCircle" type="danger" plain :loading="actionLoading" @click="handleAction('cancel')">取消</el-button>
-            <el-button v-if="!selectedTask.archived" :icon="Archive" :loading="actionLoading" @click="handleAction('archive')">归档</el-button>
+            <el-button v-if="!selectedTask.archived && !isTaskActive" :icon="Archive" :loading="actionLoading" @click="handleAction('archive')">归档</el-button>
           </div>
         </div>
       </el-card>
@@ -493,6 +516,7 @@ watch(
             <FileTable
               :key="fileManagerKey"
               :task-id="props.id"
+              selectable
               @selection-change="selectedFilePaths = $event"
             />
           </el-card>
@@ -523,7 +547,7 @@ watch(
 
         <el-tab-pane
           v-if="selectedTask.mode !== 'estimate'"
-          :label="overviewStats.failed > 0 ? `问题诊断 (${overviewStats.failed})` : '问题诊断'"
+          :label="issues.length > 0 ? `问题诊断 (${issues.length})` : '问题诊断'"
           name="issues"
         >
           <el-card shadow="never">

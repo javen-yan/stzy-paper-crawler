@@ -150,8 +150,13 @@ impl AccountScheduler {
                 }
                 diagnostics.push(diag);
             }
-            if let Some(ref acc) = attempt.account {
-                let _ = self.client.store.mark_account_failure(&acc.name, &last_error);
+            let should_penalize_account = last_error.contains("登录态已失效")
+                || last_error.contains("未登录")
+                || last_error.contains("过期");
+            if should_penalize_account {
+                if let Some(ref acc) = attempt.account {
+                    let _ = self.client.store.mark_account_failure(&acc.name, &last_error);
+                }
             }
             (self.on_log)(format!(
                 "账号 {} 下载失败，尝试下一个账号：{last_error}",
